@@ -32,6 +32,10 @@ Work in progress to document my current setup so that I can reproduce it if need
 
 #### Container 101 - deb-docker
 
+Docker containers runtime environment.
+Decided to go with LXC approach in order maximize flexibility of limited RAM.
+In VM I would need to allocate specific amount of memory while in LXC it is more flexible
+
 - **Type**: LXC Container
 - **OS**: Debian-based
 - **Memory**: 4.0GB allocated
@@ -47,6 +51,9 @@ Work in progress to document my current setup so that I can reproduce it if need
 - **Disk**: 8.0GB allocated
 
 #### Container 103 - nginxproxymanager
+
+Tried to configure NGINX Proxy Manager within a Docker container running within `deb-docker`,
+however it always failed to run, so had to resort to using proxmox-helper-scripts.
 
 - **Type**: LXC Container
 - **Memory**: 1.0GB allocated
