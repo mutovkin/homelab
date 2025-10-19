@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "18080:8080"
+    volumes:
+      - /data/searxng/config:/etc/searxng
+      - /data/searxng/data:/var/cache/searxng
+    environment:
+      - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-localhost}/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-}
+    networks:
+      - searxng_network
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  searxng_network:
+    driver: bridge

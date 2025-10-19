@@ -1,0 +1,40 @@
+version: '3'
+# Full guide for this Docker Compose is 
+# https://www.techaddressed.com/tutorials/vaultwarden-docker-compose/
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: always
+    volumes:
+      - /data/vaultwarden:/data
+    ports:
+      - 8086:80
+    environment:
+      WEBSOCKET_ENABLED: "true"
+      DOMAIN: ${DOMAIN}
+      LOGIN_RATELIMIT_MAX_BURST: 10
+      LOGIN_RATELIMIT_SECONDS: 60
+      ADMIN_RATELIMIT_MAX_BURST: 10
+      ADMIN_RATELIMIT_SECONDS: 60
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      SENDS_ALLOWED: "true"
+      EMERGENCY_ACCESS_ALLOWED: "true"
+      WEB_VAULT_ENABLED: "true"
+      SIGNUPS_ALLOWED: "false"
+      SIGNUPS_VERIFY: "true"
+      SIGNUPS_VERIFY_RESEND_TIME: 3600
+      SIGNUPS_VERIFY_RESEND_LIMIT: 5
+      SIGNUPS_DOMAINS_WHITELIST: ${SIGNUPS_DOMAINS_WHITELIST}
+      IP_HEADER: CF-Connecting-IP
+      LOG_FILE: /data/vaultwarden.log
+      LOG_LEVEL: warn
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME}
+      SMTP_SECURITY: ${SMTP_SECURITY}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_AUTH_MECHANISM: ${SMTP_AUTH_MECHANISM}
+

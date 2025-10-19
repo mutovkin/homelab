@@ -1,0 +1,128 @@
+# Environment configurations and secrets
+*.env
+.env
+.env.*
+!.env.example
+!.env.template
+stack.env
+
+# Docker volumes and data
+volumes/
+data/
+storage/
+config/local/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Database dumps and backups (keep templates/examples)
+*.sql
+!**/init-scripts/*.sql
+!**/*-schema.sql
+backups/
+dumps/
+*.dump
+*.backup
+
+# Logs
+*.log
+logs/
+log/
+
+# PostgreSQL specific
+postgresql/data/
+pgdata/
+pg_log/
+*.pid
+postmaster.pid
+
+# Vaultwarden data
+vaultwarden/data/
+attachments/
+sends/
+icon_cache/
+
+# Joplin data
+joplin/data/
+
+# SearXNG
+searxng/instance/
+
+# Secrets and keys
+secrets/
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+*.asc
+*.gpg
+private/
+
+# Certificates
+certs/
+ssl/
+tls/
+
+# Passwords and tokens
+passwords.txt
+tokens.txt
+credentials.txt
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+.cache/
+
+# Node modules (if using any node-based tools)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (if using any python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Docker override files (keep base configs)
+docker-compose.override.yml
+docker-compose.local.yml
+
+# Monitoring and metrics
+prometheus/data/
+grafana/data/
+
+# Miscellaneous
+.terraform/
+*.tfstate
+*.tfstate.*

@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=en_US.UTF8 --lc-ctype=en_US.UTF8"
+      TZ: ${TIMEZONE:-UTC}
+    volumes:
+      - /data/postgresql/data:/var/lib/postgresql
+      - /data/postgresql/config/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - /data/postgresql/init-scripts:/docker-entrypoint-initdb.d:ro
+      - /data/postgresql/config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro  # Network access control
+    ports:
+      - "5432:5432"
+    networks:
+      - postgres_network
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: pgadmin4
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGLADMIN_CONFIG_SERVER_MODE: 'False'
+      TZ: ${TIMEZONE:-UTC}
+    volumes:
+      - /data/postgresql/pgadmin:/var/lib/pgadmin
+      - /data/postgresql/config/pgadmin/servers.json:/pgadmin4/servers.json:ro  # Pre-configured servers
+      #- /data/postgresql/config/pgadmin/pgpass:/tmp/pgpassfile:ro                # Password file
+    ports:
+      - "10080:80"
+    networks:
+      - postgres_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/misc/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  postgres_network:
+    driver: bridge
+    name: postgres_network
