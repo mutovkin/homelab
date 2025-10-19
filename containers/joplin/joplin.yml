@@ -30,13 +30,19 @@ services:
       MAILER_AUTH_PASSWORD: ${GMAIL_APP_PASSWORD}
       MAILER_NOREPLY_NAME: "Joplin Server"
       MAILER_NOREPLY_EMAIL: ${GMAIL_EMAIL}
-      
+
       # Optional: Email verification settings
       SIGNUP_ENABLED: 1
       USER_EMAIL_VERIFICATION_ENABLED: 1
-      
+
+      # Filesystem storage configuration
+      # Instead of storing everything in PosgreSQL, I use more efficient filesystem storage
+      STORAGE_DRIVER: "Type=Filesystem; Path=/data"
+      STORAGE_DRIVER_FALLBACK: "Type=Database; Mode=ReadAndClear"
+
     volumes:
-      - joplin-server-data:/home/joplin
+      - /data/joplin:/data
+
     networks:
       - postgres_network
 
@@ -46,9 +52,6 @@ services:
       timeout: 15s
       retries: 3
       start_period: 240s
-
-volumes:
-  joplin-server-data:
 
 networks:
   postgres_network:
