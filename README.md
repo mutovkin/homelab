@@ -108,8 +108,10 @@ however it always failed to run, so had to resort to using proxmox-helper-script
 
 Detailed configuration files and documentation for each container service can be found in the `containers/` directory:
 
-- **[PostgreSQL](containers/postgresql/)** - Database server with pgAdmin web interface
 - **[Joplin](containers/joplin/)** - Note-taking application server
+- **[Observability](containers/observability/)** - Time Series and Logs aggregation and visualization
+- **[Portainer](containers/portainer/)** - User-friendly container deployment
+- **[PostgreSQL](containers/postgresql/)** - Database server with pgAdmin web interface
 - **[SearXNG](containers/searxng/)** - Privacy-respecting search engine
 - **[Vaultwarden](containers/vaultwarden/)** - Bitwarden-compatible password manager
 - **[Watchtower](containers/watchtower/)** - Automatic container updates

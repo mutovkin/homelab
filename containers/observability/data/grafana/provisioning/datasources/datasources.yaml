@@ -1,0 +1,41 @@
+apiVersion: 1
+
+# Grafana Datasource Provisioning for Observability Stack
+# Automatically configures VictoriaMetrics (metrics) and VictoriaLogs (logs)
+
+datasources:
+  # VictoriaMetrics - Time-series metrics database (Prometheus-compatible)
+  - name: VictoriaMetrics
+    type: prometheus                                    # Use Prometheus datasource type
+    access: proxy                                       # Grafana backend proxies requests
+    url: http://victoriametrics:8428                    # VictoriaMetrics service URL
+    isDefault: true                                     # Set as default datasource
+    editable: true                                      # Allow editing in UI
+    version: 1                                          # Datasource version
+    jsonData:
+      httpMethod: POST                                  # Use POST for queries (better for large queries)
+      timeInterval: 30s                                 # Default scrape interval
+      customQueryParameters: ''                         # No custom parameters
+      manageAlerts: false                               # Don't use for alerting (use built-in alerting)
+    # Optional: Basic authentication (only applies if VM auth is enabled in .env)
+    basicAuth: ${VM_AUTH_USERNAME:+true}                # Enable only if VM_AUTH_USERNAME is set
+    secureJsonData:
+      basicAuthPassword: ${VM_AUTH_PASSWORD}            # Password from environment variable
+    basicAuthUser: ${VM_AUTH_USERNAME}                  # Username from environment variable
+
+  # VictoriaLogs - Log aggregation database
+  - name: VictoriaLogs
+    type: victoriametrics-logs-datasource               # VictoriaLogs plugin type
+    access: proxy                                       # Grafana backend proxies requests
+    url: http://victorialogs:9428/select/logsql/query   # VictoriaLogs query endpoint
+    isDefault: false                                    # Not the default datasource
+    editable: true                                      # Allow editing in UI
+    version: 1                                          # Datasource version
+    jsonData:
+      maxLines: 1000                                    # Max log lines per query (prevents browser overload)
+      httpMethod: POST                                  # Use POST for queries
+    # Optional: Basic authentication (only applies if VL auth is enabled in .env)
+    basicAuth: ${VL_AUTH_USERNAME:+true}                # Enable only if VL_AUTH_USERNAME is set
+    secureJsonData:
+      basicAuthPassword: ${VL_AUTH_PASSWORD}            # Password from environment variable
+    basicAuthUser: ${VL_AUTH_USERNAME}                  # Username from environment variable

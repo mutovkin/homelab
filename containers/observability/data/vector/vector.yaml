@@ -1,0 +1,121 @@
+# Vector Configuration for VictoriaLogs
+# High-performance log collection and routing
+
+# Data directory for buffers
+data_dir: "/var/lib/vector"
+
+# Sources - Where logs come from
+sources:
+  # Docker container logs
+  docker_logs:
+    type: docker_logs
+    docker_host: "unix:///var/run/docker.sock"
+    # No include/exclude filters - collect all containers by default
+    # This ensures you don't miss logs when adding new services
+    # include:  # New: Focus on your stack; adjust as needed
+    #   - "homeassistant"
+    #   - "grafana"
+    #   - "telegraf"
+    #   - "vector"  # Include self for debugging, or exclude
+    # exclude:  # Updated: Explicit self-exclude if preferred
+    #   - "vector"  # But include above for meta-logs
+
+  # Host system logs
+  host_logs:
+    type: file
+    include:
+      - /var/log/syslog
+      - /var/log/auth.log
+      - /var/log/kern.log
+    ignore_older_secs: 600  # Ignore logs older than 10 minutes (prevents backfill on restart)
+    read_from: end          # Start from end of file (don't replay old logs on startup)
+
+# Transforms - Process and enrich logs
+transforms:
+  # Parse Docker logs and add metadata
+  parse_docker:
+    type: remap
+    inputs:
+      - docker_logs
+    source: |
+      # Parse JSON if possible (for structured logs)
+      parsed, err = parse_json(.message)
+      if err == null {
+        . = merge(., parsed)
+      }
+      
+      # Add standard fields for filtering/grouping
+      .source = "docker"
+      .hostname = get_hostname!()
+      
+      # Extract container name from Docker metadata
+      .container_name = string!(.container_name)
+      
+      # Parse log level if present (defaults to "info" if not found)
+      .level = downcase(string(.level)) ?? "info"
+      # Alternative, more robust extraction:
+      # .level = downcase(get(.parsed.level ?? .level)) ?? "info"
+  
+  # Parse host system logs
+  parse_host:
+    type: remap
+    inputs:
+      - host_logs
+    source: |
+      .source = "host"
+      .hostname = get_hostname!()
+      .level = "info"  # System logs don't have explicit levels
+  
+  # Add timestamp in VictoriaLogs format
+  add_timestamp:
+    type: remap
+    inputs:
+      - parse_docker
+      - parse_host
+    source: |
+      # Preserve original log timestamp if available, otherwise use current time
+      # This ensures accurate log timing (important for troubleshooting)
+      ts = parse_timestamp(.timestamp ?? now())
+      .timestamp = format_timestamp!(ts, format: "%+")  # RFC3339 format required by VictoriaLogs
+
+# Sinks - Where logs go
+sinks:
+  # Send to VictoriaLogs
+  victorialogs:
+    type: http
+    inputs:
+      - add_timestamp
+    # VictoriaLogs ingestion endpoint with field mapping:
+    # - _stream_fields: Fields used for log stream identification (grouping)
+    # - _msg_field: The main log message field
+    # - _time_field: Timestamp field name
+    uri: http://victorialogs:9428/insert/jsonline?_stream_fields=container_name,source,hostname&_msg_field=message&_time_field=timestamp
+    method: post
+    encoding:
+      codec: json
+      framing:
+        method: newline_delimited  # NDJSON format (one JSON object per line)
+    batch:
+      max_bytes: 1048576     # 1MB batches (good balance of throughput vs memory)
+      timeout_secs: 5        # Flush every 5 seconds even if batch not full
+    request:
+      headers:
+        Content-Type: application/x-ndjson
+      compression: gzip      # Compress before sending (70-80% size reduction, lower bandwidth)
+    buffer:
+      type: disk             # Use disk buffer (survives Vector restarts)
+      max_size: 268435488    # 256MB buffer (prevents memory exhaustion)
+      when_full: block       # Block new logs if buffer full (prevents data loss)
+      resync: true           # Fsync to disk (durability, prevents loss on crashes)
+    healthcheck:
+      enabled: true          # Monitor VictoriaLogs availability (important for reliability)
+      uri: http://victorialogs:9428/health  # VictoriaLogs health endpoint
+    
+  # Debug output (optional - comment out in production)
+  # Uncomment for troubleshooting Vector processing
+  # console:
+  #   type: console
+  #   inputs:
+  #     - add_timestamp
+  #   encoding:
+  #     codec: json
