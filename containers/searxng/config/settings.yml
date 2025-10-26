@@ -2,7 +2,7 @@ general:
   # Debug mode, only for development. Is overwritten by ${SEARXNG_DEBUG}
   debug: false
   # displayed name
-  instance_name: "SaerXNG"
+  instance_name: "MutoSearch"
   # For example: https://example.com/privacy
   privacypolicy_url: false
   # use true to use your own donation page written in searx/info/en/donate.md
@@ -95,7 +95,7 @@ server:
   # If your instance owns a /etc/searxng/settings.yml file, then set the following
   # values there.
 
-  secret_key: ""  # Is overwritten by ${SEARXNG_SECRET}
+  secret_key: "ultrasecretkey"  # Is overwritten by ${SEARXNG_SECRET}
   # Proxy image results through SearXNG. Is overwritten by ${SEARXNG_IMAGE_PROXY}
   image_proxy: false
   # 1.0 and 1.1 are supported
@@ -2299,31 +2299,27 @@ engines:
 
   - name: wikicommons.images
     engine: wikicommons
-    shortcut: wc
+    shortcut: wci
     categories: images
-    search_type: images
-    number_of_results: 10
+    wc_search_type: image
 
   - name: wikicommons.videos
     engine: wikicommons
     shortcut: wcv
     categories: videos
-    search_type: videos
-    number_of_results: 10
+    wc_search_type: video
 
   - name: wikicommons.audio
     engine: wikicommons
     shortcut: wca
     categories: music
-    search_type: audio
-    number_of_results: 10
+    wc_search_type: audio
 
   - name: wikicommons.files
     engine: wikicommons
     shortcut: wcf
     categories: files
-    search_type: files
-    number_of_results: 10
+    wc_search_type: file
 
   - name: wolframalpha
     shortcut: wa
