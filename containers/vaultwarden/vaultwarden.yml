@@ -6,6 +6,8 @@ services:
     image: vaultwarden/server:latest
     container_name: vaultwarden
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:
       - /data/vaultwarden:/data
     ports:

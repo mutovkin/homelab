@@ -5,6 +5,8 @@ services:
     image: postgres:18
     container_name: postgres
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -37,6 +39,8 @@ services:
     image: dpage/pgadmin4:9
     container_name: pgadmin4
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}

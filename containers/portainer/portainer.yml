@@ -5,6 +5,8 @@ services:
     image: portainer/portainer-ee:lts
     container_name: portainer
     restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "8000:8000"
       - "9000:9000"

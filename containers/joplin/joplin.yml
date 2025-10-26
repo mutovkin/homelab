@@ -6,6 +6,8 @@ services:
     image: joplin/server:latest
     container_name: joplin-server
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "22300:22300"
     environment:

@@ -88,6 +88,8 @@ services:
     image: timberio/vector:latest-distroless-static  # Smallest, most secure (20-30MB)
     container_name: vector
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "8686:8686"  # Vector GraphQL API for monitoring and debugging
     volumes:
@@ -120,6 +122,8 @@ services:
     image: telegraf:latest
     container_name: telegraf
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     user: "telegraf:${DOCKER_GID:-996}"  # Run as telegraf user with docker group
     volumes:
       - /data/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro

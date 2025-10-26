@@ -5,6 +5,8 @@ services:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "18080:8080"
     volumes:
@@ -21,6 +23,7 @@ services:
       - CHOWN
       - SETGID
       - SETUID
+      - FOWNER
     logging:
       driver: "json-file"
       options:
