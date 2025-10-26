@@ -81,14 +81,23 @@ After evaluating various solutions, the VictoriaMetrics ecosystem was chosen for
 cp .env.example .env
 nano .env
 
-# Set these passwords (generate with: openssl rand -hex 32):
+# Required: Set Grafana password (generate with: openssl rand -hex 32):
 GRAFANA_PASSWORD=<your-password>
-VM_AUTH_PASSWORD=<your-password>  # Optional: enable VictoriaMetrics auth
-VL_AUTH_PASSWORD=<your-password>  # Optional: enable VictoriaLogs auth
 
-# Configure network settings:
-ROUTER_IP=192.168.1.1             # Your router IP for SNMP monitoring
-SNMP_COMMUNITY=public             # SNMP community string
+# Optional: Enable VictoriaMetrics/VictoriaLogs authentication:
+# VM_AUTH_USERNAME=obs
+# VM_AUTH_PASSWORD=<your-password>
+# VL_AUTH_USERNAME=obs
+# VL_AUTH_PASSWORD=<your-password>
+
+# Required: Docker group ID (for Telegraf to access Docker socket):
+DOCKER_GID=999                    # Run: getent group docker | cut -d: -f3
+
+# Optional: Network monitoring (SNMP disabled by default - requires MIB files):
+# ROUTER_IP=192.168.1.1
+# SNMP_COMMUNITY=public
+
+# System configuration:
 TIMEZONE=America/Los_Angeles      # Your timezone
 ```
 
@@ -344,24 +353,36 @@ stats by (_msg) count() logs
 
 Edit `telegraf/telegraf.conf` to customize:
 
-#### SNMP Monitoring
+#### System Metrics
 
+The following inputs are enabled by default:
+- **CPU, Memory, Disk, Network** - System resource monitoring
+- **Docker** - Container metrics (requires `DOCKER_GID` in `.env`)
+- **Ping** - Internet connectivity checks (8.8.8.8, 1.1.1.1)
+- **HTTP Response** - Service health checks
+
+#### SNMP Monitoring (Disabled by Default)
+
+SNMP monitoring is commented out because it requires MIB files not included in the Telegraf container.
+
+To enable SNMP monitoring:
+
+1. **Uncomment the SNMP section** in `telegraf/telegraf.conf`
+2. **Set environment variables** in `.env`:
+   ```bash
+   ROUTER_IP=192.168.1.1
+   SNMP_COMMUNITY=public
+   ```
+3. **Restart Telegraf**
+
+Example (already in config, just uncommented):
 ```toml
-[[inputs.snmp]]
-  agents = ["192.168.1.1"]  # Your router IP
-  community = "public"      # Change to your SNMP community
-  version = 2
+# [[inputs.snmp]]
+#   agents = ["${ROUTER_IP}"]
+#   version = 2
+#   community = "${SNMP_COMMUNITY}"
+#   # ... additional configuration
 ```
-
-#### Custom Device Monitoring
-
-Add SNMP blocks for:
-
-- UPS systems
-- Network switches
-- Wireless access points
-- Network printers
-- Smart home devices
 
 ## Home Assistant Integration
 
@@ -462,9 +483,10 @@ VictoriaMetrics also supports:
   - Efficient storage: ~10-20x better than InfluxDB
 
 - **VictoriaLogs**: **90 days** (configured in docker-compose with `--retentionPeriod=90d`)
-  - Automatic compression for log data
-  - 5x better compression than Loki
-  - Shorter retention is reasonable for logs (vs metrics)
+  - Time-based retention for log data
+  - Automatic compression (5x better than Loki)
+  - Shorter retention is reasonable for logs vs metrics
+  - Can be extended if needed (e.g., `--retentionPeriod=180d` for 6 months)
 
 To change retention:
 

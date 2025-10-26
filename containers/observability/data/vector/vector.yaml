@@ -38,12 +38,6 @@ transforms:
     inputs:
       - docker_logs
     source: |
-      # Parse JSON if possible (for structured logs)
-      parsed, err = parse_json(.message)
-      if err == null {
-        . = merge(., parsed)
-      }
-      
       # Add standard fields for filtering/grouping
       .source = "docker"
       .hostname = get_hostname!()
@@ -51,10 +45,8 @@ transforms:
       # Extract container name from Docker metadata
       .container_name = string!(.container_name)
       
-      # Parse log level if present (defaults to "info" if not found)
-      .level = downcase(string(.level)) ?? "info"
-      # Alternative, more robust extraction:
-      # .level = downcase(get(.parsed.level ?? .level)) ?? "info"
+      # Set default log level
+      .level = "info"
   
   # Parse host system logs
   parse_host:
@@ -73,43 +65,36 @@ transforms:
       - parse_docker
       - parse_host
     source: |
-      # Preserve original log timestamp if available, otherwise use current time
-      # This ensures accurate log timing (important for troubleshooting)
-      ts = parse_timestamp(.timestamp ?? now())
-      .timestamp = format_timestamp!(ts, format: "%+")  # RFC3339 format required by VictoriaLogs
+      # Use current time as timestamp (VictoriaLogs accepts RFC3339 format)
+      .timestamp = format_timestamp!(now(), format: "%+")
 
 # Sinks - Where logs go
 sinks:
   # Send to VictoriaLogs
   victorialogs:
-    type: http
+    type: loki
     inputs:
       - add_timestamp
-    # VictoriaLogs ingestion endpoint with field mapping:
-    # - _stream_fields: Fields used for log stream identification (grouping)
-    # - _msg_field: The main log message field
-    # - _time_field: Timestamp field name
-    uri: http://victorialogs:9428/insert/jsonline?_stream_fields=container_name,source,hostname&_msg_field=message&_time_field=timestamp
-    method: post
+    endpoint: http://victorialogs:9428/insert
+    auth:
+      strategy: basic
+      user: "${VL_AUTH_USERNAME}"
+      password: "${VL_AUTH_PASSWORD}"
     encoding:
       codec: json
-      framing:
-        method: newline_delimited  # NDJSON format (one JSON object per line)
+    labels:
+      container_name: "{{ container_name }}"
+      source: "{{ source }}"
+      hostname: "{{ hostname }}"
+    compression: gzip
+    out_of_order_action: accept
     batch:
-      max_bytes: 1048576     # 1MB batches (good balance of throughput vs memory)
-      timeout_secs: 5        # Flush every 5 seconds even if batch not full
-    request:
-      headers:
-        Content-Type: application/x-ndjson
-      compression: gzip      # Compress before sending (70-80% size reduction, lower bandwidth)
+      max_bytes: 1048576      # 1MB batches (good balance)
+      timeout_secs: 5         # Flush every 5 seconds
     buffer:
-      type: disk             # Use disk buffer (survives Vector restarts)
-      max_size: 268435488    # 256MB buffer (prevents memory exhaustion)
-      when_full: block       # Block new logs if buffer full (prevents data loss)
-      resync: true           # Fsync to disk (durability, prevents loss on crashes)
-    healthcheck:
-      enabled: true          # Monitor VictoriaLogs availability (important for reliability)
-      uri: http://victorialogs:9428/health  # VictoriaLogs health endpoint
+      type: disk
+      max_size: 268435488     # 256MB disk buffer
+      when_full: block
     
   # Debug output (optional - comment out in production)
   # Uncomment for troubleshooting Vector processing

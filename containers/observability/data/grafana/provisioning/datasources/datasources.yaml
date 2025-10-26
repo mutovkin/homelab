@@ -17,11 +17,11 @@ datasources:
       timeInterval: 30s                                 # Default scrape interval
       customQueryParameters: ''                         # No custom parameters
       manageAlerts: false                               # Don't use for alerting (use built-in alerting)
-    # Optional: Basic authentication (only applies if VM auth is enabled in .env)
-    basicAuth: ${VM_AUTH_USERNAME:+true}                # Enable only if VM_AUTH_USERNAME is set
-    secureJsonData:
-      basicAuthPassword: ${VM_AUTH_PASSWORD}            # Password from environment variable
-    basicAuthUser: ${VM_AUTH_USERNAME}                  # Username from environment variable
+    # Uncomment these lines if using authentication (set VM_AUTH_USERNAME/PASSWORD in .env):
+    # basicAuth: true
+    # basicAuthUser: ${VM_AUTH_USERNAME}
+    # secureJsonData:
+    #   basicAuthPassword: ${VM_AUTH_PASSWORD}
 
   # VictoriaLogs - Log aggregation database
   - name: VictoriaLogs
@@ -34,8 +34,8 @@ datasources:
     jsonData:
       maxLines: 1000                                    # Max log lines per query (prevents browser overload)
       httpMethod: POST                                  # Use POST for queries
-    # Optional: Basic authentication (only applies if VL auth is enabled in .env)
-    basicAuth: ${VL_AUTH_USERNAME:+true}                # Enable only if VL_AUTH_USERNAME is set
-    secureJsonData:
-      basicAuthPassword: ${VL_AUTH_PASSWORD}            # Password from environment variable
-    basicAuthUser: ${VL_AUTH_USERNAME}                  # Username from environment variable
+    # Uncomment these lines if using authentication (set VL_AUTH_USERNAME/PASSWORD in .env):
+    # basicAuth: true
+    # basicAuthUser: ${VL_AUTH_USERNAME}
+    # secureJsonData:
+    #   basicAuthPassword: ${VL_AUTH_PASSWORD}

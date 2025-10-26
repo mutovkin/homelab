@@ -8,7 +8,7 @@ stack.env
 
 # Docker volumes and data
 volumes/
-data/
+#data/
 storage/
 config/local/
 *.sqlite
