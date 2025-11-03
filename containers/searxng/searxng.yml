@@ -33,3 +33,8 @@ services:
 networks:
   searxng_network:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.22.0.0/24
+          gateway: 172.22.0.1

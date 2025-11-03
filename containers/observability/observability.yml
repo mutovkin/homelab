@@ -162,9 +162,9 @@ services:
       - "3000:3000"  # Grafana Web UI
     volumes:
       - /data/grafana/data:/var/lib/grafana                              # Persistent data (dashboards, users, etc.)
-      - /data/grafana/config/grafana.ini:/etc/grafana/grafana.ini:ro    # Custom Grafana configuration
-      - /data/grafana/dashboards:/var/lib/grafana/dashboards:ro         # Dashboard JSON files (auto-loaded)
-      - /data/grafana/provisioning:/etc/grafana/provisioning:ro         # Datasource/dashboard provisioning
+      - /data/grafana/config/grafana.ini:/etc/grafana/grafana.ini:ro     # Custom Grafana configuration
+      - /data/grafana/dashboards:/var/lib/grafana/dashboards:ro          # Dashboard JSON files (auto-loaded)
+      - /data/grafana/provisioning:/etc/grafana/provisioning:ro          # Datasource/dashboard provisioning
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}                            # Admin username from .env
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}                    # Admin password from .env
@@ -173,6 +173,7 @@ services:
       TZ: ${TIMEZONE:-UTC}                                               # Timezone for log timestamps
       GF_LOG_LEVEL: info
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL}
+      GF_SERVER_SERVE_FROM_SUB_PATH: false
       GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN}
       GF_SECURITY_COOKIE_SECURE: true
     deploy:
@@ -200,3 +201,8 @@ networks:
   observability:
     driver: bridge
     name: observability_network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1

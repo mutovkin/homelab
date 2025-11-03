@@ -24,3 +24,15 @@ services:
       WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER: ${EMAIL_USER}
       WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD: ${EMAIL_PASSWORD}
       WATCHTOWER_NOTIFICATION_EMAIL_DELAY: 2
+    networks:
+      - watchtower_network
+
+networks:
+  watchtower_network:
+    driver: bridge
+    name: watchtower_network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.0.0/24
+          gateway: 172.25.0.1

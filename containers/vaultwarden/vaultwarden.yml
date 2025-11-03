@@ -39,4 +39,15 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME}
       SMTP_PASSWORD: ${SMTP_PASSWORD}
       SMTP_AUTH_MECHANISM: ${SMTP_AUTH_MECHANISM}
+    networks:
+      - vaultwarden_network
 
+networks:
+  vaultwarden_network:
+    driver: bridge
+    name: vaultwarden_network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.24.0.0/24
+          gateway: 172.24.0.1

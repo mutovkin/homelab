@@ -73,3 +73,8 @@ networks:
   postgres_network:
     driver: bridge
     name: postgres_network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.21.0.0/24
+          gateway: 172.21.0.1

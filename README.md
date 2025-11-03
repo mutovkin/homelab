@@ -116,6 +116,44 @@ Detailed configuration files and documentation for each container service can be
 - **[Vaultwarden](containers/vaultwarden/)** - Bitwarden-compatible password manager
 - **[Watchtower](containers/watchtower/)** - Automatic container updates
 
+## Docker Network Mapping
+
+All containers use explicitly defined bridge networks with fixed subnets to prevent IP conflicts with the host LAN (192.168.x.x) and ensure predictable routing through Nginx Proxy Manager.
+
+| Container Stack | Network Name | Subnet | Gateway | Containers |
+|----------------|--------------|---------|---------|------------|
+| **Observability** | `observability_network` | 172.20.0.0/24 | 172.20.0.1 | victoriametrics, victorialogs, vector, telegraf, grafana |
+| **PostgreSQL** | `postgres_network` | 172.21.0.0/24 | 172.21.0.1 | postgres, pgadmin |
+| **SearXNG** | `searxng_network` | 172.22.0.0/24 | 172.22.0.1 | searxng |
+| **Portainer** | `default` | 172.23.0.0/24 | 172.23.0.1 | portainer |
+| **Vaultwarden** | `vaultwarden_network` | 172.24.0.0/24 | 172.24.0.1 | vaultwarden |
+| **Watchtower** | `watchtower_network` | 172.25.0.0/24 | 172.25.0.1 | watchtower |
+| **Joplin** | `postgres_network` (external) | 172.21.0.0/24 | 172.21.0.1 | joplin-server |
+
+### Network Design Notes
+
+- **Subnet Isolation**: Each network uses a unique /24 subnet (254 usable IPs per network)
+- **172.x.x.x Range**: All subnets use Docker's traditional private range to avoid LAN conflicts
+- **Bridge Driver**: All networks use the bridge driver for container isolation with host NAT
+- **Shared Networks**: Joplin connects to `postgres_network` to access the database
+- **Gateway Assignment**: First IP (.1) in each subnet is the gateway
+
+### Troubleshooting Commands
+
+```bash
+# List all Docker networks
+docker network ls
+
+# Inspect a specific network
+docker network inspect observability_network
+
+# Check container IP addresses
+docker inspect <container_name> | grep IPAddress
+
+# View all container IPs
+docker ps -q | xargs docker inspect -f '{{.Name}} - {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+```
+
 ### Useful Proxmox Commands
 
 ```bash
