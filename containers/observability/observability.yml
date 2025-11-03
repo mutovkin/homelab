@@ -171,6 +171,10 @@ services:
       GF_USERS_ALLOW_SIGN_UP: false                                      # Disable self-registration
       GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource             # Auto-install VictoriaLogs datasource plugin
       TZ: ${TIMEZONE:-UTC}                                               # Timezone for log timestamps
+      GF_LOG_LEVEL: info
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL}
+      GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN}
+      GF_SECURITY_COOKIE_SECURE: true
     deploy:
       resources:
         limits:
