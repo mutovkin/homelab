@@ -67,6 +67,12 @@ transforms:
     source: |
       # Use current time as timestamp (VictoriaLogs accepts RFC3339 format)
       .timestamp = format_timestamp!(now(), format: "%+")
+      
+      # Map message field to _msg for VictoriaLogs
+      # VictoriaLogs requires _msg field: https://docs.victoriametrics.com/victorialogs/keyconcepts/#message-field
+      if exists(.message) {
+        ._msg = del(.message)
+      }
 
 # Sinks - Where logs go
 sinks:
