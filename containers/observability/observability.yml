@@ -169,13 +169,17 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}                            # Admin username from .env
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}                    # Admin password from .env
       GF_USERS_ALLOW_SIGN_UP: false                                      # Disable self-registration
-      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource             # Auto-install VictoriaLogs datasource plugin
+      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource,victoriametrics-metrics-datasource  # Auto-install VictoriaMetrics plugins
       TZ: ${TIMEZONE:-UTC}                                               # Timezone for log timestamps
       GF_LOG_LEVEL: info
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL}
       GF_SERVER_SERVE_FROM_SUB_PATH: false
       GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN}
       GF_SECURITY_COOKIE_SECURE: true
+      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}                            # VictoriaMetrics auth credentials for datasource
+      VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}                            # VictoriaMetrics auth credentials for datasource
+      VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}                            # VictoriaLogs auth credentials for datasource
+      VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}                            # VictoriaLogs auth credentials for datasource
     deploy:
       resources:
         limits:
