@@ -1,0 +1,47 @@
+---
+- name: Create observability deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/observability"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize observability compose and config files
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/observability/"
+    dest: "{{ data_mount }}/deploy/observability/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template observability .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/observability/.env"
+    mode: "0600"
+
+- name: Create observability data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/victoriametrics"
+    - "{{ data_mount }}/victorialogs"
+    - "{{ data_mount }}/vector"
+    - "{{ data_mount }}/telegraf"
+    - "{{ data_mount }}/grafana/data"
+    - "{{ data_mount }}/grafana/config"
+    - "{{ data_mount }}/grafana/dashboards"
+    - "{{ data_mount }}/grafana/provisioning"
+
+- name: Deploy observability stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/observability"
+    files:
+      - observability.yml
+    state: present
+    pull: missing
+  tags:
+    - deploy

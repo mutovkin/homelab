@@ -1,0 +1,38 @@
+---
+- name: Create Vaultwarden deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/vaultwarden"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Vaultwarden compose files
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/vaultwarden/"
+    dest: "{{ data_mount }}/deploy/vaultwarden/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template Vaultwarden .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/vaultwarden/.env"
+    mode: "0600"
+
+- name: Create Vaultwarden data directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/vaultwarden"
+    state: directory
+    mode: "0755"
+
+- name: Deploy Vaultwarden stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/vaultwarden"
+    files:
+      - vaultwarden.yml
+    state: present
+    pull: missing
+  tags:
+    - deploy

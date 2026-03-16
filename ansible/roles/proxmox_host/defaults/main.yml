@@ -1,0 +1,6 @@
+---
+# defaults for proxmox_host role
+proxmox_enterprise_repo: false
+proxmox_zfs_scrub_schedule: monthly
+gpu_passthrough:
+  enabled: false

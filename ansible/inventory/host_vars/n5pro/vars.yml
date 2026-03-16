@@ -1,0 +1,49 @@
+---
+# Minisforum N5 Pro — host-specific variables
+# CPU: AMD Ryzen AI 9 HX PRO 370 (12c/24t)
+# RAM: 96GB DDR5-5600 ECC (32GB GPU UMA, ~62GB for Proxmox)
+# NVMe: 1×4TB + 2×2TB WD Black SN850X | HDD: 5×26TB Seagate Exos
+# GPU: Radeon 890M | NPU: Strix Halo | Net: 10GbE + 5GbE
+
+# Proxmox
+proxmox_node: n5pro
+proxmox_api_url: "https://{{ ansible_host }}:8006"
+
+# Hardware
+total_ram_gb: 96
+gpu_ram_gb: 32 # Allocated in BIOS to iGPU (UMA)
+system_ram_gb: 62 # Available to Proxmox (~62GB after UMA)
+
+# GPU passthrough (for AI/media VMs)
+gpu_passthrough:
+  enabled: true
+  iommu: true
+  vfio_pci_ids: "1002:150e,1002:1640" # Radeon 890M GPU + HDMI/DP audio
+  gpu_pci_address: "c7:00.0" # IOMMU group 23
+  audio_pci_address: "c7:00.1" # IOMMU group 24
+  kernel_params:
+    - "amd_iommu=on"
+    - "iommu=pt"
+
+# NPU passthrough
+npu_pci_address: "c8:00.1" # AMD Strix Halo NPU, IOMMU group 30
+npu_device_id: "1022:17f0"
+
+# SATA controller passthrough (for TrueNAS VM)
+sata_controller_pci: "c1:00.0" # JMicron JMB58x, IOMMU group 17 — 5× 26TB HDDs
+
+# Storage
+zfs_pool: rpool # 4TB NVMe boot disk
+data_mount: /data
+
+# Network
+proxmox_bridge: vmbr1 # 10GbE (Aquantia AQC113) — primary management
+proxmox_bridge_secondary: vmbr0 # 5GbE (Realtek RTL8126) — DHCP internet
+
+# Services to deploy on this host's Docker LXC (CT 201)
+# Empty for now — service placement TBD
+services: []
+  # - observability  # Candidate to move here (more RAM for VictoriaMetrics)
+
+# Docker network subnets (will be assigned when services are placed)
+docker_networks: {}

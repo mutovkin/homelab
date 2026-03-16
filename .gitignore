@@ -1,1 +1,16 @@
 .claude
+
+# Ansible
+.vault_password
+*.retry
+
+# Pulumi
+infrastructure/node_modules/
+infrastructure/dist/
+infrastructure/bin/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

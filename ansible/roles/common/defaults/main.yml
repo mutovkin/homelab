@@ -1,0 +1,13 @@
+---
+# defaults for common role
+timezone: UTC
+common_packages:
+  - curl
+  - wget
+  - htop
+  - vim
+  - jq
+  - unzip
+  - gnupg
+  - ca-certificates
+ssh_authorized_keys: []

@@ -1,0 +1,7 @@
+---
+# N5 Pro secrets — encrypted with ansible-vault
+# Create the real encrypted file with:
+#   cd ansible && ansible-vault create inventory/host_vars/n5pro/vault.yml
+#
+# Expected variables (populate as services are assigned):
+# vault_proxmox_api_token: ""

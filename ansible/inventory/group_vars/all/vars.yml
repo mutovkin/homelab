@@ -1,0 +1,39 @@
+---
+# Shared configuration for all hosts
+
+# Timezone
+timezone: America/Los_Angeles
+
+# DNS
+dns_servers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# NTP
+ntp_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+
+# SSH authorized keys (add your public keys here)
+ssh_authorized_keys: []
+  # - "ssh-ed25519 AAAA... user@host"
+
+# Base packages to install on all hosts
+common_packages:
+  - curl
+  - wget
+  - htop
+  - vim
+  - jq
+  - unzip
+  - gnupg
+  - ca-certificates
+  - apt-transport-https
+  - software-properties-common
+
+# Docker network defaults
+docker_network_base: "172.20.0.0" # All Docker networks use 172.x.x.x
+
+# Watchtower schedule
+watchtower_schedule: "0 30 4 * * *" # Daily at 4:30 AM
+watchtower_timezone: "America/Los_Angeles"

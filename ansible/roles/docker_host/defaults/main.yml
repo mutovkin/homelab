@@ -1,0 +1,8 @@
+---
+# defaults for docker_host role
+docker_log_driver: "json-file"
+docker_log_max_size: "10m"
+docker_log_max_file: "3"
+docker_default_address_pools:
+  - base: "172.20.0.0/14"
+    size: 24

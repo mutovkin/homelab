@@ -1,0 +1,121 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  ANSIBLE_DIR: ./ansible
+  INFRA_DIR: ./infrastructure
+
+tasks:
+  # === Infrastructure: Proxmox Host Configuration (Ansible) ===
+  infra:hosts:
+    desc: Configure Proxmox host OS on all machines (packages, ZFS, networking, GPU)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/proxmox-hosts.yml {{.CLI_ARGS}}
+
+  infra:hosts:check:
+    desc: Dry-run Proxmox host configuration (no changes)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/proxmox-hosts.yml --check --diff {{.CLI_ARGS}}
+
+  # === Infrastructure: VM/LXC Lifecycle (Pulumi) ===
+  infra:up:
+    desc: Create/update VMs and LXCs on all Proxmox hosts
+    dir: '{{.INFRA_DIR}}'
+    cmds:
+      - pulumi up {{.CLI_ARGS}}
+
+  infra:preview:
+    desc: Preview VM/LXC changes without applying
+    dir: '{{.INFRA_DIR}}'
+    cmds:
+      - pulumi preview {{.CLI_ARGS}}
+
+  infra:destroy:
+    desc: Destroy all Pulumi-managed VMs/LXCs (DANGEROUS)
+    dir: '{{.INFRA_DIR}}'
+    prompt: This will destroy all Pulumi-managed VMs and LXCs. Are you sure?
+    cmds:
+      - pulumi destroy {{.CLI_ARGS}}
+
+  # === Infrastructure: Guest Configuration (Ansible) ===
+  infra:guests:
+    desc: Configure Docker and base packages inside VMs/LXCs
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/configure-guests.yml {{.CLI_ARGS}}
+
+  # === Service Deployment (Ansible + Docker Compose) ===
+  deploy:services:
+    desc: Deploy all Docker Compose services
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
+
+  deploy:service:
+    desc: Deploy a single service (usage: task deploy:service -- --tags postgresql)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
+
+  # === Full Deployment ===
+  deploy:full:
+    desc: Run the full deployment pipeline (hosts → VMs → guests → services)
+    cmds:
+      - task: infra:hosts
+      - task: infra:up
+      - task: infra:guests
+      - task: deploy:services
+
+  # === Ansible Utilities ===
+  ansible:lint:
+    desc: Lint all Ansible playbooks and roles
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-lint
+
+  ansible:galaxy:
+    desc: Install Ansible Galaxy collections
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-galaxy install -r requirements.yml
+
+  ansible:inventory:
+    desc: Show Ansible inventory
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-inventory --list {{.CLI_ARGS}}
+
+  ansible:ping:
+    desc: Ping all hosts
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible all -m ping {{.CLI_ARGS}}
+
+  # === Vault ===
+  vault:edit:
+    desc: Edit an encrypted vault file (usage: task vault:edit -- inventory/host_vars/eq12/vault.yml)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-vault edit {{.CLI_ARGS}}
+
+  vault:encrypt:
+    desc: Encrypt a file with ansible-vault
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-vault encrypt {{.CLI_ARGS}}
+
+  # === Pulumi Utilities ===
+  pulumi:install:
+    desc: Install Pulumi npm dependencies
+    dir: '{{.INFRA_DIR}}'
+    cmds:
+      - npm install
+
+  pulumi:stack:
+    desc: Show current Pulumi stack
+    dir: '{{.INFRA_DIR}}'
+    cmds:
+      - pulumi stack {{.CLI_ARGS}}

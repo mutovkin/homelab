@@ -1,0 +1,10 @@
+---
+# Configure Proxmox host OS on all Proxmox machines
+# Run: ansible-playbook playbooks/proxmox-hosts.yml
+
+- name: Configure Proxmox hosts
+  hosts: proxmox_hosts
+  become: true
+  roles:
+    - common
+    - proxmox_host
