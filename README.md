@@ -57,7 +57,7 @@ task deploy:services  # 4. Deploy compose stacks
 
 ## Repository Structure
 
-```
+```ascii
 homelab/
 ├── docs/                  # Machine specs + architecture diagrams
 │   ├── eq12.md
