@@ -109,9 +109,9 @@ Install these on your Mac before starting:
 brew install ansible pulumi node go-task
 
 # Verify versions
-ansible --version    # 2.20.3
-pulumi version       # v3.226.0
-node --version       # v25.8.1 (for Pulumi TypeScript)
+ansible --version    # 2.20.4
+pulumi version       # v3.230.0
+node --version       # v25.9.0 (for Pulumi TypeScript)
 task --version       # 3.49.1
 ```
 

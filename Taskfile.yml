@@ -55,14 +55,14 @@ tasks:
       - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
 
   deploy:service:
-    desc: Deploy a single service (usage: task deploy:service -- --tags postgresql)
+    desc: 'Deploy a single service (usage: task deploy:service -- --tags postgresql)'
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
 
   # === Full Deployment ===
   deploy:full:
-    desc: Run the full deployment pipeline (hosts → VMs → guests → services)
+    desc: Run the full deployment pipeline (hosts -> VMs -> guests -> services)
     cmds:
       - task: infra:hosts
       - task: infra:up
@@ -96,7 +96,7 @@ tasks:
 
   # === Vault ===
   vault:edit:
-    desc: Edit an encrypted vault file (usage: task vault:edit -- inventory/host_vars/eq12/vault.yml)
+    desc: 'Edit an encrypted vault file (usage: task vault:edit -- inventory/host_vars/eq12/vault.yml)'
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - ansible-vault edit {{.CLI_ARGS}}
