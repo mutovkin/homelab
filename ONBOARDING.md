@@ -13,15 +13,16 @@ management **without losing data or disrupting running services**.
 
 1. [Concepts: What Ansible Does](#1-concepts-what-ansible-does)
 2. [Prerequisites](#2-prerequisites)
-3. [Step 1 — Ansible: Install Tools on Your Mac](#step-1--ansible-install-tools-on-your-mac)
-4. [Step 2 — Ansible: Test Connectivity](#step-2--ansible-test-connectivity)
-5. [Step 3 — Ansible: Encrypt Your Secrets](#step-3--ansible-encrypt-your-secrets)
-6. [Step 4 — Ansible: Dry-Run Host Configuration](#step-4--ansible-dry-run-host-configuration)
-7. [Step 5 — Migrate Stacks from Portainer to Ansible](#step-5--migrate-stacks-from-portainer-to-ansible)
-8. [Step 6 — Ansible: Dry-Run Service Deployment](#step-6--ansible-dry-run-service-deployment)
-9. [Step 7 — Go Live](#step-7--go-live)
-10. [Rollback & Recovery](#rollback--recovery)
-11. [Glossary](#glossary)
+3. [Step 1 — Install Tools](#step-1--install-tools)
+4. [Step 2 — Test Connectivity](#step-2--test-connectivity)
+5. [Step 3 — Add Your SSH Keys](#step-3--add-your-ssh-keys)
+6. [Step 4 — Encrypt Your Secrets](#step-4--encrypt-your-secrets)
+7. [Step 5 — Dry-Run Host Configuration](#step-5--dry-run-host-configuration)
+8. [Step 6 — Migrate Stacks from Portainer to Ansible](#step-6--migrate-stacks-from-portainer-to-ansible)
+9. [Step 7 — Dry-Run Service Deployment](#step-7--dry-run-service-deployment)
+10. [Step 8 — Go Live](#step-8--go-live)
+11. [Rollback & Recovery](#rollback--recovery)
+12. [Glossary](#glossary)
 
 ---
 
@@ -51,16 +52,16 @@ the Proxmox API.
 
 ```ascii
 ┌─────────────────────────────────────────────────────┐
-│  1. Ansible: Configure Proxmox hosts                │
+│  1. Configure Proxmox hosts                         │
 │     (packages, networking, ZFS, GPU passthrough)    │
 │                                                     │
-│  2. Ansible: Provision VMs and LXC containers       │
+│  2. Provision VMs and LXC containers                │
 │     (via community.general.proxmox_kvm/proxmox)     │
 │                                                     │
-│  3. Ansible: Configure guests (Docker, packages)    │
+│  3. Configure guests (Docker, packages)             │
 │     (inside the VMs/LXCs provisioned above)         │
 │                                                     │
-│  4. Ansible: Deploy Docker Compose services         │
+│  4. Deploy Docker Compose services                  │
 │     (syncs compose files, templates .env, runs up)  │
 └─────────────────────────────────────────────────────┘
 ```
@@ -71,13 +72,24 @@ All four steps run via a single command: `task deploy:full` (or `ansible-playboo
 
 ## 2. Prerequisites
 
-Install these on your Mac before starting:
+Install these on your control machine before starting:
+
+**macOS (Homebrew):**
 
 ```bash
-# Homebrew packages
 brew install ansible go-task
+```
 
-# Verify versions
+**Arch Linux (Omarchy 3.6):**
+
+```bash
+sudo pacman -S ansible
+yay -S go-task-bin
+```
+
+**Verify on either platform:**
+
+```bash
 ansible --version    # 2.15+
 task --version       # 3.x
 ```
@@ -89,7 +101,7 @@ You also need:
 
 ---
 
-## Step 1 — Ansible: Install Tools on Your Mac
+## Step 1 — Install Tools
 
 ```bash
 # From the repo root
@@ -104,12 +116,12 @@ cd ..
 task ansible:galaxy
 ```
 
-**What just happened?** Ansible Galaxy downloaded three collection packages to your
-Mac's `~/.ansible/collections/`. Nothing was sent to any server.
+**What just happened?** Ansible Galaxy downloaded three collection packages to
+`~/.ansible/collections/` on your local machine. Nothing was sent to any server.
 
 ---
 
-## Step 2 — Ansible: Test Connectivity
+## Step 2 — Test Connectivity
 
 Before doing anything, verify Ansible can reach your machines:
 
@@ -141,13 +153,38 @@ eq12_docker | SUCCESS => {
 
 ---
 
-## Step 3 — Ansible: Encrypt Your Secrets
+## Step 3 — Add Your SSH Keys
+
+Store your public SSH keys in the repository so Ansible provisions them to all
+managed hosts automatically. This ensures every control machine (Mac and PC) can
+SSH into any host, VM, or LXC.
+
+```bash
+# From each control machine, copy your public key:
+cp ~/.ssh/id_ed25519.pub ansible/files/ssh_keys/$(whoami)@$(hostname).pub
+
+# Commit so both machines have each other's keys
+git add ansible/files/ssh_keys/
+git commit -m "Add SSH public key for $(hostname)"
+git push
+```
+
+All `*.pub` files in `ansible/files/ssh_keys/` are deployed to every managed host's
+`~root/.ssh/authorized_keys` on the next playbook run. See
+[ansible/files/ssh_keys/README.md](ansible/files/ssh_keys/README.md) for details.
+
+> **Tip:** Run this on both your Mac and your Omarchy PC, then `git pull` on the
+> other machine so both keys are in the repo before the first Ansible run.
+
+---
+
+## Step 4 — Encrypt Your Secrets
 
 This step creates the encrypted vault files that hold your actual passwords. The
 vault files are committed to Git, but their contents are encrypted with a password
 only you know.
 
-### 3a. Create the vault password file
+### 4a. Create the vault password file
 
 ```bash
 # This file holds the single password that unlocks all vault files.
@@ -158,7 +195,7 @@ chmod 600 .vault_password
 
 Pick a strong password and store it in your Bitwarden vault for safekeeping.
 
-### 3b. Create the real encrypted vault for EQ12
+### 4b. Create the real encrypted vault for EQ12
 
 The file `ansible/inventory/host_vars/eq12/vault.yml` currently has a commented-out
 template showing which variables are needed. You'll replace it with a real encrypted
@@ -226,7 +263,7 @@ cat inventory/host_vars/eq12/vault.yml
 ansible-vault view inventory/host_vars/eq12/vault.yml
 ```
 
-### 3c. Create vaults for n5pro and shared secrets
+### 4c. Create vaults for n5pro and shared secrets
 
 ```bash
 # N5 Pro vault (currently just needs Proxmox API token)
@@ -236,7 +273,7 @@ ansible-vault create inventory/host_vars/n5pro/vault.yml
 ansible-vault create inventory/group_vars/all/vault.yml
 ```
 
-### 3d. Edit a vault later
+### 4d. Edit a vault later
 
 ```bash
 # Use the Taskfile shortcut:
@@ -252,7 +289,7 @@ is gitignored.
 
 ---
 
-## Step 4 — Ansible: Dry-Run Host Configuration
+## Step 5 — Dry-Run Host Configuration
 
 This is your first "real" Ansible operation against live servers. **We use `--check --diff`
 to make it a dry run** — it connects to your hosts, evaluates what would change, and
@@ -295,7 +332,7 @@ something you're currently using, stop and investigate before proceeding.
 
 ---
 
-## Step 5 — Migrate Stacks from Portainer to Ansible
+## Step 6 — Migrate Stacks from Portainer to Ansible
 
 Your Docker containers are currently managed via Portainer's "Stacks" feature. When
 you deploy a stack through Portainer's UI, it stores its own versioned copy of the
@@ -309,7 +346,7 @@ we need to **remove Portainer's ownership** of each stack before Ansible takes o
 This does **not** stop, delete, or recreate your containers. It only removes Portainer's
 internal record that it "owns" the stack. The containers keep running the entire time.
 
-### 8a. Understand what's currently running
+### 6a. Understand what's currently running
 
 Your stacks as Portainer sees them (from Docker's perspective):
 
@@ -323,7 +360,7 @@ Your stacks as Portainer sees them (from Docker's perspective):
 | watchtower | `/data/compose/2/v4/docker-compose.yml` | watchtower |
 | portainer | `portainer.yml` | portainer (self-managed) |
 
-### 8b. Remove stacks from Portainer (one at a time)
+### 6b. Remove stacks from Portainer (one at a time)
 
 Do this for each stack **except portainer itself** (portainer stays self-managed):
 
@@ -346,7 +383,7 @@ After removing, the containers will appear in Portainer under **Containers** as
 standalone containers rather than part of a stack. You can still view logs, inspect
 them, restart them — Portainer just won't try to manage their lifecycle via compose.
 
-### 8c. Recommended order
+### 6c. Recommended order
 
 Remove stacks in this order (least critical first, so you get comfortable with the
 process before touching important services):
@@ -362,7 +399,7 @@ process before touching important services):
 to do so. Ansible's portainer role will just ensure the compose file and config stay
 in sync.
 
-### 8d. Verify containers are still running after each removal
+### 6d. Verify containers are still running after each removal
 
 After removing each stack from Portainer:
 
@@ -376,7 +413,7 @@ All containers should still show `Up`. If any stopped (they shouldn't), start th
 ssh root@deb-docker.lan 'docker start <container_name>'
 ```
 
-### 8e. Clean up Portainer's old compose directories (optional)
+### 6e. Clean up Portainer's old compose directories (optional)
 
 After removing all stacks, Portainer's compose directories may have leftovers:
 
@@ -391,7 +428,7 @@ ssh root@deb-docker.lan 'rm -rf /data/compose/[0-9]*'
 This is purely cleanup — those files are Portainer's old copies and are not used by
 anything after stack removal.
 
-### 8f. What about Portainer going forward?
+### 6f. What about Portainer going forward?
 
 Portainer remains installed and useful as a **monitoring dashboard**:
 - View container logs in a web UI
@@ -405,7 +442,7 @@ tool.
 
 ---
 
-## Step 6 — Ansible: Dry-Run Service Deployment
+## Step 7 — Dry-Run Service Deployment
 
 Now test whether Ansible's service deployment would disrupt your running containers.
 
@@ -464,11 +501,11 @@ task deploy:service -- --tags postgresql
 
 ---
 
-## Step 7 — Go Live
+## Step 8 — Go Live
 
 Once all dry runs look clean, execute the real operations **in this exact order**:
 
-### 7a. Apply Ansible host configuration
+### 8a. Apply Ansible host configuration
 
 ```bash
 # Configure Proxmox host OS (packages, repos, ZFS)
@@ -479,7 +516,7 @@ This installs packages and configures system settings. It does **not** restart
 services or reboot. The only handler that triggers automatically is `update-grub`
 on N5 Pro (for IOMMU), which updates the GRUB config but doesn't reboot.
 
-### 7b. Apply Ansible guest configuration
+### 8b. Apply Ansible guest configuration
 
 ```bash
 # Configure Docker inside LXCs (install/update Docker, daemon.json)
@@ -491,7 +528,7 @@ Since Docker is already installed and running, most tasks will report `ok`. If t
 Docker daemon.json changes, Docker will restart (via handler), but **running containers
 survive a Docker daemon restart** — they continue running.
 
-### 7c. Deploy services one at a time
+### 8c. Deploy services one at a time
 
 ```bash
 # Deploy each service individually, checking output as you go

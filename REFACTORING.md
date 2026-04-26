@@ -21,7 +21,7 @@ This repository started as configuration for a single Beelink EQ12 Pro machine. 
 
 ## Architecture: Two-Layer Automation
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  Layer 2: Docker Compose                                     │
 │  Service definitions in containers/                          │
@@ -48,7 +48,7 @@ task deploy:services  # 3. Deploy compose stacks
 
 ## Directory Structure
 
-```
+```text
 homelab/
 ├── README.md
 ├── REFACTORING.md                         # This document

@@ -52,8 +52,7 @@ homelab/
 ├── docs/                  # Machine specs + architecture diagrams
 │   ├── eq12.md
 │   ├── n5pro.md
-│   ├── architecture.md
-│   └── decisions.md
+│   └── architecture.md
 ├── ansible/               # Ansible — host config, VM/LXC provisioning, service deployment
 │   ├── inventory/         # Hosts, group vars, host vars, vault
 │   ├── playbooks/         # Orchestration playbooks

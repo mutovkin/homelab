@@ -13,10 +13,18 @@
     name: "{{ common_packages }}"
     state: present
 
-- name: Configure SSH authorized keys
+- name: Configure SSH authorized keys from variables
   ansible.posix.authorized_key:
     user: root
     key: "{{ item }}"
     state: present
   loop: "{{ ssh_authorized_keys }}"
   when: ssh_authorized_keys | length > 0
+
+- name: Configure SSH authorized keys from key files
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ lookup('file', item) }}"
+    state: present
+  with_fileglob:
+    - "{{ playbook_dir }}/../files/ssh_keys/*.pub"
