@@ -1,6 +1,0 @@
-name: homelab-infrastructure
-runtime:
-  name: nodejs
-  options:
-    typescript: true
-description: Proxmox VM and LXC container infrastructure for the homelab

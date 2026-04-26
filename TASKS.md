@@ -28,7 +28,7 @@ See [REFACTORING.md](REFACTORING.md) for architectural decisions.
 | ✅ | Create inventory: `hosts.yml`, `host_vars/`, `group_vars/` | proxmox_hosts + docker_hosts; vault.yml scaffolds |
 | ✅ | `roles/common` — base packages, timezone, SSH keys | defaults + tasks |
 | ✅ | `roles/proxmox_host` — repos, ZFS, networking, GPU passthrough | IOMMU, vfio-pci, handlers for grub/initramfs |
-| ✅ | `roles/proxmox_guests` — VM/LXC provisioning via Proxmox API | Replaces Pulumi; proxmox_kvm for VMs, proxmox for LXCs, GPU device passthrough |
+| ✅ | `roles/proxmox_guests` — VM/LXC provisioning via Proxmox API | proxmox_kvm for VMs, proxmox for LXCs, GPU device passthrough |
 | ✅ | `roles/docker_host` — Docker CE + compose + daemon.json | Jinja2 template for daemon.json |
 | ✅ | Port VM/LXC definitions to host_vars | EQ12: VM-100, CT-101/102/104; N5 Pro: VM-200, CT-201 |
 
@@ -66,16 +66,16 @@ See [REFACTORING.md](REFACTORING.md) for architectural decisions.
 | ✅ | `playbooks/configure-guests.yml` | common + docker_host roles |
 | ✅ | `playbooks/deploy-services.yml` | Service roles with when conditions + tags |
 | ✅ | `playbooks/site.yml` | Master playbook — full end-to-end, no manual gap |
-| ✅ | Update `Taskfile.yml` | Removed Pulumi tasks, simplified deploy:full |
+| ✅ | Update `Taskfile.yml` | Simplified deploy:full |
 
 ## Phase 6: Documentation
 
 | Status | Task | Notes |
 |---|---|---|
-| ✅ | Update README.md | Two-layer architecture, N5 Pro services, removed Pulumi |
-| ✅ | Update ONBOARDING.md | Removed Pulumi setup/import steps |
+| ✅ | Update README.md | Two-layer architecture, N5 Pro services |
+| ✅ | Update ONBOARDING.md | Ansible-only setup steps |
 | ✅ | Update docs/architecture.md | N5 Pro topology, network map, GPU passthrough, port reference |
-| ✅ | Update REFACTORING.md | Document consolidation from Pulumi to Ansible-only |
+| ✅ | Update REFACTORING.md | Architecture and decisions |
 
 ## Verification
 

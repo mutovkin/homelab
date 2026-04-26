@@ -19,23 +19,7 @@ This repository started as configuration for a single Beelink EQ12 Pro machine. 
 | Beelink EQ12 Pro | Intel N100, 4 cores | 16GB | 2TB NVMe (ZFS) | Proxmox — HA, Docker services, Nginx Proxy Manager |
 | Minisforum N5 Pro | AMD Ryzen AI 9 HX PRO 370, 12c/24t | 96GB (32GB GPU UMA) | 8TB NVMe + 5×26TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud |
 
-## Architecture Decision: Ansible-Only (Consolidated from Pulumi)
-
-### Original Plan: Three-Layer with Pulumi
-
-The initial refactoring proposed three layers: Ansible (host config) → Pulumi (VM/LXC lifecycle) → Docker Compose (services). Pulumi was chosen for its state tracking and drift detection.
-
-### Why We Consolidated to Two Layers
-
-After months of implementation, Pulumi was dropped in favor of managing VMs/LXCs directly through Ansible's `community.general.proxmox` and `community.general.proxmox_kvm` modules. Reasons:
-
-1. **Scale doesn't justify the toolchain** — 8 static resources (4 VMs, 4 LXCs) across 2 hosts don't change often enough to need Pulumi's stateful lifecycle management.
-2. **Import ceremony was the adoption blocker** — `pulumi import` for existing resources was the critical first step that never completed. The real-ID format guessing (`pve/qemu/100` vs `100` vs `node/pve/qemu/100`) and parent URN requirements made onboarding painful.
-3. **Automation gap** — `site.yml` couldn't run end-to-end because Pulumi had to execute between two Ansible steps. This required either a Taskfile with multiple commands or a shell task hack.
-4. **GPU passthrough was awkward** — VAAPI device sharing requires adding raw lines to `/etc/pve/lxc/*.conf`. Ansible's `blockinfile` handles this natively. Pulumi's provider had no equivalent.
-5. **Single tool = lower cognitive load** — One tool, one language (YAML), one state model, one set of docs.
-
-### Current Architecture: Two Layers
+## Architecture: Two-Layer Automation
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -76,8 +60,6 @@ homelab/
 │   ├── eq12.md                            # EQ12 hardware specs
 │   └── n5pro.md                           # N5 Pro hardware, GPU config
 │
-├── infrastructure/                        # [ARCHIVED] Original Pulumi code, kept as reference
-│
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── requirements.yml
@@ -93,7 +75,7 @@ homelab/
 │   └── roles/
 │       ├── common/
 │       ├── proxmox_host/
-│       ├── proxmox_guests/                # VM/LXC provisioning (replaces Pulumi)
+│       ├── proxmox_guests/                # VM/LXC provisioning via Proxmox API
 │       ├── docker_host/
 │       └── services/{postgresql,observability,immich,frigate,...}/
 │
@@ -120,5 +102,3 @@ homelab/
 
 1. **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Used via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 for Frigate and Immich.
 2. **TrueNAS SATA passthrough** — JMicron JMB58x controller at c1:00.0 uses full PCI passthrough in VM-200 (requires VM, not LXC).
-3. **Pulumi import** — Eliminated by consolidating to Ansible. The `community.general.proxmox` modules create-or-update idempotently, no import needed.
-4. **Automation gap** — Eliminated. `site.yml` runs end-to-end without any manual steps between playbooks.

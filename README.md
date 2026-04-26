@@ -53,7 +53,6 @@ homelab/
 │   ├── eq12.md
 │   ├── n5pro.md
 │   └── architecture.md
-├── infrastructure/        # [ARCHIVED] Pulumi TypeScript — replaced by proxmox_guests role
 ├── ansible/               # Ansible — host config, VM/LXC provisioning, service deployment
 │   ├── inventory/         # Hosts, group vars, host vars, vault
 │   ├── playbooks/         # Orchestration playbooks
