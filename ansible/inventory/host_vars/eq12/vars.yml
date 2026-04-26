@@ -19,6 +19,70 @@ data_mount: /data
 # Network
 proxmox_bridge: vmbr0
 
+# === VM/LXC Definitions (managed by proxmox_guests role) ===
+# Ported from infrastructure/machines/eq12.ts
+
+proxmox_vms:
+  - vmid: 100
+    name: ha
+    cores: 2
+    memory: 4096
+    scsi:
+      scsi0: "local-zfs:32,format=raw"
+    bios: seabios
+    machine: q35
+    onboot: true
+    started: true
+    tags:
+      - proxmox-helper-scripts
+      - home-assistant
+    description: "Home Assistant OS — QEMU VM"
+
+proxmox_lxcs:
+  - vmid: 101
+    hostname: deb-docker
+    ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+    cores: 2
+    memory: 4096
+    root_disk_size: 8
+    storage: local-zfs
+    mounts:
+      mp0: "local-zfs:110,mp=/data"
+    nesting: true
+    onboot: true
+    started: true
+    tags:
+      - docker
+    description: "Primary Docker host — runs all container services (observability, postgresql, vaultwarden, etc.)"
+
+  - vmid: 102
+    hostname: ubuntu-docker
+    ostemplate: "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+    cores: 1
+    memory: 1024
+    root_disk_size: 8
+    storage: local-zfs
+    nesting: true
+    onboot: false
+    started: false
+    tags:
+      - docker
+    description: "Secondary Docker host (Ubuntu 22.04) — currently unused"
+
+  - vmid: 104
+    hostname: nginxproxymanager
+    ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+    cores: 2
+    memory: 1024
+    root_disk_size: 4
+    storage: local-zfs
+    nesting: false
+    onboot: true
+    started: true
+    tags:
+      - nginx-proxy-manager
+    description: "Nginx Proxy Manager — reverse proxy and SSL management"
+
 # Services to deploy on this host's Docker LXC (CT 101)
 # Each entry corresponds to an Ansible role in roles/services/
 services:

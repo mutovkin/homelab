@@ -1,6 +1,6 @@
 ---
 # Configure Docker and base packages inside VMs/LXCs
-# Run AFTER Pulumi creates the VMs/LXCs (pulumi up)
+# Run AFTER proxmox-hosts.yml has provisioned the VMs/LXCs
 # Run: ansible-playbook playbooks/configure-guests.yml
 
 - name: Configure Docker hosts

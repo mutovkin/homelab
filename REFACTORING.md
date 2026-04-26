@@ -1,12 +1,12 @@
-# Homelab Repository Refactoring Proposal
+# Homelab Repository Refactoring
 
 ## Motivation
 
-This repository started as configuration for a single Beelink EQ12 Pro machine. With the addition of a Minisforum N5 Pro (96GB RAM, Proxmox 9.1.5), the repo needs to evolve into a multi-machine homelab monorepo with proper automation.
+This repository started as configuration for a single Beelink EQ12 Pro machine. With the addition of a Minisforum N5 Pro (96GB RAM, AMD Radeon 890M GPU, Proxmox 9.1.6), the repo evolved into a multi-machine homelab monorepo with proper automation.
 
-### Current Pain Points
+### Original Pain Points
 
-- **Single-machine assumption** — Directory structure, networking, and docs all assume one Proxmox host
+- **Single-machine assumption** — Directory structure, networking, and docs all assumed one Proxmox host
 - **No automation** — VMs/LXCs created manually via Proxmox UI, Docker stacks deployed with manual `docker compose up`
 - **No state tracking** — If a VM or LXC is deleted, nothing detects the drift or can recreate it
 - **Manual secrets** — `.env` files created by hand from `.env.example`, not version-controlled
@@ -16,123 +16,89 @@ This repository started as configuration for a single Beelink EQ12 Pro machine. 
 
 | Machine | CPU | RAM | Storage | Role |
 |---|---|---|---|---|
-| Beelink EQ12 Pro | Intel N100, 4 cores | 16GB | 2TB NVMe (ZFS) | Proxmox host — HA, Docker services, Nginx Proxy Manager |
-| Minisforum N5 Pro | AMD (TBD) | 96GB (32GB GPU / 64GB system) | TBD | Proxmox 9.1.5 — TrueNAS, GPU workloads, Docker services |
+| Beelink EQ12 Pro | Intel N100, 4 cores | 16GB | 2TB NVMe (ZFS) | Proxmox — HA, Docker services, Nginx Proxy Manager |
+| Minisforum N5 Pro | AMD Ryzen AI 9 HX PRO 370, 12c/24t | 96GB (32GB GPU UMA) | 8TB NVMe + 5×26TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud |
 
-## Architecture: Three-Layer Automation
+## Architecture Decision: Ansible-Only (Consolidated from Pulumi)
 
-### Why Three Tools?
+### Original Plan: Three-Layer with Pulumi
 
-Each layer of the homelab has different requirements. No single tool is optimal for all three:
+The initial refactoring proposed three layers: Ansible (host config) → Pulumi (VM/LXC lifecycle) → Docker Compose (services). Pulumi was chosen for its state tracking and drift detection.
+
+### Why We Consolidated to Two Layers
+
+After months of implementation, Pulumi was dropped in favor of managing VMs/LXCs directly through Ansible's `community.general.proxmox` and `community.general.proxmox_kvm` modules. Reasons:
+
+1. **Scale doesn't justify the toolchain** — 8 static resources (4 VMs, 4 LXCs) across 2 hosts don't change often enough to need Pulumi's stateful lifecycle management.
+2. **Import ceremony was the adoption blocker** — `pulumi import` for existing resources was the critical first step that never completed. The real-ID format guessing (`pve/qemu/100` vs `100` vs `node/pve/qemu/100`) and parent URN requirements made onboarding painful.
+3. **Automation gap** — `site.yml` couldn't run end-to-end because Pulumi had to execute between two Ansible steps. This required either a Taskfile with multiple commands or a shell task hack.
+4. **GPU passthrough was awkward** — VAAPI device sharing requires adding raw lines to `/etc/pve/lxc/*.conf`. Ansible's `blockinfile` handles this natively. Pulumi's provider had no equivalent.
+5. **Single tool = lower cognitive load** — One tool, one language (YAML), one state model, one set of docs.
+
+### Current Architecture: Two Layers
 
 ```
-┌─────────────────────────────────────────────────┐
-│  Layer 3: Docker Compose (service definitions)  │
-│  Deployed by Ansible service roles              │
-├─────────────────────────────────────────────────┤
-│  Layer 2: Pulumi/TypeScript (VM/LXC lifecycle)  │
-│  Stateful — tracks what exists, diffs, deletes  │
-├─────────────────────────────────────────────────┤
-│  Layer 1: Ansible (Proxmox host OS config)      │
-│  Convergent — packages, ZFS, networking, GPU    │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Layer 2: Docker Compose                                     │
+│  Service definitions in containers/                          │
+│  Deployed by Ansible service roles                           │
+├──────────────────────────────────────────────────────────────┤
+│  Layer 1: Ansible                                            │
+│  Proxmox host config + VM/LXC provisioning + guest config    │
+│  + service deployment — single `site.yml` runs everything    │
+└──────────────────────────────────────────────────────────────┘
 ```
-
-### Layer 1: Ansible — Proxmox Host Configuration
-
-**What it manages:** Proxmox OS packages, repositories, ZFS pool/scrub schedules, network bridges, GPU passthrough (IOMMU, vfio-pci), kernel parameters, SSH keys.
-
-**Why Ansible:** Host configuration is convergent — you declare "these packages should be installed, this config file should have these contents" and Ansible makes it so. There's no meaningful "state" to track; re-running the same playbook is always safe and idempotent.
-
-### Layer 2: Pulumi (TypeScript) — VM/LXC Lifecycle
-
-**What it manages:** Creation, modification, and deletion of VMs and LXC containers on both Proxmox hosts. Includes resource allocation (cores, memory, disk), network interfaces, PCI passthrough assignments, and cloud-init configuration.
-
-**Why Pulumi over Ansible for this layer:**
-
-- **State tracking** — Pulumi maintains a state file of what resources exist. If you remove an LXC from the code and run `pulumi up`, it deletes the LXC from Proxmox. Ansible has no equivalent — it runs tasks but doesn't know what *should not* exist.
-- **Drift detection** — `pulumi preview` shows what changed between your code and reality. Ansible's `--check` mode only shows what its tasks *would do*, not whether someone manually changed a VM's memory in the Proxmox UI.
-- **CDK-like experience** — TypeScript with typed resource definitions feels like AWS CDK. Reusable `ComponentResource` classes for LXCs and VMs with autocompletion and compile-time checks.
-- **Diff before apply** — `pulumi preview` shows a clear diff of what will be created/updated/deleted before any changes happen.
-
-**Why Pulumi over Terraform:**
-
-- TypeScript instead of HCL — more expressive, real programming language, familiar to CDK users
-- `@muhlba91/pulumi-proxmoxve` is a native Pulumi provider (not a Terraform bridge), actively maintained
-- Pulumi state can be stored locally (`pulumi login --local`) with no cloud dependency
-
-**Why NOT Pulumi for host config:**
-
-- Pulumi is designed for resource lifecycle, not configuration management. Installing apt packages or editing config files inside a running machine is Ansible's domain.
-
-### Layer 3: Ansible + Docker Compose — Service Deployment
-
-**What it manages:** Installing Docker inside VMs/LXCs, templating `.env` files from vault-encrypted secrets, syncing compose files + config, running `docker compose up`.
-
-**Why Ansible (not Pulumi) for this layer:**
-
-- Compose files are the natural service definition format — well-understood, portable, debuggable with plain `docker compose up`
-- Ansible's `community.docker.docker_compose_v2` module wraps compose natively
-- Ansible-vault provides secret injection into `.env` templates without a separate secrets manager
-- The `containers/` directory stays standalone-usable for manual debugging
 
 ### Orchestration Flow
 
-```
-1. ansible-playbook proxmox-hosts.yml      # Configure Proxmox OS on both machines
-2. cd infrastructure && pulumi up           # Create/update/delete VMs & LXCs
-3. ansible-playbook configure-guests.yml    # Install Docker inside VMs/LXCs
-4. ansible-playbook deploy-services.yml     # Deploy compose stacks
-```
+```bash
+# Single command, end-to-end:
+task deploy:full
+# Equivalent to: ansible-playbook ansible/playbooks/site.yml
 
-A `Taskfile.yml` at repo root wraps these as: `task infra:up`, `task config:hosts`, `task deploy:all`.
+# Step by step:
+task infra:hosts      # 1. Configure Proxmox OS + provision VMs/LXCs
+task infra:guests     # 2. Configure guests (Docker, packages)
+task deploy:services  # 3. Deploy compose stacks
+```
 
 ## Directory Structure
 
 ```
 homelab/
-├── README.md                              # Overview, quickstart
+├── README.md
 ├── REFACTORING.md                         # This document
 ├── TASKS.md                               # Implementation tracking
 ├── Taskfile.yml                           # Orchestration wrapper
 │
 ├── docs/
-│   ├── architecture.md                    # Network topology, cross-host dependencies
-│   ├── eq12.md                            # EQ12 hardware, current VM/LXC inventory
-│   └── n5pro.md                           # N5 Pro hardware, GPU config, TrueNAS plans
+│   ├── architecture.md                    # Topology, networks, ports, GPU passthrough
+│   ├── eq12.md                            # EQ12 hardware specs
+│   └── n5pro.md                           # N5 Pro hardware, GPU config
 │
-├── infrastructure/                        # Pulumi (TypeScript)
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── Pulumi.yaml / Pulumi.prod.yaml
-│   ├── index.ts
-│   ├── machines/
-│   │   ├── eq12.ts                        # EQ12: HA VM-100, deb-docker CT-101, etc.
-│   │   └── n5pro.ts                       # N5 Pro: TrueNAS VM, Docker LXC
-│   └── components/
-│       ├── lxc-container.ts               # Reusable ComponentResource
-│       └── virtual-machine.ts             # Reusable ComponentResource
+├── infrastructure/                        # [ARCHIVED] Original Pulumi code, kept as reference
 │
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── requirements.yml
 │   ├── inventory/
-│   │   ├── hosts.yml                      # proxmox_hosts + docker_hosts
-│   │   ├── host_vars/{eq12,n5pro}/        # Per-machine vars + vault
+│   │   ├── hosts.yml
+│   │   ├── host_vars/{eq12,n5pro}/        # VM/LXC definitions + per-host vault
 │   │   └── group_vars/all/                # Shared config + secrets
 │   ├── playbooks/
-│   │   ├── site.yml
-│   │   ├── proxmox-hosts.yml
-│   │   ├── configure-guests.yml
-│   │   └── deploy-services.yml
+│   │   ├── site.yml                       # Master — runs everything end-to-end
+│   │   ├── proxmox-hosts.yml              # Host config + VM/LXC provisioning
+│   │   ├── configure-guests.yml           # Docker installation
+│   │   └── deploy-services.yml            # Compose stack deployment
 │   └── roles/
 │       ├── common/
 │       ├── proxmox_host/
+│       ├── proxmox_guests/                # VM/LXC provisioning (replaces Pulumi)
 │       ├── docker_host/
-│       └── services/{postgresql,observability,...}/
+│       └── services/{postgresql,observability,immich,frigate,...}/
 │
-└── containers/                            # Docker Compose (preserved, standalone-usable)
-    └── {postgresql,observability,vaultwarden,...}/
+└── containers/                            # Docker Compose (standalone-usable)
+    └── {postgresql,observability,immich,frigate,nextcloud,...}/
 ```
 
 ## Secrets Strategy
@@ -140,36 +106,19 @@ homelab/
 | Secret type | Stored in | Encrypted by |
 |---|---|---|
 | Service credentials (DB passwords, API keys) | `ansible/inventory/**/vault.yml` | ansible-vault |
-| Proxmox API tokens (for Pulumi) | `Pulumi.prod.yaml` | `pulumi config set --secret` |
+| Proxmox API tokens | `ansible/inventory/**/vault.yml` | ansible-vault |
 | `.env` files on target hosts | Templated at deploy time from vault vars | Never committed |
-
-**Bitwarden circular dependency resolved:** Vault-encrypted secrets in the repo can bootstrap Vaultwarden itself. Bitwarden remains the human-facing password manager; ansible-vault is the machine-facing secret store.
 
 ## Networking
 
-- **Cross-host:** Direct LAN (simplest for two machines on the same network)
-- **Docker networks:** 172.x.x.x ranges preserved (avoid 192.168.x.x LAN conflicts)
-- **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on whichever host runs the observability stack
+- **Cross-host:** Direct LAN (both machines on the same 192.168.x.x network)
+- **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20-25.x. N5 Pro: 172.30-35.x.
+- **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on EQ12
+- **NFS:** N5 Pro Docker LXC → TrueNAS VM for Frigate recordings and media storage
 
-## Scope
+## Resolved Questions
 
-**Included:**
-
-- Repository restructuring + documentation
-- Ansible roles for Proxmox host config and Docker service deployment
-- Pulumi project for VM/LXC lifecycle on both machines
-- Secrets migration to ansible-vault + pulumi config
-- Taskfile for orchestration
-
-**Excluded:**
-
-- TrueNAS internal configuration (managed via TrueNAS UI/API)
-- GPU workload container definitions (deferred until N5 Pro services are decided)
-- Network security hardening (later phase)
-- Service migration between machines (deferred — service placement decided later)
-
-## Open Questions
-
-1. **N5 Pro GPU** — Is the 32GB GPU allocation for AMD integrated graphics? Which VMs need GPU access?
-2. **Pulumi import** — Existing EQ12 VMs/LXCs (100, 101, 102, 103) must be imported into Pulumi state before management. One-time operation, critical to avoid recreation.
-3. **Ansible invokes Pulumi?** — Orchestration requires Pulumi between two Ansible steps. Taskfile handles this, but `site.yml` alone can't do a full rebuild. Alternative: Ansible calls Pulumi via shell task.
+1. **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Used via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 for Frigate and Immich.
+2. **TrueNAS SATA passthrough** — JMicron JMB58x controller at c1:00.0 uses full PCI passthrough in VM-200 (requires VM, not LXC).
+3. **Pulumi import** — Eliminated by consolidating to Ansible. The `community.general.proxmox` modules create-or-update idempotently, no import needed.
+4. **Automation gap** — Eliminated. `site.yml` runs end-to-end without any manual steps between playbooks.

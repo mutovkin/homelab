@@ -1,13 +1,12 @@
 ---
-# Master playbook — runs all Ansible-managed steps in order
-# NOTE: This does NOT run Pulumi. For a full rebuild, use:
-#   1. ansible-playbook playbooks/proxmox-hosts.yml
-#   2. cd infrastructure && pulumi up
-#   3. ansible-playbook playbooks/configure-guests.yml
-#   4. ansible-playbook playbooks/deploy-services.yml
-# Or simply: task deploy:full (which runs all 4 steps including Pulumi)
+# Master playbook — full end-to-end deployment
+# 1. Configure Proxmox host OS + provision VMs/LXCs
+# 2. Configure Docker inside guest VMs/LXCs
+# 3. Deploy Docker Compose services
+# Run: ansible-playbook playbooks/site.yml
+# Or: task deploy:full
 
-- name: Configure Proxmox hosts
+- name: Configure Proxmox hosts and provision guests
   ansible.builtin.import_playbook: proxmox-hosts.yml
 
 - name: Configure Docker guests

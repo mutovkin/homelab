@@ -1,0 +1,91 @@
+---
+# Provision VMs and LXC containers on a Proxmox host
+# Uses community.general.proxmox_kvm for VMs and community.general.proxmox for LXCs
+# Both modules are idempotent — they check if the vmid exists before creating
+
+- name: Provision virtual machines
+  community.general.proxmox_kvm:
+    api_host: "{{ ansible_host }}"
+    api_user: "{{ vault_proxmox_api_user }}"
+    api_token_id: "{{ vault_proxmox_api_token_id }}"
+    api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    name: "{{ item.name }}"
+    cores: "{{ item.cores | default(proxmox_vm_defaults.cores) }}"
+    sockets: "{{ item.sockets | default(proxmox_vm_defaults.sockets) }}"
+    memory: "{{ item.memory | default(proxmox_vm_defaults.memory) }}"
+    bios: "{{ item.bios | default(proxmox_vm_defaults.bios) }}"
+    machine: "{{ item.machine | default(proxmox_vm_defaults.machine) }}"
+    onboot: "{{ item.onboot | default(proxmox_vm_defaults.onboot) }}"
+    scsihw: virtio-scsi-single
+    scsi: "{{ item.scsi | default({}) }}"
+    net: "{{ item.net | default({'net0': 'virtio,bridge=' + (item.net_bridge | default(proxmox_vm_defaults.net_bridge))}) }}"
+    hostpci: "{{ item.hostpci | default({}) }}"
+    efidisk0: "{{ item.efidisk0 | default(omit) }}"
+    tags: "{{ item.tags | default([]) }}"
+    description: "{{ item.description | default('') }}"
+    state: present
+  loop: "{{ proxmox_vms }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+- name: Start virtual machines
+  community.general.proxmox_kvm:
+    api_host: "{{ ansible_host }}"
+    api_user: "{{ vault_proxmox_api_user }}"
+    api_token_id: "{{ vault_proxmox_api_token_id }}"
+    api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    state: started
+  loop: "{{ proxmox_vms | selectattr('started', 'defined') | selectattr('started', 'equalto', true) | list + proxmox_vms | rejectattr('started', 'defined') | list }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+- name: Provision LXC containers
+  community.general.proxmox:
+    api_host: "{{ ansible_host }}"
+    api_user: "{{ vault_proxmox_api_user }}"
+    api_token_id: "{{ vault_proxmox_api_token_id }}"
+    api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    hostname: "{{ item.hostname }}"
+    ostemplate: "{{ item.ostemplate | default(proxmox_lxc_defaults.ostemplate) }}"
+    cores: "{{ item.cores | default(proxmox_lxc_defaults.cores) }}"
+    memory: "{{ item.memory | default(proxmox_lxc_defaults.memory) }}"
+    swap: "{{ item.swap | default(proxmox_lxc_defaults.swap) }}"
+    storage: "{{ item.storage | default(proxmox_lxc_defaults.storage) }}"
+    disk: "{{ item.root_disk_size | default(proxmox_lxc_defaults.root_disk_size) }}"
+    mounts: "{{ item.mounts | default({}) }}"
+    netif: "{{ item.netif | default({'net0': 'name=eth0,bridge=' + (item.net_bridge | default(proxmox_lxc_defaults.net_bridge)) + ',ip=dhcp'}) }}"
+    onboot: "{{ item.onboot | default(proxmox_lxc_defaults.onboot) }}"
+    unprivileged: "{{ item.unprivileged | default(proxmox_lxc_defaults.unprivileged) }}"
+    features:
+      - "nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
+    tags: "{{ item.tags | default([]) }}"
+    description: "{{ item.description | default('') }}"
+    state: present
+  loop: "{{ proxmox_lxcs }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Start LXC containers
+  community.general.proxmox:
+    api_host: "{{ ansible_host }}"
+    api_user: "{{ vault_proxmox_api_user }}"
+    api_token_id: "{{ vault_proxmox_api_token_id }}"
+    api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    state: started
+  loop: "{{ proxmox_lxcs | selectattr('started', 'defined') | selectattr('started', 'equalto', true) | list + proxmox_lxcs | rejectattr('started', 'defined') | list }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Configure GPU device passthrough for LXC containers
+  ansible.builtin.include_tasks: lxc-gpu-passthrough.yml
+  loop: "{{ proxmox_lxcs | selectattr('gpu_passthrough', 'defined') | selectattr('gpu_passthrough', 'equalto', true) | list }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — GPU passthrough"

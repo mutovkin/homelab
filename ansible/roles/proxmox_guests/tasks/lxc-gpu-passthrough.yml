@@ -1,0 +1,20 @@
+---
+# Configure GPU device passthrough for an LXC container
+# Adds /dev/dri (VAAPI) access for hardware video encoding/decoding
+# This runs on the Proxmox HOST and modifies /etc/pve/lxc/<vmid>.conf
+
+- name: "CT {{ item.vmid }} — Add GPU device passthrough to LXC config"
+  ansible.builtin.blockinfile:
+    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
+    marker: "# {mark} ANSIBLE MANAGED — GPU device passthrough"
+    block: |
+      lxc.cgroup2.devices.allow: c 226:* rwm
+      lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
+  notify: restart lxc
+  register: gpu_config_result
+
+- name: "CT {{ item.vmid }} — Verify /dev/dri exists on host"
+  ansible.builtin.stat:
+    path: /dev/dri
+  register: dev_dri
+  failed_when: not dev_dri.stat.exists

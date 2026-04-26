@@ -40,10 +40,71 @@ data_mount: /data
 proxmox_bridge: vmbr1 # 10GbE (Aquantia AQC113) — primary management
 proxmox_bridge_secondary: vmbr0 # 5GbE (Realtek RTL8126) — DHCP internet
 
-# Services to deploy on this host's Docker LXC (CT 201)
-# Empty for now — service placement TBD
-services: []
-  # - observability  # Candidate to move here (more RAM for VictoriaMetrics)
+# === VM/LXC Definitions (managed by proxmox_guests role) ===
+# Ported from infrastructure/machines/n5pro.ts
 
-# Docker network subnets (will be assigned when services are placed)
-docker_networks: {}
+proxmox_vms:
+  - vmid: 200
+    name: truenas
+    cores: 4
+    memory: 16384
+    scsi:
+      scsi0: "local-zfs:32,format=raw"
+    bios: ovmf
+    machine: q35
+    efidisk0:
+      storage: local-zfs
+      format: raw
+      efitype: 4m
+      pre_enrolled_keys: false
+    hostpci:
+      hostpci0: "0000:c1:00.0,pcie=1"  # JMicron SATA controller — 5× 26TB HDDs
+    net_bridge: vmbr1
+    onboot: true
+    started: true
+    tags:
+      - truenas
+      - storage
+    description: "TrueNAS SCALE — NAS and storage management. JMicron SATA controller passed through for direct access to 5× 26TB HDDs."
+
+proxmox_lxcs:
+  - vmid: 201
+    hostname: n5-docker
+    ostemplate: "local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst"
+    cores: 8
+    memory: 24576  # 24GB — Immich + Frigate + NextCloud + overhead
+    root_disk_size: 8
+    storage: local-zfs
+    mounts:
+      mp0: "local-zfs:200,mp=/data"
+    net_bridge: vmbr1
+    nesting: true
+    gpu_passthrough: true  # /dev/dri for VAAPI (Frigate, Immich ML)
+    onboot: true
+    started: true
+    tags:
+      - docker
+    description: "Docker host for N5 Pro services — Immich, Frigate, NextCloud, PostgreSQL"
+
+# Services to deploy on this host's Docker LXC (CT 201)
+services:
+  - postgresql
+  - immich
+  - frigate
+  - nextcloud
+  - portainer
+  - watchtower
+
+# Docker network subnets
+docker_networks:
+  postgresql: "172.30.0.0/24"
+  immich: "172.31.0.0/24"
+  frigate: "172.32.0.0/24"
+  nextcloud: "172.33.0.0/24"
+  portainer: "172.34.0.0/24"
+  watchtower: "172.35.0.0/24"
+
+# NFS mount from TrueNAS (for Frigate recordings, media storage)
+truenas_nfs_server: "192.168.30.200"  # TrueNAS IP — update once assigned
+truenas_media_share: "/mnt/pool/media"
+truenas_frigate_share: "/mnt/pool/frigate"

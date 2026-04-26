@@ -1,6 +1,6 @@
 # Onboarding Guide
 
-How to bring your existing, running homelab infrastructure under Pulumi and Ansible
+How to bring your existing, running homelab infrastructure under Ansible
 management **without losing data or disrupting running services**.
 
 > **The golden rule**: Every step in this guide is read-only or additive by default.
@@ -11,53 +11,26 @@ management **without losing data or disrupting running services**.
 
 ## Table of Contents
 
-1. [Concepts: What Pulumi and Ansible Do](#1-concepts-what-pulumi-and-ansible-do)
+1. [Concepts: What Ansible Does](#1-concepts-what-ansible-does)
 2. [Prerequisites](#2-prerequisites)
 3. [Step 1 — Ansible: Install Tools on Your Mac](#step-1--ansible-install-tools-on-your-mac)
 4. [Step 2 — Ansible: Test Connectivity](#step-2--ansible-test-connectivity)
 5. [Step 3 — Ansible: Encrypt Your Secrets](#step-3--ansible-encrypt-your-secrets)
 6. [Step 4 — Ansible: Dry-Run Host Configuration](#step-4--ansible-dry-run-host-configuration)
-7. [Step 5 — Pulumi: Install and Initialize](#step-5--pulumi-install-and-initialize)
-8. [Step 6 — Pulumi: Import Existing Resources](#step-6--pulumi-import-existing-resources)
-9. [Step 7 — Pulumi: Verify State Matches Reality](#step-7--pulumi-verify-state-matches-reality)
-10. [Step 8 — Migrate Stacks from Portainer to Ansible](#step-8--migrate-stacks-from-portainer-to-ansible)
-11. [Step 9 — Ansible: Dry-Run Service Deployment](#step-9--ansible-dry-run-service-deployment)
-12. [Step 10 — Go Live](#step-10--go-live)
-13. [Rollback & Recovery](#rollback--recovery)
-14. [Glossary](#glossary)
+7. [Step 5 — Migrate Stacks from Portainer to Ansible](#step-5--migrate-stacks-from-portainer-to-ansible)
+8. [Step 6 — Ansible: Dry-Run Service Deployment](#step-6--ansible-dry-run-service-deployment)
+9. [Step 7 — Go Live](#step-7--go-live)
+10. [Rollback & Recovery](#rollback--recovery)
+11. [Glossary](#glossary)
 
 ---
 
-## 1. Concepts: What Pulumi and Ansible Do
-
-### Pulumi (Infrastructure Lifecycle)
-
-Pulumi is an **Infrastructure as Code (IaC)** tool. You describe the desired state of
-your VMs and LXC containers in TypeScript, and Pulumi figures out what API calls to
-make to Proxmox to make reality match your code.
-
-**Key concepts:**
-
-| Term             | What it means |
-|------------------|---------------|
-| **Stack**        | A named deployment environment (we use `prod`). Think of it as a saved snapshot of "what Pulumi thinks exists." |
-| **State**        | A JSON file that records every resource Pulumi manages — IDs, properties, dependencies. Stored locally in `~/.pulumi` by default. |
-| **Preview**      | Shows what Pulumi *would* do without actually doing it. Like a diff. Always safe. |
-| **Up**           | Applies the changes shown in preview. Creates, updates, or deletes resources. |
-| **Import**       | Tells Pulumi "this resource already exists, don't create it — just start tracking it." **This is the critical command for onboarding.** |
-| **Refresh**      | Re-reads the actual state from Proxmox and updates Pulumi's state file to match. Doesn't change any real infrastructure. |
-| **Resource URN** | A unique identifier for each resource in Pulumi's world, like `urn:pulumi:prod::homelab-infrastructure::homelab:proxmox:LxcContainer::eq12-deb-docker`. |
-
-**Why we need `import`:** Your VMs/LXCs already exist on Proxmox. If you just run
-`pulumi up`, Pulumi would try to *create* them because it has no record of them.
-The `import` command says "Proxmox already has VM 100 — start tracking it, don't
-create a duplicate."
-
-### Ansible (Configuration Management)
+## 1. Concepts: What Ansible Does
 
 Ansible is a **configuration management** and **automation** tool. You describe what
-packages should be installed, what files should exist, and what services should be
-running — Ansible makes it so via SSH.
+packages should be installed, what files should exist, what VMs/LXCs should be
+provisioned, and what services should be running — Ansible makes it so via SSH and
+the Proxmox API.
 
 **Key concepts:**
 
@@ -66,37 +39,33 @@ running — Ansible makes it so via SSH.
 | **Inventory**              | The list of machines Ansible manages (`ansible/inventory/hosts.yml`). Groups machines by role (e.g., `proxmox_hosts`, `docker_hosts`). |
 | **Playbook**               | A YAML file describing a sequence of tasks to run on a set of hosts. Like a recipe. |
 | **Role**                   | A reusable bundle of tasks, templates, and defaults. Our roles live in `ansible/roles/`. |
-| **Task**                   | A single action: install a package, copy a file, start a service, deploy a Docker stack. |
+| **Task**                   | A single action: install a package, copy a file, start a service, provision a VM, deploy a Docker stack. |
 | **Handler**                | A task that only runs when *notified* — e.g., restart Docker only if its config changed. |
-| **Idempotent**             | Running the same playbook twice produces the same result. If a package is already installed, Ansible skips it. If a file already has the right content, Ansible leaves it. This is what makes Ansible safe to re-run. |
+| **Idempotent**             | Running the same playbook twice produces the same result. If a package is already installed, Ansible skips it. |
 | **Check mode** (`--check`) | Dry-run mode. Ansible shows what it *would* change without actually changing anything. Always safe. |
 | **Diff** (`--diff`)        | Shows the exact line-by-line differences Ansible would apply. Combine with `--check` for a safe preview. |
-| **Vault**                  | Ansible's built-in encryption for secrets. It encrypts YAML files so passwords never appear in plain text in your Git repository. |
+| **Vault**                  | Ansible's built-in encryption for secrets. Passwords never appear in plain text in Git. |
 | **Tags**                   | Labels on tasks that let you run only a subset. E.g., `--tags postgresql` runs only PostgreSQL deployment. |
 
-**What makes Ansible safe for onboarding:** Most Ansible modules are idempotent. If
-Docker is already installed, Ansible won't reinstall it. If a compose file already
-exists, `synchronize` (rsync) only copies changed files. The `docker_compose_v2`
-module brings a stack to the declared state — if it's already running with the same
-config, it does nothing.
-
-### How They Work Together
+### How Ansible Manages Everything
 
 ```ascii
 ┌─────────────────────────────────────────────────────┐
 │  1. Ansible: Configure Proxmox hosts                │
 │     (packages, networking, ZFS, GPU passthrough)    │
 │                                                     │
-│  2. Pulumi: Create/manage VM and LXC lifecycles     │
-│     (create, resize, destroy VMs/CTs)               │
+│  2. Ansible: Provision VMs and LXC containers       │
+│     (via community.general.proxmox_kvm/proxmox)     │
 │                                                     │
 │  3. Ansible: Configure guests (Docker, packages)    │
-│     (inside the VMs/LXCs Pulumi created)            │
+│     (inside the VMs/LXCs provisioned above)         │
 │                                                     │
 │  4. Ansible: Deploy Docker Compose services         │
 │     (syncs compose files, templates .env, runs up)  │
 └─────────────────────────────────────────────────────┘
 ```
+
+All four steps run via a single command: `task deploy:full` (or `ansible-playbook playbooks/site.yml`).
 
 ---
 
@@ -106,19 +75,17 @@ Install these on your Mac before starting:
 
 ```bash
 # Homebrew packages
-brew install ansible pulumi node go-task
+brew install ansible go-task
 
 # Verify versions
-ansible --version    # 2.20.4
-pulumi version       # v3.230.0
-node --version       # v25.9.0 (for Pulumi TypeScript)
-task --version       # 3.49.1
+ansible --version    # 2.15+
+task --version       # 3.x
 ```
 
 You also need:
 
 - **SSH access**: You should already be able to `ssh root@pve.lan` and `ssh root@deb-docker.lan`
-- **A Proxmox API token** (created later in the Pulumi section)
+- **A Proxmox API token** (created during secrets setup — needed for VM/LXC provisioning)
 
 ---
 
@@ -328,224 +295,7 @@ something you're currently using, stop and investigate before proceeding.
 
 ---
 
-## Step 5 — Pulumi: Install and Initialize
-
-### 5a. Install dependencies
-
-```bash
-cd infrastructure
-npm install
-```
-
-This downloads the Pulumi SDK and the Proxmox provider to `node_modules/`. Nothing
-touches your servers — this is all local.
-
-### 5b. Set up local state backend
-
-By default, Pulumi wants to store state in their cloud service. For a homelab,
-local file storage is simpler and has no external dependencies:
-
-```bash
-# Tell Pulumi to store state on your local filesystem
-pulumi login --local
-```
-
-This stores state in `~/.pulumi/` on your Mac. **Back this directory up** — if you
-lose it, Pulumi won't know what it manages and you'd need to re-import everything.
-
-### 5c. Initialize the stack
-
-```bash
-# Still in infrastructure/
-pulumi stack init prod
-```
-
-This creates an empty state file for a stack named `prod`. Pulumi now exists but
-knows about zero resources.
-
-### 5d. Create a Proxmox API token
-
-Pulumi needs to talk to the Proxmox API. On EQ12:
-
-```bash
-ssh root@pve.lan
-
-# Create an API token (on Proxmox)
-pveum user token add root@pam pulumi --privsep=0
-```
-
-This prints a token like: `root@pam!pulumi=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
-
-Copy it. Then back on your Mac:
-
-```bash
-cd infrastructure
-
-# Store the token as an encrypted secret in Pulumi config
-pulumi config set --secret proxmoxve:apiToken "root@pam!pulumi=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-
-# Set the endpoint
-pulumi config set homelab-infrastructure:eq12Endpoint "https://192.168.25.5:8006"
-```
-
-Repeat for N5 Pro if you want Pulumi to manage that host too.
-
-**What's safe here?** The API token is encrypted in `Pulumi.prod.yaml` using a
-passphrase. The secret never appears in plain text in Git. Pulumi will ask for
-the passphrase when you run commands (or you can set `PULUMI_CONFIG_PASSPHRASE`).
-
----
-
-## Step 6 — Pulumi: Import Existing Resources
-
-This is the most important step. **Import tells Pulumi: "This resource already exists
-on Proxmox. Don't create it — just start tracking it in your state."**
-
-### How import works
-
-```
-Before import:
-  Pulumi state: (empty)
-  Proxmox: VM 100 exists, CT 101 exists, CT 102 exists, CT 104 exists
-  
-  If you ran "pulumi up" now → Pulumi would try to CREATE all four ← BAD!
-
-After import:
-  Pulumi state: VM 100 ✓, CT 101 ✓, CT 102 ✓, CT 104 ✓
-  Proxmox: VM 100 exists, CT 101 exists, CT 102 exists, CT 104 exists
-  
-  If you ran "pulumi up" now → Pulumi sees they match → does nothing ← GOOD!
-```
-
-### 6a. Import EQ12 resources
-
-Run these commands from the `infrastructure/` directory. Each import:
-
-1. Reads the actual resource from Proxmox via its API
-2. Records it in Pulumi's local state file
-3. Does **not** modify the resource in any way
-
-```bash
-cd infrastructure
-
-# Import VM 100 (Home Assistant)
-# Syntax: pulumi import <type> <pulumi-name> <proxmox-id>
-# The type comes from our ComponentResource in the code
-# The proxmox-id for VMs/CTs is typically "node/vmid" format
-
-pulumi import "proxmoxve:VM/virtualMachine:VirtualMachine" \
-  "eq12-homeassistant" \
-  "pve/qemu/100" \
-  --parent "urn:pulumi:prod::homelab-infrastructure::homelab:proxmox:VirtualMachine::eq12-homeassistant"
-
-# Import CT 101 (deb-docker)
-pulumi import "proxmoxve:CT/container:Container" \
-  "eq12-deb-docker" \
-  "pve/lxc/101" \
-  --parent "urn:pulumi:prod::homelab-infrastructure::homelab:proxmox:LxcContainer::eq12-deb-docker"
-
-# Import CT 102 (ubuntu-docker)
-pulumi import "proxmoxve:CT/container:Container" \
-  "eq12-ubuntu-docker" \
-  "pve/lxc/102" \
-  --parent "urn:pulumi:prod::homelab-infrastructure::homelab:proxmox:LxcContainer::eq12-ubuntu-docker"
-
-# Import CT 104 (nginxproxymanager)
-pulumi import "proxmoxve:CT/container:Container" \
-  "eq12-npm" \
-  "pve/lxc/104" \
-  --parent "urn:pulumi:prod::homelab-infrastructure::homelab:proxmox:LxcContainer::eq12-npm"
-```
-
-> **Note on IDs**: The exact resource ID format (`pve/qemu/100` vs `100` vs
-> `node/pve/qemu/100`) depends on the provider version. If an import fails with
-> "resource not found", try variations:
->
-> - `100`
-> - `pve/100`
-> - `pve/qemu/100`
-> - `node/pve/qemu/100`
->
-> Check the provider docs: <https://github.com/muhlba91/pulumi-proxmoxve>
-
-After each import, Pulumi will show you the imported resource's properties and may
-print a code snippet. **You don't need to paste that code** — the definitions already
-exist in `machines/eq12.ts`.
-
-### 6b. Handle import diffs
-
-After importing, Pulumi compares the imported state to your code. If there are
-differences (e.g., your code says 6GB root but the real container has 8GB), Pulumi
-will show them in the next `pulumi preview`.
-
-**This is expected!** You may need to adjust the code in `machines/eq12.ts` to exactly
-match the real configuration. We already tried to match reality when writing the code,
-but there may be subtle differences (different default values, properties you didn't
-set explicitly, etc.).
-
-The goal: run `pulumi preview` and see **no changes**.
-
----
-
-## Step 7 — Pulumi: Verify State Matches Reality
-
-```bash
-cd infrastructure
-
-# Preview what Pulumi thinks needs to change
-pulumi preview --diff
-```
-
-**Reading the output:**
-
-```
-Previewing update (prod):
-
-     Type                              Name              Plan
-     pulumi:pulumi:Stack               homelab-prod      
-     ├─ homelab:proxmox:VirtualMachine eq12-homeassistant
-     ├─ homelab:proxmox:LxcContainer   eq12-deb-docker   
-     ...
-
-Resources:
-    4 unchanged
-```
-
-- **"4 unchanged"** → Perfect. Pulumi's state matches reality and your code.
-- **"~ update"** → Pulumi wants to change something. Read the diff carefully.
-
-### If you see updates
-
-Example: Pulumi wants to change the memory of CT 101 from 4096 to 2048.
-
-This means your code says `memory: 2048` but the real container has 4096 MB.
-Fix the code to match reality:
-
-```typescript
-// machines/eq12.ts — change to match the actual value
-memory: 4096, // 4GB
-```
-
-Then run `pulumi preview --diff` again. Repeat until you see zero changes.
-
-### If you see creates
-
-Pulumi wants to create a resource that already exists. This means the import
-didn't work for that resource. Re-run the import command for it.
-
-### If you see deletes
-
-**⚠️ STOP.** Pulumi wants to delete something. This could mean:
-
-- You removed a resource definition from your code → add it back
-- The import mapped to the wrong resource → re-import with the correct ID
-- There's a naming mismatch → check the Pulumi name matches your code
-
-**Never run `pulumi up` if the preview shows unexpected deletes.**
-
----
-
-## Step 8 — Migrate Stacks from Portainer to Ansible
+## Step 5 — Migrate Stacks from Portainer to Ansible
 
 Your Docker containers are currently managed via Portainer's "Stacks" feature. When
 you deploy a stack through Portainer's UI, it stores its own versioned copy of the
@@ -655,7 +405,7 @@ tool.
 
 ---
 
-## Step 9 — Ansible: Dry-Run Service Deployment
+## Step 6 — Ansible: Dry-Run Service Deployment
 
 Now test whether Ansible's service deployment would disrupt your running containers.
 
@@ -714,11 +464,11 @@ task deploy:service -- --tags postgresql
 
 ---
 
-## Step 10 — Go Live
+## Step 7 — Go Live
 
 Once all dry runs look clean, execute the real operations **in this exact order**:
 
-### 10a. Apply Ansible host configuration
+### 7a. Apply Ansible host configuration
 
 ```bash
 # Configure Proxmox host OS (packages, repos, ZFS)
@@ -729,17 +479,7 @@ This installs packages and configures system settings. It does **not** restart
 services or reboot. The only handler that triggers automatically is `update-grub`
 on N5 Pro (for IOMMU), which updates the GRUB config but doesn't reboot.
 
-### 10b. Verify Pulumi state (no apply needed yet)
-
-```bash
-cd infrastructure
-pulumi preview --diff
-```
-
-If zero changes → you're good. The import from Step 6 already adopted your resources.
-You don't need to `pulumi up` unless the preview shows updates you want to apply.
-
-### 10c. Apply Ansible guest configuration
+### 7b. Apply Ansible guest configuration
 
 ```bash
 # Configure Docker inside LXCs (install/update Docker, daemon.json)
@@ -751,7 +491,7 @@ Since Docker is already installed and running, most tasks will report `ok`. If t
 Docker daemon.json changes, Docker will restart (via handler), but **running containers
 survive a Docker daemon restart** — they continue running.
 
-### 10d. Deploy services one at a time
+### 7c. Deploy services one at a time
 
 ```bash
 # Deploy each service individually, checking output as you go
@@ -779,19 +519,6 @@ task deploy:services
 ---
 
 ## Rollback & Recovery
-
-### "Pulumi did something unexpected"
-
-```bash
-# See what Pulumi changed
-pulumi stack export | jq '.deployment.resources[] | .urn'
-
-# Refresh state from Proxmox (reads real state, changes nothing on Proxmox)
-pulumi refresh
-
-# If a resource was modified and you want to revert:
-# Fix the code → pulumi up (to apply the fix)
-```
 
 ### "Ansible changed a file I didn't want changed"
 
@@ -827,38 +554,19 @@ If you lose `.vault_password`, you cannot decrypt your vault files. You'll need 
 
 **Prevention:** Store the vault password in Bitwarden/Vaultwarden.
 
-### Nuclear option: start Pulumi state from scratch
-
-If Pulumi state gets corrupted or out of sync, you can wipe it and re-import.
-This does **not** affect your actual VMs/LXCs — only Pulumi's local records.
-
-```bash
-cd infrastructure
-pulumi stack rm prod --force   # Delete the state
-pulumi stack init prod         # Create fresh state
-# Then re-run all import commands from Step 6
-```
-
----
-
 ## Glossary
 
 | Term                  | Definition |
 |-----------------------|------------|
 | **IaC**               | Infrastructure as Code — defining infrastructure in version-controlled files instead of clicking through GUIs |
 | **Idempotent**        | Running the same operation twice produces the same result. "Install htop" does nothing if htop is already installed. |
-| **State file**        | Pulumi's record of what it manages. A JSON file stored in `~/.pulumi/`. |
 | **Inventory**         | Ansible's list of hosts, organized into groups. Lives in `ansible/inventory/`. |
 | **Playbook**          | A YAML file that defines a sequence of automation tasks to run. |
 | **Role**              | A reusable, organized collection of tasks, templates, and variables with a standard directory structure. |
 | **Vault**             | Ansible's encryption system for secrets. Not to be confused with HashiCorp Vault or Vaultwarden. |
 | **Vault password**    | The single password that encrypts/decrypts all vault files. Stored in `.vault_password` (gitignored). |
-| **Stack**             | A Pulumi deployment target (like "prod" or "staging"). Each stack has its own independent state. |
-| **Provider**          | A Pulumi plugin that knows how to talk to a specific API (in our case, `@muhlba91/pulumi-proxmoxve` talks to Proxmox). |
-| **ComponentResource** | A Pulumi class that bundles related resources together. Our `LxcContainer` and `VirtualMachine` classes wrap the raw provider resources with sensible defaults. |
 | **Check mode**        | Ansible's `--check` flag. Simulates a run without making changes. |
 | **Handler**           | An Ansible task that runs only when triggered by a change (e.g., "restart Docker" only if `daemon.json` changed). |
 | **Tag**               | A label on Ansible tasks/roles that lets you selectively run subsets (e.g., `--tags postgresql`). |
 | **Synchronize**       | An Ansible module that wraps rsync. Copies files from your Mac to the remote host efficiently. |
 | **docker_compose_v2** | An Ansible module that runs `docker compose up/down/pull`. Used by our service roles to deploy stacks. |
-| **URN**               | Uniform Resource Name — Pulumi's unique identifier for each managed resource. |

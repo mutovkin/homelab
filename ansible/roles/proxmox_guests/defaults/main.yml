@@ -1,0 +1,33 @@
+---
+# defaults for proxmox_guests role
+proxmox_vms: []
+proxmox_lxcs: []
+
+# Default VM settings
+proxmox_vm_defaults:
+  cores: 2
+  sockets: 1
+  memory: 2048
+  disk_size: 32
+  storage: local-zfs
+  bios: seabios
+  machine: q35
+  net_bridge: vmbr0
+  net_model: virtio
+  onboot: true
+  started: true
+
+# Default LXC settings
+proxmox_lxc_defaults:
+  cores: 2
+  memory: 2048
+  swap: 512
+  root_disk_size: 8
+  storage: local-zfs
+  ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+  net_bridge: vmbr0
+  onboot: true
+  started: true
+  nesting: false
+  unprivileged: true
+  gpu_passthrough: false

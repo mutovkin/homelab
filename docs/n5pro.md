@@ -122,11 +122,9 @@
 
 ## VM/LXC Definitions
 
-Defined in `infrastructure/machines/n5pro.ts` (Pulumi):
+Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
 
-| ID  | Type | Name      | Cores | RAM   | Storage    | Notes |
-|-----|------|-----------|-------|-------|------------|-------|
-| 200 | VM   | truenas   | 4     | 16 GB | 32 GB boot | UEFI/q35, SATA controller passthrough |
-| 201 | CT   | n5-docker | 4     | 8 GB  | 8 GB root + 200 GB /data | Debian 13, nesting |
-
-No VMs or CTs currently exist on this node.
+| ID  | Type | Name      | Cores | RAM    | Storage    | Notes |
+|-----|------|-----------|-------|--------|------------|-------|
+| 200 | VM   | truenas   | 4     | 16 GB  | 32 GB boot | UEFI/q35, SATA controller PCI passthrough |
+| 201 | CT   | n5-docker | 8     | 24 GB  | 8 GB root + 200 GB /data | Debian 13, nesting, GPU passthrough |

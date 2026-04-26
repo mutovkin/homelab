@@ -49,3 +49,21 @@
         name: services/watchtower
       when: "'watchtower' in services"
       tags: watchtower
+
+    - name: Deploy Immich
+      ansible.builtin.include_role:
+        name: services/immich
+      when: "'immich' in services"
+      tags: immich
+
+    - name: Deploy Frigate
+      ansible.builtin.include_role:
+        name: services/frigate
+      when: "'frigate' in services"
+      tags: frigate
+
+    - name: Deploy NextCloud
+      ansible.builtin.include_role:
+        name: services/nextcloud
+      when: "'nextcloud' in services"
+      tags: nextcloud

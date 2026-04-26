@@ -1,0 +1,41 @@
+---
+- name: Create Frigate deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/frigate"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Frigate compose and config files
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/frigate/"
+    dest: "{{ data_mount }}/deploy/frigate/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template Frigate .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/frigate/.env"
+    mode: "0600"
+
+- name: Create Frigate data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/frigate/config"
+    - "{{ data_mount }}/frigate/recordings"
+
+- name: Deploy Frigate stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/frigate"
+    files:
+      - frigate.yml
+    state: present
+    pull: missing
+  tags:
+    - deploy

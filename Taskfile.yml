@@ -4,41 +4,20 @@ version: '3'
 
 vars:
   ANSIBLE_DIR: ./ansible
-  INFRA_DIR: ./infrastructure
 
 tasks:
-  # === Infrastructure: Proxmox Host Configuration (Ansible) ===
+  # === Infrastructure: Proxmox Host Configuration + Guest Provisioning ===
   infra:hosts:
-    desc: Configure Proxmox host OS on all machines (packages, ZFS, networking, GPU)
+    desc: Configure Proxmox host OS and provision VMs/LXCs on all machines
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - ansible-playbook playbooks/proxmox-hosts.yml {{.CLI_ARGS}}
 
   infra:hosts:check:
-    desc: Dry-run Proxmox host configuration (no changes)
+    desc: Dry-run Proxmox host configuration and guest provisioning (no changes)
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - ansible-playbook playbooks/proxmox-hosts.yml --check --diff {{.CLI_ARGS}}
-
-  # === Infrastructure: VM/LXC Lifecycle (Pulumi) ===
-  infra:up:
-    desc: Create/update VMs and LXCs on all Proxmox hosts
-    dir: '{{.INFRA_DIR}}'
-    cmds:
-      - pulumi up {{.CLI_ARGS}}
-
-  infra:preview:
-    desc: Preview VM/LXC changes without applying
-    dir: '{{.INFRA_DIR}}'
-    cmds:
-      - pulumi preview {{.CLI_ARGS}}
-
-  infra:destroy:
-    desc: Destroy all Pulumi-managed VMs/LXCs (DANGEROUS)
-    dir: '{{.INFRA_DIR}}'
-    prompt: This will destroy all Pulumi-managed VMs and LXCs. Are you sure?
-    cmds:
-      - pulumi destroy {{.CLI_ARGS}}
 
   # === Infrastructure: Guest Configuration (Ansible) ===
   infra:guests:
@@ -62,12 +41,10 @@ tasks:
 
   # === Full Deployment ===
   deploy:full:
-    desc: Run the full deployment pipeline (hosts -> VMs -> guests -> services)
+    desc: Run the full deployment pipeline (hosts -> guests -> services)
+    dir: '{{.ANSIBLE_DIR}}'
     cmds:
-      - task: infra:hosts
-      - task: infra:up
-      - task: infra:guests
-      - task: deploy:services
+      - ansible-playbook playbooks/site.yml {{.CLI_ARGS}}
 
   # === Ansible Utilities ===
   ansible:lint:
@@ -106,16 +83,3 @@ tasks:
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - ansible-vault encrypt {{.CLI_ARGS}}
-
-  # === Pulumi Utilities ===
-  pulumi:install:
-    desc: Install Pulumi npm dependencies
-    dir: '{{.INFRA_DIR}}'
-    cmds:
-      - npm install
-
-  pulumi:stack:
-    desc: Show current Pulumi stack
-    dir: '{{.INFRA_DIR}}'
-    cmds:
-      - pulumi stack {{.CLI_ARGS}}
