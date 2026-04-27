@@ -106,8 +106,9 @@
 ### CT 201: Docker Host
 
 - Immich, Frigate, NextCloud, PostgreSQL
-- 8 cores, 24 GB RAM, Debian 13
+- 8 cores, 24 GB RAM, Ubuntu 24.04
 - GPU access via `/dev/dri` + `/dev/kfd` bind-mount (VAAPI + ROCm)
+- ROCm userspace installed by `docker_host` role
 - Will share centralized monitoring with EQ12
 
 ### GPU Passthrough VM (TBD)
@@ -125,100 +126,109 @@
 
 ## GPU Passthrough
 
-### Two Approaches (Mutually Exclusive Per GPU)
+### Architecture
 
-There are two fundamentally different ways to give guests access to the Radeon 890M:
+Kernel 6.17+ has the inbox `amdgpu` driver with full Strix Point (gfx1150) support.
+The Proxmox host does **not** need ROCm installed — only firmware and udev rules.
+ROCm userspace libraries are installed inside the LXC container only.
 
-| | VFIO-PCI (VM exclusive) | Device sharing (LXC) |
+```text
+┌───────────────────────────────────────────────────────┐
+│  Proxmox Host (n5pro)                                 │
+│  Managed by: proxmox_host role (gpu_sharing.enabled)  │
+│                                                       │
+│  amdgpu kernel driver ← inbox, loaded automatically   │
+│  firmware-amd-graphics ← apt package                  │
+│  udev rules (/etc/udev/rules.d/70-amdgpu.rules)       │
+│  /dev/dri/card0, /dev/dri/renderD128, /dev/kfd        │
+│         │              │              │               │
+│         ▼              ▼              ▼               │
+│  ┌──── bind-mount ──── bind-mount ── bind-mount ──┐   │
+│  │  CT 201 (n5-docker) — Ubuntu 24.04             │   │
+│  │  Managed by: docker_host role (gpu_sharing)    │   │
+│  │                                                │   │
+│  │  amdgpu-install --usecase=rocm,hip,mllib       │   │
+│  │                 --no-dkms (userspace only)     │   │
+│  │                                                │   │
+│  │  Docker containers:                            │   │
+│  │    --device /dev/dri --device /dev/kfd         │   │
+│  │    -e HSA_OVERRIDE_GFX_VERSION=11.5.0          │   │
+│  └────────────────────────────────────────────────┘   │
+└───────────────────────────────────────────────────────┘
+```
+
+### What Gets Installed Where
+
+| Layer                 | What                                             | Managed by |
+|-----------------------|--------------------------------------------------|------------|
+| **Proxmox host**      | `firmware-amd-graphics` + udev rules             | `proxmox_host` role (`gpu_sharing.enabled`) |
+| **LXC config**        | `/dev/dri` + `/dev/kfd` bind-mount, cgroup allow | `proxmox_guests` role (`gpu_sharing: true` on LXC) |
+| **Inside LXC**        | `amdgpu-install --usecase=<list> --no-dkms`      | `docker_host` role (`gpu_sharing.enabled` + `rocm_usecases`) |
+| **Docker containers** | `--device /dev/dri --device /dev/kfd`            | Per-service compose files |
+
+### ROCm Usecases (Flag-Gated)
+
+The `gpu_sharing.rocm_usecases` list in host_vars controls what gets installed:
+
+| Usecase | What it adds | When to use |
 |---|---|---|
-| **How it works** | `vfio-pci` kernel driver claims the GPU at boot; the host has no `/dev/dri` | Host keeps `amdgpu` driver loaded; `/dev/dri` + `/dev/kfd` bind-mounted into containers |
-| **Guest type** | VMs only (QEMU/KVM) | LXC containers (can share across multiple CTs) |
-| **Performance** | Near-native (bare-metal GPU in VM) | Near-native for VAAPI; ROCm compute works but with shared scheduling |
-| **Use case** | Dedicated AI VM, Windows GPU VM, gaming | Frigate (VAAPI), Immich ML (ROCm), multi-service Docker |
-| **ROCm on host?** | Not needed (GPU is owned by VM) | **Required** — host must have amdgpu + ROCm userspace |
-| **ROCm in guest?** | Full install inside VM | Userspace libraries only (no DKMS/kernel modules) |
-| **Config in Ansible** | `gpu_passthrough.enabled: true` in host_vars | `gpu_passthrough: true` on LXC definition in `proxmox_lxcs` |
+| `rocm` | Base runtime (rocm-smi, rocminfo, VAAPI) | Always — minimum for GPU access |
+| `hip` | HIP runtime + compiler | AI/ML inference (Ollama, vLLM) |
+| `mllib` | rocBLAS, MIOpen, etc. | Full ML training/inference |
 
-**Current choice: LXC device sharing** — CT 201 needs GPU for Frigate and Immich.
-
-### Where ROCm Gets Installed
-
-ROCm is required at **two layers** for LXC GPU sharing:
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Proxmox Host (n5pro)                               │
-│                                                     │
-│  amdgpu kernel driver ← loaded automatically        │
-│  ROCm userspace (rocm-smi, rocminfo, rocm-libs)     │
-│  udev rules (/etc/udev/rules.d/99-gpu-passthrough)  │
-│  /dev/dri/card0, /dev/dri/renderD128, /dev/kfd      │
-│         │              │              │              │
-│         ▼              ▼              ▼              │
-│  ┌──── bind-mount ──── bind-mount ── bind-mount ──┐ │
-│  │  CT 201 (n5-docker)                            │ │
-│  │                                                │ │
-│  │  ROCm userspace only (no DKMS)                 │ │
-│  │  Docker containers use --device /dev/dri       │ │
-│  │  + --device /dev/kfd for ROCm compute          │ │
-│  └────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
+Example in `host_vars/n5pro_docker/vars.yml`:
+```yaml
+gpu_sharing:
+  enabled: true
+  rocm_usecases: [rocm, hip, mllib]  # full ML stack
 ```
 
-**Host setup** (run once on the Proxmox host via SSH):
+### ROCm Version Pinning
+
+ROCm version is controlled by variables in `ansible/roles/docker_host/defaults/main.yml`:
+```yaml
+rocm_version: "7.2.2"           # installer .deb version
+rocm_build: "70202"             # build suffix in .deb filename
+rocm_graphics_version: "7.2.1"  # AMD quirk: graphics repo != installer version
+```
+
+The AMD quick-start guide requires a `sed` fix because the 7.2.2 installer creates a
+`graphics/7.2.2` repo entry, but packages are published under `graphics/7.2.1`.
+This is handled automatically by the `docker_host` role.
+
+Bump all three variables when upgrading to a new ROCm release.
+
+### HSA_OVERRIDE_GFX_VERSION
+
+The Radeon 890M is gfx1150 (Strix Point). ROCm may not recognize it without a hint:
 ```bash
-cd /root/proxmox-gpu-setup-scripts
-./host/003\ -\ install-amd-drivers.sh     # ROCm 7.2 + amdgpu
-./host/005\ -\ verify-amd-drivers.sh      # Verify: rocm-smi, rocminfo
-./host/007\ -\ setup-udev-gpu-rules.sh    # Persistent /dev/dri permissions
+export HSA_OVERRIDE_GFX_VERSION=11.5.0  # or 11.5.1 — test both
 ```
 
-**LXC setup** (run inside the container):
-```bash
-cd /root/proxmox-gpu-setup-scripts
-./lxc/install-docker-and-amd-drivers-in-lxc.sh  # Docker + ROCm userspace
-```
-
-Key ROCm environment variables (set automatically by the scripts):
-```bash
-export HSA_OVERRIDE_GFX_VERSION=11.5.1  # Required for gfx1150 (Radeon 890M)
-export HSA_ENABLE_SDMA=0                # APU stability workaround
-```
+This is set system-wide via `/etc/profile.d/rocm.sh` inside the LXC (managed by Ansible).
+For Docker containers, pass it as `-e HSA_OVERRIDE_GFX_VERSION=11.5.0`.
 
 ### LXC Config Entries (Managed by Ansible)
 
 The `proxmox_guests` role adds these to `/etc/pve/lxc/201.conf`:
 ```
-lxc.cgroup2.devices.allow: c 226:* rwm          # /dev/dri/*
+# DRI devices — VAAPI hardware video encoding/decoding
+lxc.cgroup2.devices.allow: c 226:* rwm
 lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
-```
-
-For full ROCm compute (not just VAAPI), `/dev/kfd` is also needed:
-```
+# KFD device — AMD ROCm compute interface
 lxc.cgroup2.devices.allow: c <kfd_major>:<kfd_minor> rwm
 lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
 ```
 
-### Switching to VFIO-PCI (VM Exclusive)
-
-If you later want a dedicated GPU VM instead of LXC sharing:
-
-1. In `ansible/inventory/host_vars/n5pro/vars.yml`:
-   - Set `gpu_passthrough.enabled: true`
-   - Uncomment `vfio_pci_ids: "1002:150e,1002:1640"`
-2. Remove `gpu_passthrough: true` from CT 201's LXC definition
-3. Re-run the playbook — this will configure GRUB + VFIO modules + initramfs
-4. Reboot the host (VFIO-PCI binds at boot, requires reboot)
-5. Add a VM with `hostpci` mapping to the GPU PCI addresses
-
 ### References
 
-- Setup scripts: https://github.com/mutovkin/proxmox-gpu-setup-scripts
-  - Forked from [eikaramba/proxmox-setup-scripts](https://github.com/eikaramba/proxmox-setup-scripts)
-- Ansible config: `ansible/inventory/host_vars/n5pro/vars.yml` — GPU vars + comments
+- Ansible host config: `ansible/inventory/host_vars/n5pro/vars.yml`
 - Ansible LXC GPU task: `ansible/roles/proxmox_guests/tasks/lxc-gpu-passthrough.yml`
+- Ansible ROCm install: `ansible/roles/docker_host/tasks/main.yml`
+- ROCm version defaults: `ansible/roles/docker_host/defaults/main.yml`
 - Proxmox wiki: [PCI Passthrough](https://pve.proxmox.com/wiki/PCI_Passthrough)
 - ROCm docs: [ROCm installation guide](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/)
+- Legacy setup scripts: https://github.com/mutovkin/proxmox-gpu-setup-scripts (no longer needed for host setup)
 
 ## VM/LXC Definitions
 
@@ -227,4 +237,4 @@ Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
 | ID  | Type | Name      | Cores | RAM    | Storage    | Notes |
 |-----|------|-----------|-------|--------|------------|-------|
 | 200 | VM   | truenas   | 4     | 16 GB  | 32 GB boot | UEFI/q35, SATA controller PCI passthrough |
-| 201 | CT   | n5-docker | 8     | 24 GB  | 8 GB root + 200 GB /data | Debian 13, nesting, GPU passthrough |
+| 201 | CT   | n5-docker | 8     | 24 GB  | 8 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU sharing |

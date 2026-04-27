@@ -42,3 +42,83 @@
     name: docker
     state: started
     enabled: true
+
+# --- ROCm userspace (GPU-enabled containers only) ---
+# Installs AMD ROCm libraries inside the LXC for GPU compute.
+# The host provides the kernel driver (amdgpu) and device nodes;
+# this installs only userspace libraries (--no-dkms).
+
+- name: Check if ROCm is already installed
+  ansible.builtin.command: rocminfo
+  register: rocm_check
+  changed_when: false
+  failed_when: false
+  when: gpu_sharing.enabled | default(false)
+
+- name: Download amdgpu-install package
+  ansible.builtin.get_url:
+    url: "https://repo.radeon.com/amdgpu-install/{{ rocm_version }}/ubuntu/{{ rocm_ubuntu_codename }}/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
+    dest: "/tmp/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
+    mode: "0644"
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_check.rc != 0
+
+- name: Install amdgpu-install package
+  ansible.builtin.apt:
+    deb: "/tmp/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
+    state: present
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_check.rc != 0
+
+- name: Fix AMD graphics repository version
+  ansible.builtin.replace:
+    path: /etc/apt/sources.list.d/rocm.list
+    regexp: "graphics/{{ rocm_version }}"
+    replace: "graphics/{{ rocm_graphics_version }}"
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_check.rc != 0
+    - rocm_version != rocm_graphics_version
+
+- name: Install ROCm userspace via amdgpu-install
+  ansible.builtin.command: >
+    amdgpu-install -y
+    --usecase={{ gpu_sharing.rocm_usecases | join(',') }}
+    --no-dkms
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_check.rc != 0
+
+- name: Ensure root is in render and video groups
+  ansible.builtin.user:
+    name: root
+    groups:
+      - render
+      - video
+    append: true
+  when: gpu_sharing.enabled | default(false)
+
+- name: Deploy ROCm environment profile
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible — ROCm environment for GPU containers
+      export PATH="/opt/rocm/bin:${PATH}"
+      export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH}"
+      export HSA_OVERRIDE_GFX_VERSION={{ hsa_gfx_version }}
+    dest: /etc/profile.d/rocm.sh
+    mode: "0644"
+  when: gpu_sharing.enabled | default(false)
+
+- name: Verify ROCm installation
+  ansible.builtin.command: rocminfo
+  register: rocm_verify
+  changed_when: false
+  failed_when: false
+  when: gpu_sharing.enabled | default(false)
+
+- name: Show ROCm verification status
+  ansible.builtin.debug:
+    msg: "{{ 'ROCm is working — agents detected' if rocm_verify.rc == 0 else 'ROCm verification failed — /dev/kfd may not be available yet (reboot host?)' }}"
+  when: gpu_sharing.enabled | default(false)

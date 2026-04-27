@@ -1,8 +1,4 @@
 ---
-- name: update-grub
-  ansible.builtin.command: update-grub
-  listen: update-grub
-
-- name: update-initramfs
-  ansible.builtin.command: update-initramfs -u
-  listen: update-initramfs
+- name: reload-udev
+  ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger
+  listen: reload-udev

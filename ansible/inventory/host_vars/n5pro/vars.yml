@@ -14,55 +14,30 @@ total_ram_gb: 96
 gpu_ram_gb: 32 # Allocated in BIOS to iGPU (UMA)
 system_ram_gb: 62 # Available to Proxmox (~62GB after UMA)
 
-# ── GPU Passthrough ──────────────────────────────────────────────────────────
+# ── GPU Sharing (LXC device passthrough) ─────────────────────────────────────
 #
-# There are TWO different GPU passthrough approaches in Proxmox:
+# Modern approach (Proxmox 9 / kernel 6.17+):
+#   The inbox amdgpu kernel driver handles the GPU. The host only needs
+#   firmware-amd-graphics + udev rules (managed by the proxmox_host role).
+#   NO ROCm installation on the Proxmox host.
 #
-#   1. VFIO-PCI passthrough (for VMs)
-#      Binds the GPU to the vfio-pci driver at boot, giving a VM exclusive
-#      access to the physical device. The host loses /dev/dri entirely.
-#      Requires: IOMMU enabled, vfio modules loaded, vfio-pci ids set.
+#   ROCm userspace is installed inside the LXC container by the docker_host
+#   role during configure-guests.yml (amdgpu-install --no-dkms).
 #
-#   2. Device sharing via /dev/dri bind-mount (for LXC containers)
-#      The host keeps the amdgpu driver loaded and shares /dev/dri + /dev/kfd
-#      into LXC containers. Multiple containers can share the GPU.
-#      Requires: amdgpu driver + ROCm on the host, udev rules, cgroup allow.
+# How it works:
+#   Host: amdgpu driver → /dev/dri + /dev/kfd exist
+#   LXC:  bind-mount /dev/dri + /dev/kfd → ROCm userspace talks to devices
+#   Docker: --device /dev/dri --device /dev/kfd + HSA_OVERRIDE_GFX_VERSION
 #
-# ⚠ THESE ARE MUTUALLY EXCLUSIVE FOR THE SAME GPU.
-#   If vfio-pci claims the Radeon 890M, /dev/dri won't exist on the host
-#   and CT 201 (n5-docker) can't use it for VAAPI/ROCm.
+# Hardware reference (for diagnostics, not used by Ansible):
+#   GPU:   Radeon 890M — PCI c7:00.0 (1002:150e) — IOMMU group 23
+#   Audio: HDMI/DP     — PCI c7:00.1 (1002:1640) — IOMMU group 24
+#   UMA:   32 GB allocated in BIOS
 #
-# Current choice: LXC device sharing (approach 2)
-#   CT 201 needs /dev/dri for Frigate (VAAPI) and Immich (ROCm ML).
-#   VFIO-PCI is disabled — enable it only if you want a dedicated GPU VM
-#   instead of LXC GPU sharing.
-#
-# ROCm installation layers:
-#   - Proxmox host: full ROCm install (kernel driver amdgpu + userspace)
-#     → Run: proxmox-gpu-setup-scripts/host/003 - install-amd-drivers.sh
-#     → Run: proxmox-gpu-setup-scripts/host/007 - setup-udev-gpu-rules.sh
-#   - Inside LXC: ROCm userspace libraries only (NO kernel/DKMS modules)
-#     → Run: proxmox-gpu-setup-scripts/lxc/install-docker-and-amd-drivers-in-lxc.sh
-#
-# References:
-#   - Setup scripts: https://github.com/mutovkin/proxmox-gpu-setup-scripts
-#   - Hardware details: docs/n5pro.md § GPU Passthrough
-#   - IOMMU groups: docs/n5pro.md § IOMMU Groups
-#
+# Reference: docs/n5pro.md § GPU Passthrough
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Kernel-level IOMMU and VFIO-PCI configuration (proxmox_host role).
-# Currently disabled — the amdgpu driver stays loaded so LXCs can share /dev/dri.
-# Set enabled: true + uncomment vfio_pci_ids to switch to exclusive VM passthrough.
-gpu_passthrough:
-  enabled: false  # flip to true only for dedicated GPU VM (disables LXC GPU sharing)
-  iommu: true     # IOMMU is still needed even for LXC device sharing
-  # vfio_pci_ids: "1002:150e,1002:1640"  # uncomment to claim GPU for VFIO-PCI
-  gpu_pci_address: "c7:00.0"   # Radeon 890M — IOMMU group 23
-  audio_pci_address: "c7:00.1" # HDMI/DP audio — IOMMU group 24 (device ID 1002:1640)
-  kernel_params:
-    - "amd_iommu=on"
-    - "iommu=pt"
+gpu_sharing:
+  enabled: true
 
 # ── NPU Passthrough ─────────────────────────────────────────────────────────
 # AMD Strix Halo Neural Processing Unit — available for AI workloads.
@@ -112,7 +87,7 @@ proxmox_vms:
 proxmox_lxcs:
   - vmid: 201
     hostname: n5-docker
-    ostemplate: "local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst"
+    os: ubuntu-24.04
     cores: 8
     memory: 24576  # 24GB — Immich + Frigate + NextCloud + overhead
     root_disk_size: 8
@@ -121,7 +96,7 @@ proxmox_lxcs:
       mp0: "local-zfs:200,mp=/data"
     net_bridge: vmbr1
     nesting: true
-    gpu_passthrough: true  # /dev/dri for VAAPI (Frigate, Immich ML)
+    gpu_sharing: true  # /dev/dri + /dev/kfd bind-mount for VAAPI and ROCm
     onboot: true
     started: true
     tags:

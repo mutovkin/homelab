@@ -3,6 +3,56 @@
 # Uses community.proxmox.proxmox_kvm for VMs and community.proxmox.proxmox for LXCs
 # Both modules are idempotent — they check if the vmid exists before creating
 
+# --- LXC template auto-resolution ---
+# LXC definitions can use `os: ubuntu-24.04` instead of a hardcoded ostemplate.
+# This pre-task resolves the latest available template for each OS, downloads
+# it if missing, and builds a lookup dict (resolved_templates) for provisioning.
+
+- name: Refresh Proxmox appliance list
+  ansible.builtin.command: pveam update
+  changed_when: false
+
+- name: Collect unique OS names from LXC definitions
+  ansible.builtin.set_fact:
+    lxc_os_names: "{{ proxmox_lxcs | selectattr('os', 'defined') | map(attribute='os') | unique | list }}"
+
+- name: Resolve latest template for each OS
+  ansible.builtin.shell: |
+    set -o pipefail
+    pveam available --section system | grep '{{ proxmox_templates[item] }}' | tail -1 | awk '{print $2}'
+  register: template_resolution
+  changed_when: false
+  loop: "{{ lxc_os_names }}"
+  when: lxc_os_names | length > 0
+
+- name: Build resolved templates lookup
+  ansible.builtin.set_fact:
+    resolved_templates: "{{ resolved_templates | default({}) | combine({item.item: 'local:vztmpl/' + item.stdout}) }}"
+  loop: "{{ template_resolution.results | default([]) }}"
+  when:
+    - template_resolution.results is defined
+    - item.stdout | default('') | length > 0
+
+- name: Check which templates are already downloaded
+  ansible.builtin.stat:
+    path: "/var/lib/vz/template/cache/{{ item.stdout }}"
+  register: template_cache_check
+  loop: "{{ template_resolution.results | default([]) }}"
+  when:
+    - template_resolution.results is defined
+    - item.stdout | default('') | length > 0
+
+- name: Download missing LXC templates
+  ansible.builtin.command: "pveam download local {{ item.item.stdout }}"
+  loop: "{{ template_cache_check.results | default([]) }}"
+  when:
+    - template_cache_check.results is defined
+    - not (item.stat.exists | default(true))
+  loop_control:
+    label: "{{ item.item.stdout | default('unknown') }}"
+
+# --- VM provisioning ---
+
 - name: Provision virtual machines
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
@@ -52,7 +102,7 @@
     node: "{{ proxmox_node }}"
     vmid: "{{ item.vmid }}"
     hostname: "{{ item.hostname }}"
-    ostemplate: "{{ item.ostemplate | default(proxmox_lxc_defaults.ostemplate) }}"
+    ostemplate: "{{ resolved_templates[item.os] | default(item.ostemplate | default(proxmox_lxc_defaults.ostemplate)) }}"
     cores: "{{ item.cores | default(proxmox_lxc_defaults.cores) }}"
     memory: "{{ item.memory | default(proxmox_lxc_defaults.memory) }}"
     swap: "{{ item.swap | default(proxmox_lxc_defaults.swap) }}"
@@ -84,8 +134,8 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
-- name: Configure GPU device passthrough for LXC containers
+- name: Configure GPU device sharing for LXC containers
   ansible.builtin.include_tasks: lxc-gpu-passthrough.yml
-  loop: "{{ proxmox_lxcs | selectattr('gpu_passthrough', 'defined') | selectattr('gpu_passthrough', 'equalto', true) | list }}"
+  loop: "{{ proxmox_lxcs | selectattr('gpu_sharing', 'defined') | selectattr('gpu_sharing', 'equalto', true) | list }}"
   loop_control:
-    label: "CT {{ item.vmid }} ({{ item.hostname }}) — GPU passthrough"
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — GPU sharing"

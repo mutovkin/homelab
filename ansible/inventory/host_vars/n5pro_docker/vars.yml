@@ -4,6 +4,14 @@
 # Data mount point inside the LXC
 data_mount: /data
 
+# GPU sharing — ROCm userspace installed by docker_host role
+gpu_sharing:
+  enabled: true
+  rocm_usecases:
+    - rocm
+    - hip
+    - mllib
+
 # Services to deploy on this Docker host
 # Each entry corresponds to an Ansible role in roles/services/
 services:

@@ -37,36 +37,33 @@
     state: present
   when: zfs_pool is defined
 
-# --- GPU Passthrough (N5 Pro) ---
+# --- GPU sharing (LXC device passthrough) ---
+# Modern approach: kernel 6.17+ has inbox amdgpu driver.
+# Host only needs firmware blobs + udev rules. ROCm userspace is installed
+# inside the LXC by the docker_host role (configure-guests.yml).
 
-- name: Configure IOMMU kernel parameters
-  ansible.builtin.lineinfile:
-    path: /etc/default/grub
-    regexp: "^GRUB_CMDLINE_LINUX_DEFAULT="
-    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet {{ gpu_passthrough.kernel_params | join(" ") }}"'
-    backup: true
-  when: gpu_passthrough.enabled | default(false)
-  notify: update-grub
-
-- name: Load vfio modules
-  ansible.builtin.lineinfile:
-    path: /etc/modules
-    line: "{{ item }}"
+- name: Install AMD GPU firmware
+  ansible.builtin.apt:
+    name: firmware-amd-graphics
     state: present
-  loop:
-    - vfio
-    - vfio_iommu_type1
-    - vfio_pci
-    - vfio_virqfd
-  when: gpu_passthrough.enabled | default(false)
-  notify: update-initramfs
+  when: gpu_sharing.enabled | default(false)
 
-- name: Configure vfio-pci device IDs
+- name: Deploy GPU udev rules
   ansible.builtin.copy:
-    content: "options vfio-pci ids={{ gpu_passthrough.vfio_pci_ids }}\n"
-    dest: /etc/modprobe.d/vfio.conf
+    content: |
+      # Managed by Ansible — GPU device permissions for LXC passthrough
+      SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="render", MODE="0660"
+      KERNEL=="kfd", GROUP="render", MODE="0660"
+    dest: /etc/udev/rules.d/70-amdgpu.rules
     mode: "0644"
-  when:
-    - gpu_passthrough.enabled | default(false)
-    - gpu_passthrough.vfio_pci_ids is defined
-  notify: update-initramfs
+  when: gpu_sharing.enabled | default(false)
+  notify: reload-udev
+
+- name: Ensure root is in render and video groups
+  ansible.builtin.user:
+    name: root
+    groups:
+      - render
+      - video
+    append: true
+  when: gpu_sharing.enabled | default(false)

@@ -3,6 +3,15 @@
 proxmox_vms: []
 proxmox_lxcs: []
 
+# Template patterns for auto-resolution via `pveam available`
+# LXC definitions use `os: ubuntu-24.04` — the role resolves the latest
+# matching template and downloads it automatically.
+proxmox_templates:
+  debian-13: "debian-13-standard"
+  debian-12: "debian-12-standard"
+  ubuntu-24.04: "ubuntu-24.04-standard"
+  ubuntu-22.04: "ubuntu-22.04-standard"
+
 # Default VM settings
 proxmox_vm_defaults:
   cores: 2
@@ -30,4 +39,4 @@ proxmox_lxc_defaults:
   started: true
   nesting: false
   unprivileged: true
-  gpu_passthrough: false
+  gpu_sharing: false

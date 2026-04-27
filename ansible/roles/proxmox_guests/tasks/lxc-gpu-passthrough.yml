@@ -1,19 +1,17 @@
 ---
-# Configure GPU device passthrough for an LXC container (AMD Radeon 890M)
+# Configure GPU device sharing for an LXC container
 #
-# Adds /dev/dri (VAAPI hw encoding/decoding) and /dev/kfd (ROCm compute)
-# access for unprivileged LXC containers. This runs on the Proxmox HOST
-# and modifies /etc/pve/lxc/<vmid>.conf.
+# Bind-mounts /dev/dri (VAAPI hw encoding/decoding) and /dev/kfd (ROCm compute)
+# from the Proxmox host into the LXC container. This runs on the HOST and
+# modifies /etc/pve/lxc/<vmid>.conf.
 #
-# Prerequisites on the host (not managed by Ansible yet):
-#   1. AMD amdgpu driver loaded (kernel module)
-#   2. ROCm userspace installed (rocm-smi, rocm-libs)
-#   3. udev rules for /dev/dri permissions (99-gpu-passthrough.rules)
-#   → See: https://github.com/mutovkin/proxmox-gpu-setup-scripts
-#          host/003, host/005, host/007
+# Prerequisites (managed by proxmox_host role, gpu_sharing.enabled):
+#   1. firmware-amd-graphics package installed
+#   2. amdgpu kernel module loaded (inbox in kernel 6.17+)
+#   3. udev rules deployed (/etc/udev/rules.d/70-amdgpu.rules)
 #
-# Inside the LXC, ROCm userspace libraries must also be installed:
-#   → See: proxmox-gpu-setup-scripts/lxc/install-docker-and-amd-drivers-in-lxc.sh
+# ROCm userspace is installed inside the LXC by the docker_host role
+# (configure-guests.yml) — not on the Proxmox host.
 #
 # Reference: docs/n5pro.md § GPU Passthrough
 
