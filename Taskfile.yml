@@ -71,6 +71,12 @@ tasks:
     cmds:
       - ansible all -m ping {{.CLI_ARGS}}
 
+  # === Docker Status ===
+  docker:status:
+    desc: Show status of all Docker containers across hosts
+    cmds:
+      - ssh root@deb-docker.lan 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'
+
   # === Vault ===
   vault:edit:
     desc: 'Edit an encrypted vault file (usage: task vault:edit -- inventory/host_vars/eq12/vault.yml)'

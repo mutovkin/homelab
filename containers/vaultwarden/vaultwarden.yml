@@ -40,6 +40,12 @@ services:
       SMTP_AUTH_MECHANISM: ${SMTP_AUTH_MECHANISM}
     networks:
       - vaultwarden_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:80/alive || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 networks:
   vaultwarden_network:
