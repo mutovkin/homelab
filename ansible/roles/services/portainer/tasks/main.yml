@@ -5,6 +5,12 @@
     state: directory
     mode: "0755"
 
+- name: Create Portainer data directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/portainer"
+    state: directory
+    mode: "0755"
+
 - name: Synchronize Portainer compose files
   become: false
   ansible.posix.synchronize:

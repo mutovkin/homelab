@@ -8,6 +8,12 @@
   hosts: docker_hosts
   become: true
   tasks:
+    - name: Deploy Portainer
+      ansible.builtin.include_role:
+        name: services/portainer
+      when: "'portainer' in services"
+      tags: portainer
+
     - name: Deploy PostgreSQL
       ansible.builtin.include_role:
         name: services/postgresql
@@ -37,12 +43,6 @@
         name: services/joplin
       when: "'joplin' in services"
       tags: joplin
-
-    - name: Deploy Portainer
-      ansible.builtin.include_role:
-        name: services/portainer
-      when: "'portainer' in services"
-      tags: portainer
 
     - name: Deploy Watchtower
       ansible.builtin.include_role:

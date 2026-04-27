@@ -56,7 +56,7 @@ the Proxmox API.
 │     (packages, networking, ZFS, GPU passthrough)    │
 │                                                     │
 │  2. Provision VMs and LXC containers                │
-│     (via community.proxmox.proxmox_kvm/proxmox)      │
+│     (via community.proxmox.proxmox_kvm/proxmox)     │
 │                                                     │
 │  3. Configure guests (Docker, packages)             │
 │     (inside the VMs/LXCs provisioned above)         │
@@ -386,6 +386,20 @@ cd ansible
 ansible-playbook playbooks/proxmox-hosts.yml --check --diff -v
 ```
 
+> **Tip: One host at a time.** You can onboard a single host by adding `--limit`:
+>
+> ```bash
+> # Dry-run only EQ12
+> ansible-playbook playbooks/proxmox-hosts.yml --check --diff --limit eq12
+>
+> # Dry-run only N5 Pro
+> ansible-playbook playbooks/proxmox-hosts.yml --check --diff --limit n5pro
+> ```
+>
+> This works with every playbook and task command (`task infra:hosts -- --limit eq12`).
+> You can fully onboard one machine end-to-end, verify everything works, then repeat
+> for the other.
+
 **Reading the output:**
 
 ```
@@ -416,101 +430,90 @@ something you're currently using, stop and investigate before proceeding.
 
 ## Step 6 — Migrate Stacks from Portainer to Ansible
 
-Your Docker containers are currently managed via Portainer's "Stacks" feature. When
-you deploy a stack through Portainer's UI, it stores its own versioned copy of the
-compose file under `/data/compose/<stack_id>/v<version>/docker-compose.yml`. Portainer
-tracks these stacks in its internal database.
+Your Docker containers are currently managed via Portainer's "Stacks" feature.
+Portainer stores its compose files inside the `portainer_data` Docker volume and
+tracks stacks in its internal database.
 
 Ansible's service roles deploy compose files to `/data/deploy/<service>/` and run
 `docker compose up` from there. To avoid two managers fighting over the same containers,
-we need to **remove Portainer's ownership** of each stack before Ansible takes over.
+we need to **delete each stack from Portainer, then immediately redeploy via Ansible**.
 
-This does **not** stop, delete, or recreate your containers. It only removes Portainer's
-internal record that it "owns" the stack. The containers keep running the entire time.
+> **⚠️ Portainer 2.39+ has no "detach" feature.** Deleting a stack in Portainer runs
+> `docker compose down` — containers **will stop**. However, Docker volumes (your data)
+> are preserved as long as you uncheck the "Remove associated volumes" option.
+> Each service will have a few seconds of downtime while Ansible recreates the containers
+> against the same volumes. **No data is lost.**
 
 ### 6a. Understand what's currently running
 
-Your stacks as Portainer sees them (from Docker's perspective):
+Your stacks as Portainer sees them:
 
-| Portainer Stack | Compose Source | Containers |
-|----------------|----------------|------------|
-| postgres | `/data/compose/11/v10/docker-compose.yml` | postgres, pgadmin4 |
-| observability | `/data/compose/22/v30/docker-compose.yml` | grafana, victoriametrics, victorialogs, vector, telegraf |
-| vaultwarden | `/data/compose/6/v4/docker-compose.yml` | vaultwarden |
-| searxng | `/data/compose/19/v5/docker-compose.yml` | searxng |
-| joplin | `/data/compose/18/v14/docker-compose.yml` | joplin-server |
-| watchtower | `/data/compose/2/v4/docker-compose.yml` | watchtower |
-| portainer | `portainer.yml` | portainer (self-managed) |
+| Portainer Stack | Containers |
+|----------------|------------|
+| postgres | postgres, pgadmin4 |
+| observability | grafana, victoriametrics, victorialogs, vector, telegraf |
+| vaultwarden | vaultwarden |
+| searxng | searxng |
+| joplin | joplin-server |
+| watchtower | watchtower |
+| portainer | portainer (self-managed) |
 
-### 6b. Remove stacks from Portainer (one at a time)
+### 6b. Migrate one stack at a time
 
-Do this for each stack **except portainer itself** (portainer stays self-managed):
+For each stack **except portainer itself**, do these two steps back-to-back to
+minimize downtime:
 
-1. Open Portainer at `http://192.168.25.15:9000` (or via your browser)
+**Step 1 — Delete the stack in Portainer:**
+
+1. Open Portainer at `http://192.168.25.15:9000`
 2. Go to **Stacks** in the left sidebar
-3. Click on the stack name (e.g., `postgres`)
-4. Click the **Remove** button (red, top right area)
-5. **CRITICAL**: In the confirmation dialog, **UNCHECK** "Remove associated resources
-   (networks, volumes)" — this is the checkbox that would delete your data volumes
-6. Confirm
+3. Click on the stack name (e.g., `watchtower`)
+4. Click **Delete this stack**
+5. Portainer asks: *"Do you want to remove the stack? Associated services will be
+   removed as well"* — confirm.
 
-**What happens:**
-- Portainer removes its internal database record of the stack
-- Portainer deletes its copy of the compose file from `/data/compose/<id>/`
-- The actual Docker containers **keep running** — they are not stopped or removed
-- Docker volumes (your databases, config, data) **are preserved**
-- Docker networks **are preserved** (containers stay connected)
+The containers and networks are removed. **Docker volumes (your data) are preserved** —
+`docker compose down` never removes volumes unless explicitly told to with `-v`,
+which Portainer does not do.
 
-After removing, the containers will appear in Portainer under **Containers** as
-standalone containers rather than part of a stack. You can still view logs, inspect
-them, restart them — Portainer just won't try to manage their lifecycle via compose.
+**Step 2 — Immediately redeploy via Ansible:**
+
+```bash
+# Example: redeploy watchtower right after deleting it from Portainer
+task deploy:service -- --tags watchtower
+```
+
+Ansible creates fresh containers that attach to the same Docker volumes. The service
+is back up in seconds with all its data.
 
 ### 6c. Recommended order
 
-Remove stacks in this order (least critical first, so you get comfortable with the
+Migrate stacks in this order (least critical first, so you get comfortable with the
 process before touching important services):
 
 1. **watchtower** — just an auto-updater, no data
 2. **searxng** — search engine, no persistent state that matters
 3. **joplin** — data is in PostgreSQL, not a local volume
-4. **vaultwarden** — data is in a Docker volume (safe since we don't remove volumes)
+4. **vaultwarden** — data is in a Docker volume (preserved)
 5. **observability** — 5 containers, largest stack
 6. **postgres** — your database; leave for last since other services depend on it
 
-**Do NOT remove `portainer` from Portainer.** Portainer manages itself — let it continue
+**Do NOT delete `portainer` from Portainer.** Portainer manages itself — let it continue
 to do so. Ansible's portainer role will just ensure the compose file and config stay
 in sync.
 
-### 6d. Verify containers are still running after each removal
+### 6d. Verify each service after migration
 
-After removing each stack from Portainer:
+After each delete-and-redeploy cycle:
 
 ```bash
 ssh root@deb-docker.lan 'docker ps --format "table {{.Names}}\t{{.Status}}"'
 ```
 
-All containers should still show `Up`. If any stopped (they shouldn't), start them:
+The container should show `Up` with a fresh start time. Spot-check the service itself
+(e.g., load the Grafana UI, query PostgreSQL) to confirm data is intact.
 
-```bash
-ssh root@deb-docker.lan 'docker start <container_name>'
-```
-
-### 6e. Clean up Portainer's old compose directories (optional)
-
-After removing all stacks, Portainer's compose directories may have leftovers:
-
-```bash
-# See what's left
-ssh root@deb-docker.lan 'ls -la /data/compose/'
-
-# If empty or only has stale directories, clean up:
-ssh root@deb-docker.lan 'rm -rf /data/compose/[0-9]*'
-```
-
-This is purely cleanup — those files are Portainer's old copies and are not used by
-anything after stack removal.
-
-### 6f. What about Portainer going forward?
+### 6e. What about Portainer going forward?
 
 Portainer remains installed and useful as a **monitoring dashboard**:
 - View container logs in a web UI
@@ -531,6 +534,9 @@ Now test whether Ansible's service deployment would disrupt your running contain
 ```bash
 # Dry-run deploying all services to deb-docker
 task deploy:services -- --check --diff
+
+# Or limit to a single Docker host:
+task deploy:services -- --check --diff --limit eq12_docker
 ```
 
 **What to look for in the output:**
@@ -592,6 +598,9 @@ Once all dry runs look clean, execute the real operations **in this exact order*
 ```bash
 # Configure Proxmox host OS (packages, repos, ZFS)
 task infra:hosts
+
+# Or one host at a time:
+task infra:hosts -- --limit eq12
 ```
 
 This installs packages and configures system settings. It does **not** restart
@@ -603,6 +612,9 @@ on N5 Pro (for IOMMU), which updates the GRUB config but doesn't reboot.
 ```bash
 # Configure Docker inside LXCs (install/update Docker, daemon.json)
 task infra:guests
+
+# Or one guest at a time:
+task infra:guests -- --limit eq12_docker
 ```
 
 On deb-docker (CT 101), this ensures Docker and the Compose plugin are installed.
