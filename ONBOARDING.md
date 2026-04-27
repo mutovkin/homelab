@@ -195,17 +195,17 @@ chmod 600 .vault_password
 
 Pick a strong password and store it in your Bitwarden vault for safekeeping.
 
-### 4b. Create the real encrypted vault for EQ12
+### 4b. Create the real encrypted vault for EQ12's Docker host
 
-The file `ansible/inventory/host_vars/eq12/vault.yml` currently has a commented-out
-template showing which variables are needed. You'll replace it with a real encrypted
+The file `ansible/inventory/host_vars/eq12_docker/vault.yml` holds secrets for
+services deployed on the EQ12 Docker LXC (CT 101). You'll create a real encrypted
 file:
 
 ```bash
 cd ansible
 
 # This opens your $EDITOR with a blank file. Paste your secrets in YAML format.
-ansible-vault create inventory/host_vars/eq12/vault.yml
+ansible-vault create inventory/host_vars/eq12_docker/vault.yml
 ```
 
 When your editor opens, paste the secrets (with real values):
@@ -257,17 +257,17 @@ Save and close. The file is now encrypted. You can verify:
 
 ```bash
 # This shows garbage (encrypted). Good.
-cat inventory/host_vars/eq12/vault.yml
+cat inventory/host_vars/eq12_docker/vault.yml
 
 # This shows the decrypted contents (needs .vault_password). Good.
-ansible-vault view inventory/host_vars/eq12/vault.yml
+ansible-vault view inventory/host_vars/eq12_docker/vault.yml
 ```
 
-### 4c. Create vaults for n5pro and shared secrets
+### 4c. Create vaults for n5pro_docker and shared secrets
 
 ```bash
-# N5 Pro vault (currently just needs Proxmox API token)
-ansible-vault create inventory/host_vars/n5pro/vault.yml
+# N5 Pro Docker host vault (for future service secrets)
+ansible-vault create inventory/host_vars/n5pro_docker/vault.yml
 
 # Shared vault (secrets common to both machines)
 ansible-vault create inventory/group_vars/all/vault.yml
@@ -277,10 +277,10 @@ ansible-vault create inventory/group_vars/all/vault.yml
 
 ```bash
 # Use the Taskfile shortcut:
-task vault:edit -- inventory/host_vars/eq12/vault.yml
+task vault:edit -- inventory/host_vars/eq12_docker/vault.yml
 
 # Or directly:
-ansible-vault edit inventory/host_vars/eq12/vault.yml
+ansible-vault edit inventory/host_vars/eq12_docker/vault.yml
 ```
 
 **What's safe here?** Vault files are committed to Git as encrypted blobs. Without

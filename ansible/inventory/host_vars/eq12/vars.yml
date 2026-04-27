@@ -82,23 +82,3 @@ proxmox_lxcs:
     tags:
       - nginx-proxy-manager
     description: "Nginx Proxy Manager — reverse proxy and SSL management"
-
-# Services to deploy on this host's Docker LXC (CT 101)
-# Each entry corresponds to an Ansible role in roles/services/
-services:
-  - postgresql
-  - observability
-  - vaultwarden
-  - searxng
-  - joplin
-  - portainer
-  - watchtower
-
-# Docker network subnets (must match compose files)
-docker_networks:
-  observability: "172.20.0.0/24"
-  postgresql: "172.21.0.0/24"
-  searxng: "172.22.0.0/24"
-  portainer: "172.23.0.0/24"
-  vaultwarden: "172.24.0.0/24"
-  watchtower: "172.25.0.0/24"
