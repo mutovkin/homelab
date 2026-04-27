@@ -14,10 +14,6 @@ ntp_servers:
   - 0.pool.ntp.org
   - 1.pool.ntp.org
 
-# SSH authorized keys (add your public keys here)
-ssh_authorized_keys: []
-  # - "ssh-ed25519 AAAA... user@host"
-
 # Base packages to install on all hosts
 common_packages:
   - curl

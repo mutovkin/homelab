@@ -10,4 +10,3 @@ common_packages:
   - unzip
   - gnupg
   - ca-certificates
-ssh_authorized_keys: []
