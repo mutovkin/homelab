@@ -1,10 +1,10 @@
 ---
 # Provision VMs and LXC containers on a Proxmox host
-# Uses community.general.proxmox_kvm for VMs and community.general.proxmox for LXCs
+# Uses community.proxmox.proxmox_kvm for VMs and community.proxmox.proxmox for LXCs
 # Both modules are idempotent — they check if the vmid exists before creating
 
 - name: Provision virtual machines
-  community.general.proxmox_kvm:
+  community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
@@ -31,7 +31,7 @@
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
 - name: Start virtual machines
-  community.general.proxmox_kvm:
+  community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
@@ -44,7 +44,7 @@
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
 - name: Provision LXC containers
-  community.general.proxmox:
+  community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
@@ -72,7 +72,7 @@
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
 - name: Start LXC containers
-  community.general.proxmox:
+  community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"

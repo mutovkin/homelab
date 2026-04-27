@@ -1,6 +1,6 @@
 ---
 - name: restart lxc
-  community.general.proxmox:
+  community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"

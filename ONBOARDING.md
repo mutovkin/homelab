@@ -56,7 +56,7 @@ the Proxmox API.
 │     (packages, networking, ZFS, GPU passthrough)    │
 │                                                     │
 │  2. Provision VMs and LXC containers                │
-│     (via community.general.proxmox_kvm/proxmox)     │
+│     (via community.proxmox.proxmox_kvm/proxmox)      │
 │                                                     │
 │  3. Configure guests (Docker, packages)             │
 │     (inside the VMs/LXCs provisioned above)         │

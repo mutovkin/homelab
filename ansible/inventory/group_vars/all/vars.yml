@@ -28,8 +28,6 @@ common_packages:
   - unzip
   - gnupg
   - ca-certificates
-  - apt-transport-https
-  - software-properties-common
 
 # Docker network defaults
 docker_network_base: "172.20.0.0" # All Docker networks use 172.x.x.x
