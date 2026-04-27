@@ -6,6 +6,7 @@
     mode: "0755"
 
 - name: Synchronize Vaultwarden compose files
+  become: false
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../../containers/vaultwarden/"
     dest: "{{ data_mount }}/deploy/vaultwarden/"

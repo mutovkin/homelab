@@ -6,6 +6,7 @@
     mode: "0755"
 
 - name: Synchronize NextCloud compose and config files
+  become: false
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../../containers/nextcloud/"
     dest: "{{ data_mount }}/deploy/nextcloud/"

@@ -195,7 +195,89 @@ chmod 600 .vault_password
 
 Pick a strong password and store it in your Bitwarden vault for safekeeping.
 
-### 4b. Create the real encrypted vault for EQ12's Docker host
+### 4b. Create Proxmox API tokens
+
+Ansible uses the Proxmox REST API to provision VMs and LXC containers. Instead of
+using your root password, you create an **API token** — a long-lived credential that
+grants specific permissions. This is more secure because:
+
+- The token can be revoked independently of your password
+- It doesn't grant shell access — only API access
+- You can restrict its permissions to just what Ansible needs
+
+**What the three vault variables mean:**
+
+| Variable | Example | What it is |
+|----------|---------|------------|
+| `vault_proxmox_api_user` | `root@pam` | The Proxmox user the token belongs to |
+| `vault_proxmox_api_token_id` | `ansible` | The name you give the token (you pick this) |
+| `vault_proxmox_api_token_secret` | `aabbccdd-1122-...` | The secret value Proxmox generates (shown once) |
+
+**Create a token on each Proxmox host:**
+
+1. Open the Proxmox web UI: `https://192.168.25.5:8006` (EQ12) or `https://192.168.30.5:8006` (N5 Pro)
+2. Go to **Datacenter → Permissions → API Tokens**
+3. Click **Add**
+4. Fill in:
+   - **User**: `root@pam`
+   - **Token ID**: `ansible` (or any name you like)
+   - **Privilege Separation**: **Uncheck** this box — the token inherits the user's
+     full permissions. With it checked, you'd need to assign permissions separately.
+5. Click **Add**
+6. **Copy the secret immediately** — Proxmox shows it only once. If you lose it,
+   delete the token and create a new one.
+
+The resulting values for your vault will be:
+
+```yaml
+vault_proxmox_api_user: "root@pam"
+vault_proxmox_api_token_id: "ansible"
+vault_proxmox_api_token_secret: "aabbccdd-1122-3344-5566-778899aabbcc"  # your actual secret
+```
+
+> **Why `root@pam`?** Proxmox requires a realm suffix. `pam` means the local Linux
+> PAM authentication (your system root user). If you created a dedicated Proxmox user
+> instead, it would be `ansible@pve` (PVE realm) or `ansible@pam` (PAM realm).
+
+### 4c. Create encrypted vaults for Proxmox hosts
+
+Each Proxmox host needs its own vault with API credentials. The `proxmox_guests` role
+uses these to provision VMs and LXCs via the Proxmox API.
+
+```bash
+cd ansible
+
+# EQ12 Proxmox host vault
+ansible-vault create inventory/host_vars/eq12/vault.yml
+```
+
+Paste the API credentials for EQ12:
+
+```yaml
+---
+vault_proxmox_api_user: "root@pam"
+vault_proxmox_api_token_id: "ansible"
+vault_proxmox_api_token_secret: "your-eq12-token-secret-here"
+```
+
+Repeat for N5 Pro (use the token you created on the N5 Pro Proxmox host):
+
+```bash
+ansible-vault create inventory/host_vars/n5pro/vault.yml
+```
+
+```yaml
+---
+vault_proxmox_api_user: "root@pam"
+vault_proxmox_api_token_id: "ansible"
+vault_proxmox_api_token_secret: "your-n5pro-token-secret-here"
+```
+
+> **Note:** If both hosts use the same user and token name (`root@pam` / `ansible`),
+> the only value that differs is `vault_proxmox_api_token_secret` — each Proxmox
+> instance generates its own unique secret.
+
+### 4d. Create the encrypted vault for EQ12's Docker host
 
 The file `ansible/inventory/host_vars/eq12_docker/vault.yml` holds secrets for
 services deployed on the EQ12 Docker LXC (CT 101). You'll create a real encrypted
@@ -263,7 +345,7 @@ cat inventory/host_vars/eq12_docker/vault.yml
 ansible-vault view inventory/host_vars/eq12_docker/vault.yml
 ```
 
-### 4c. Create vaults for n5pro_docker and shared secrets
+### 4e. Create vaults for n5pro_docker and shared secrets
 
 ```bash
 # N5 Pro Docker host vault (for future service secrets)
@@ -273,7 +355,7 @@ ansible-vault create inventory/host_vars/n5pro_docker/vault.yml
 ansible-vault create inventory/group_vars/all/vault.yml
 ```
 
-### 4d. Edit a vault later
+### 4f. Edit a vault later
 
 ```bash
 # Use the Taskfile shortcut:

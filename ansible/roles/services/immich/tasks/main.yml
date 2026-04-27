@@ -6,6 +6,7 @@
     mode: "0755"
 
 - name: Synchronize Immich compose and config files
+  become: false
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../../containers/immich/"
     dest: "{{ data_mount }}/deploy/immich/"

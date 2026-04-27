@@ -6,6 +6,7 @@
     mode: "0755"
 
 - name: Synchronize observability compose and config files
+  become: false
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../../containers/observability/"
     dest: "{{ data_mount }}/deploy/observability/"

@@ -1,20 +1,50 @@
 ---
-# Configure GPU device passthrough for an LXC container
-# Adds /dev/dri (VAAPI) access for hardware video encoding/decoding
-# This runs on the Proxmox HOST and modifies /etc/pve/lxc/<vmid>.conf
-
-- name: "CT {{ item.vmid }} — Add GPU device passthrough to LXC config"
-  ansible.builtin.blockinfile:
-    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    marker: "# {mark} ANSIBLE MANAGED — GPU device passthrough"
-    block: |
-      lxc.cgroup2.devices.allow: c 226:* rwm
-      lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
-  notify: restart lxc
-  register: gpu_config_result
+# Configure GPU device passthrough for an LXC container (AMD Radeon 890M)
+#
+# Adds /dev/dri (VAAPI hw encoding/decoding) and /dev/kfd (ROCm compute)
+# access for unprivileged LXC containers. This runs on the Proxmox HOST
+# and modifies /etc/pve/lxc/<vmid>.conf.
+#
+# Prerequisites on the host (not managed by Ansible yet):
+#   1. AMD amdgpu driver loaded (kernel module)
+#   2. ROCm userspace installed (rocm-smi, rocm-libs)
+#   3. udev rules for /dev/dri permissions (99-gpu-passthrough.rules)
+#   → See: https://github.com/mutovkin/proxmox-gpu-setup-scripts
+#          host/003, host/005, host/007
+#
+# Inside the LXC, ROCm userspace libraries must also be installed:
+#   → See: proxmox-gpu-setup-scripts/lxc/install-docker-and-amd-drivers-in-lxc.sh
+#
+# Reference: docs/n5pro.md § GPU Passthrough
 
 - name: "CT {{ item.vmid }} — Verify /dev/dri exists on host"
   ansible.builtin.stat:
     path: /dev/dri
   register: dev_dri
   failed_when: not dev_dri.stat.exists
+
+- name: "CT {{ item.vmid }} — Check if /dev/kfd exists on host (ROCm)"
+  ansible.builtin.stat:
+    path: /dev/kfd
+  register: dev_kfd
+
+- name: "CT {{ item.vmid }} — Get /dev/kfd major:minor numbers"
+  ansible.builtin.command: stat -c '%t:%T' /dev/kfd
+  register: dev_kfd_major_minor
+  changed_when: false
+  when: dev_kfd.stat.exists
+
+- name: "CT {{ item.vmid }} — Add GPU device passthrough to LXC config"
+  ansible.builtin.blockinfile:
+    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
+    marker: "# {mark} ANSIBLE MANAGED — GPU device passthrough"
+    block: |
+      # DRI devices — VAAPI hardware video encoding/decoding
+      lxc.cgroup2.devices.allow: c 226:* rwm
+      lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
+      {% if dev_kfd.stat.exists %}
+      # KFD device — AMD ROCm compute interface (required for ML workloads)
+      lxc.cgroup2.devices.allow: c {{ dev_kfd_major_minor.stdout.split(':')[0] }}:{{ dev_kfd_major_minor.stdout.split(':')[1] }} rwm
+      lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
+      {% endif %}
+  notify: restart lxc

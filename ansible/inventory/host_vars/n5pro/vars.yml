@@ -14,19 +14,61 @@ total_ram_gb: 96
 gpu_ram_gb: 32 # Allocated in BIOS to iGPU (UMA)
 system_ram_gb: 62 # Available to Proxmox (~62GB after UMA)
 
-# GPU passthrough (for AI/media VMs)
+# ── GPU Passthrough ──────────────────────────────────────────────────────────
+#
+# There are TWO different GPU passthrough approaches in Proxmox:
+#
+#   1. VFIO-PCI passthrough (for VMs)
+#      Binds the GPU to the vfio-pci driver at boot, giving a VM exclusive
+#      access to the physical device. The host loses /dev/dri entirely.
+#      Requires: IOMMU enabled, vfio modules loaded, vfio-pci ids set.
+#
+#   2. Device sharing via /dev/dri bind-mount (for LXC containers)
+#      The host keeps the amdgpu driver loaded and shares /dev/dri + /dev/kfd
+#      into LXC containers. Multiple containers can share the GPU.
+#      Requires: amdgpu driver + ROCm on the host, udev rules, cgroup allow.
+#
+# ⚠ THESE ARE MUTUALLY EXCLUSIVE FOR THE SAME GPU.
+#   If vfio-pci claims the Radeon 890M, /dev/dri won't exist on the host
+#   and CT 201 (n5-docker) can't use it for VAAPI/ROCm.
+#
+# Current choice: LXC device sharing (approach 2)
+#   CT 201 needs /dev/dri for Frigate (VAAPI) and Immich (ROCm ML).
+#   VFIO-PCI is disabled — enable it only if you want a dedicated GPU VM
+#   instead of LXC GPU sharing.
+#
+# ROCm installation layers:
+#   - Proxmox host: full ROCm install (kernel driver amdgpu + userspace)
+#     → Run: proxmox-gpu-setup-scripts/host/003 - install-amd-drivers.sh
+#     → Run: proxmox-gpu-setup-scripts/host/007 - setup-udev-gpu-rules.sh
+#   - Inside LXC: ROCm userspace libraries only (NO kernel/DKMS modules)
+#     → Run: proxmox-gpu-setup-scripts/lxc/install-docker-and-amd-drivers-in-lxc.sh
+#
+# References:
+#   - Setup scripts: https://github.com/mutovkin/proxmox-gpu-setup-scripts
+#   - Hardware details: docs/n5pro.md § GPU Passthrough
+#   - IOMMU groups: docs/n5pro.md § IOMMU Groups
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Kernel-level IOMMU and VFIO-PCI configuration (proxmox_host role).
+# Currently disabled — the amdgpu driver stays loaded so LXCs can share /dev/dri.
+# Set enabled: true + uncomment vfio_pci_ids to switch to exclusive VM passthrough.
 gpu_passthrough:
-  enabled: true
-  iommu: true
-  vfio_pci_ids: "1002:150e,1002:1640" # Radeon 890M GPU + HDMI/DP audio
-  gpu_pci_address: "c7:00.0" # IOMMU group 23
-  audio_pci_address: "c7:00.1" # IOMMU group 24
+  enabled: false  # flip to true only for dedicated GPU VM (disables LXC GPU sharing)
+  iommu: true     # IOMMU is still needed even for LXC device sharing
+  # vfio_pci_ids: "1002:150e,1002:1640"  # uncomment to claim GPU for VFIO-PCI
+  gpu_pci_address: "c7:00.0"   # Radeon 890M — IOMMU group 23
+  audio_pci_address: "c7:00.1" # HDMI/DP audio — IOMMU group 24 (device ID 1002:1640)
   kernel_params:
     - "amd_iommu=on"
     - "iommu=pt"
 
-# NPU passthrough
-npu_pci_address: "c8:00.1" # AMD Strix Halo NPU, IOMMU group 30
+# ── NPU Passthrough ─────────────────────────────────────────────────────────
+# AMD Strix Halo Neural Processing Unit — available for AI workloads.
+# Not yet assigned to any VM/CT. Can be passed via hostpci (VM) or
+# cgroup device allow (LXC) once a workload needs it.
+npu_pci_address: "c8:00.1"  # IOMMU group 30
 npu_device_id: "1022:17f0"
 
 # SATA controller passthrough (for TrueNAS VM)

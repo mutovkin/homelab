@@ -24,7 +24,7 @@ proxmox_lxc_defaults:
   swap: 512
   root_disk_size: 8
   storage: local-zfs
-  ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+  ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
   net_bridge: vmbr0
   onboot: true
   started: true
