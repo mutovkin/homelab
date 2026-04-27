@@ -1,4 +1,3 @@
-version: '3'
 # Full guide for this Docker Compose is 
 # https://www.techaddressed.com/tutorials/vaultwarden-docker-compose/
 services:

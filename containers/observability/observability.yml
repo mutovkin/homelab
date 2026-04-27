@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # VictoriaMetrics - Time-series database for metrics
   victoriametrics:
