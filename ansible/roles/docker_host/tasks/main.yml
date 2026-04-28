@@ -49,7 +49,7 @@
 # this installs only userspace libraries (--no-dkms).
 
 - name: Check if ROCm is already installed
-  ansible.builtin.command: rocminfo
+  ansible.builtin.command: which rocminfo
   register: rocm_check
   changed_when: false
   failed_when: false

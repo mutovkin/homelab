@@ -76,6 +76,7 @@
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
     state: present
+  delegate_to: localhost
   loop: "{{ proxmox_vms }}"
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }})"
@@ -89,6 +90,7 @@
     node: "{{ proxmox_node }}"
     vmid: "{{ item.vmid }}"
     state: started
+  delegate_to: localhost
   loop: "{{ proxmox_vms | selectattr('started', 'defined') | selectattr('started', 'equalto', true) | list + proxmox_vms | rejectattr('started', 'defined') | list }}"
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }})"
@@ -114,9 +116,11 @@
     unprivileged: "{{ item.unprivileged | default(proxmox_lxc_defaults.unprivileged) }}"
     features:
       - "nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
+      - "keyctl=1"
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
     state: present
+  delegate_to: localhost
   loop: "{{ proxmox_lxcs }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
@@ -130,6 +134,7 @@
     node: "{{ proxmox_node }}"
     vmid: "{{ item.vmid }}"
     state: started
+  delegate_to: localhost
   loop: "{{ proxmox_lxcs | selectattr('started', 'defined') | selectattr('started', 'equalto', true) | list + proxmox_lxcs | rejectattr('started', 'defined') | list }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"

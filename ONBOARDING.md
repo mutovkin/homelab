@@ -74,17 +74,19 @@ All four steps run via a single command: `task deploy:full` (or `ansible-playboo
 
 Install these on your control machine before starting:
 
-**macOS (Homebrew):**
+**macOS (uv + Homebrew):**
 
 ```bash
-brew install ansible go-task
+brew install go-task uv
+uv tool install ansible-core --with ansible --with proxmoxer --with requests
 ```
 
 **Arch Linux (Omarchy 3.6):**
 
 ```bash
-sudo pacman -S ansible
+sudo pacman -S uv
 yay -S go-task-bin
+uv tool install ansible-core --with ansible --with proxmoxer --with requests
 ```
 
 **Verify on either platform:**
@@ -98,6 +100,14 @@ You also need:
 
 - **SSH access**: You should already be able to `ssh root@pve.lan` and `ssh root@deb-docker.lan`
 - **A Proxmox API token** (created during secrets setup — needed for VM/LXC provisioning)
+
+### Keeping Ansible Updated
+
+Since you installed Ansible via `uv`, updating to the latest version of Ansible and your injected Proxmox dependencies is as simple as running:
+
+```bash
+uv tool upgrade ansible-core
+```
 
 ---
 

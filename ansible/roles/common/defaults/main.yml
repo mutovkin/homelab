@@ -10,3 +10,5 @@ common_packages:
   - unzip
   - gnupg
   - ca-certificates
+  - rsync
+  - python3-yaml

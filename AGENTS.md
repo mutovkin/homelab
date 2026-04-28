@@ -36,3 +36,4 @@ Naming convention: `<user>@<hostname>.pub` (e.g., `surge@macbook.pub`, `surge@om
 - **go-task** (`Taskfile.yml`) wraps common commands
 - Docs live in `docs/`; architecture decisions in `docs/decisions.md`
 - YAML style: 2-space indent, `---` document start, quoted strings only when required
+- **Memory: Ansible Synchronize vs Sudo**: When using the `ansible.posix.synchronize` module, if the playbook runs with `become: true`, Ansible injects `--rsync-path='sudo -u root rsync'` into the rsync command. Because our minimal Debian LXC containers (e.g., `deb-docker`) do not have `sudo` installed by default, and we connect as `root` anyway, this causes rsync to fail. To bypass this, **always set `become: false` on `synchronize` tasks** (since `ansible_user: root` naturally has permissions).
