@@ -3,6 +3,7 @@
 # Ansible
 .vault_password
 *.retry
+ansible/.ansible/
 
 # OS
 .DS_Store
