@@ -54,6 +54,7 @@
 # --- VM provisioning ---
 
 - name: Provision virtual machines
+  become: false
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
@@ -82,6 +83,7 @@
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
 - name: Start virtual machines
+  become: false
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
@@ -96,6 +98,7 @@
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
 - name: Provision LXC containers
+  become: false
   community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
@@ -126,6 +129,7 @@
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
 - name: Start LXC containers
+  become: false
   community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
