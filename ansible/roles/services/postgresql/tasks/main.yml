@@ -40,6 +40,6 @@
     files:
       - postgresql.yml
     state: present
-    pull: missing
+    pull: always
   tags:
     - deploy

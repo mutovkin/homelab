@@ -122,7 +122,6 @@ services:
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "telegraf:${DOCKER_GID:-996}"  # Run as telegraf user with docker group
     volumes:
       - /data/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro

@@ -37,6 +37,6 @@
     files:
       - frigate.yml
     state: present
-    pull: missing
+    pull: always
   tags:
     - deploy

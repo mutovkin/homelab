@@ -28,6 +28,6 @@
     files:
       - searxng.yml
     state: present
-    pull: missing
+    pull: always
   tags:
     - deploy

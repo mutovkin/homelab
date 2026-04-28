@@ -1,7 +1,7 @@
 services:
   watchtower:
     container_name: watchtower
-    image: containrrr/watchtower
+    image: nickfedor/watchtower:latest
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -12,7 +12,7 @@ services:
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_NO_STARTUP_MESSAGE: "true"
       WATCHTOWER_INCLUDE_RESTARTING: "true"
-      WATCHTOWER_ROLLING_RESTART: "true"
+      WATCHTOWER_ROLLING_RESTART: "false"
       WATCHTOWER_TIMEOUT: 30s
       # Notifications
       WATCHTOWER_NOTIFICATIONS: "email"

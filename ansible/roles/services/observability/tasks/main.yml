@@ -43,6 +43,6 @@
     files:
       - observability.yml
     state: present
-    pull: missing
+    pull: always
   tags:
     - deploy
