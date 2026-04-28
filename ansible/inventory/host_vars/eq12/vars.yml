@@ -44,10 +44,10 @@ proxmox_lxcs:
     ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
     cores: 2
     memory: 4096
-    root_disk_size: 8
+    root_disk_size: 24
     storage: local-zfs
     mounts:
-      mp0: "local-zfs:110,mp=/data"
+      mp0: "local-zfs:subvol-101-disk-1,mp=/data,backup=1,size=110G"
     nesting: true
     onboot: true
     started: true

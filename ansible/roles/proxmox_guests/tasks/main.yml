@@ -118,8 +118,8 @@
     onboot: "{{ item.onboot | default(proxmox_lxc_defaults.onboot) }}"
     unprivileged: "{{ item.unprivileged | default(proxmox_lxc_defaults.unprivileged) }}"
     features:
-      - "nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
       - "keyctl=1"
+      - "nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
     state: present
