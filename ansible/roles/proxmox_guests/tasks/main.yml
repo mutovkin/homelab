@@ -112,7 +112,7 @@
     memory: "{{ item.memory | default(proxmox_lxc_defaults.memory) }}"
     swap: "{{ item.swap | default(proxmox_lxc_defaults.swap) }}"
     storage: "{{ item.storage | default(proxmox_lxc_defaults.storage) }}"
-    disk: "{{ item.root_disk_size | default(proxmox_lxc_defaults.root_disk_size) }}"
+    disk: "{{ item.storage | default(proxmox_lxc_defaults.storage) }}:{{ item.root_disk_size | default(proxmox_lxc_defaults.root_disk_size) }}"
     mounts: "{{ item.mounts | default({}) }}"
     netif: "{{ item.netif | default({'net0': 'name=eth0,bridge=' + (item.net_bridge | default(proxmox_lxc_defaults.net_bridge)) + ',ip=dhcp'}) }}"
     onboot: "{{ item.onboot | default(proxmox_lxc_defaults.onboot) }}"
