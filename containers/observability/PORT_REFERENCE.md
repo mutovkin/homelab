@@ -4,12 +4,12 @@
 
 ### VictoriaMetrics (Time-Series Metrics Database)
 
-| Port | Protocol | Purpose | Used By |
-|------|----------|---------|---------|
-| **8428** | HTTP | **Primary HTTP API and Web UI** (`/vmui`) | Grafana queries, Telegraf writes, Manual queries |
-| **8089** | TCP/UDP | **InfluxDB Line Protocol** | Home Assistant, InfluxDB-compatible clients |
-| **2003** | TCP/UDP | **Graphite Protocol** | Graphite-compatible monitoring tools |
-| **4242** | TCP | **OpenTSDB Protocol** | OpenTSDB-compatible clients |
+| Port     | Protocol | Purpose                               | Used By                                         |
+| -------- | -------- | ------------------------------------- | ----------------------------------------------- |
+| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`) | Grafana queries, Telegraf writes, Manual queries |
+| **8089** | TCP/UDP  | **InfluxDB Line Protocol**            | Home Assistant, InfluxDB-compatible clients     |
+| **2003** | TCP/UDP  | **Graphite Protocol**                 | Graphite-compatible monitoring tools            |
+| **4242** | TCP      | **OpenTSDB Protocol**                 | OpenTSDB-compatible clients                     |
 
 #### Port 8428 - Main HTTP API
 
@@ -52,9 +52,9 @@
 
 ### VictoriaLogs (Log Aggregation Database)
 
-| Port | Protocol | Purpose | Used By |
-|------|----------|---------|---------|
-| **9428** | HTTP | **HTTP API and Web UI** (`/select/vmui`) | Grafana queries, Vector writes, Manual queries |
+| Port     | Protocol | Purpose                             | Used By                                   |
+| -------- | -------- | ----------------------------------- | ----------------------------------------- |
+| **9428** | HTTP     | **HTTP API and Web UI** (`/select/vmui`) | Grafana queries, Vector writes, Manual queries |
 
 #### Port 9428 - Main HTTP API
 
@@ -80,9 +80,9 @@ curl 'http://localhost:9428/select/logsql/query' \
 
 ### Vector (Log Collection Agent)
 
-| Port | Protocol | Purpose | Used By |
-|------|----------|---------|---------|
-| **8686** | HTTP | **GraphQL API** | Monitoring, debugging, metrics export |
+| Port     | Protocol | Purpose           | Used By                              |
+| -------- | -------- | ----------------- | ------------------------------------ |
+| **8686** | HTTP     | **GraphQL API**   | Monitoring, debugging, metrics export |
 
 #### Port 8686 - GraphQL API
 
@@ -100,9 +100,9 @@ curl 'http://localhost:9428/select/logsql/query' \
 
 ### Grafana (Visualization)
 
-| Port | Protocol | Purpose | Used By |
-|------|----------|---------|---------|
-| **3000** | HTTP | **Web UI** | Users, Dashboard access |
+| Port     | Protocol | Purpose      | Used By                  |
+| -------- | -------- | ------------ | ------------------------ |
+| **3000** | HTTP     | **Web UI**   | Users, Dashboard access  |
 
 #### Port 3000 - Web Interface
 
@@ -126,12 +126,12 @@ curl 'http://localhost:9428/select/logsql/query' \
 
 ## Quick Reference Matrix
 
-| Service | Web UI URL | Primary API | Health Check |
-|---------|-----------|-------------|--------------|
-| **VictoriaMetrics** | http://localhost:8428/vmui | :8428 | http://localhost:8428/health |
-| **VictoriaLogs** | http://localhost:9428/select/vmui | :9428 | http://localhost:9428/health |
-| **Vector** | http://localhost:8686/playground | :8686 | http://localhost:8686/health |
-| **Grafana** | http://localhost:3000 | :3000 | http://localhost:3000/api/health |
+| Service             | Web UI URL                        | Primary API | Health Check                        |
+| ------------------- | --------------------------------- | ----------- | ----------------------------------- |
+| **VictoriaMetrics** | http://localhost:8428/vmui        | :8428       | http://localhost:8428/health        |
+| **VictoriaLogs**    | http://localhost:9428/select/vmui | :9428       | http://localhost:9428/health        |
+| **Vector**          | http://localhost:8686/playground  | :8686       | http://localhost:8686/health        |
+| **Grafana**         | http://localhost:3000             | :3000       | http://localhost:3000/api/health    |
 
 ---
 

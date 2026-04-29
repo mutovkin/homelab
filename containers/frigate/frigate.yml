@@ -1,0 +1,39 @@
+services:
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:stable
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "5000:5000"   # Web UI
+      - "8554:8554"   # RTSP feeds
+      - "8555:8555"   # WebRTC
+      - "8555:8555/udp"
+    environment:
+      FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD}
+      TZ: ${TIMEZONE:-America/Los_Angeles}
+    volumes:
+      - ${FRIGATE_CONFIG_DIR}:/config
+      - ${FRIGATE_RECORDINGS_DIR}:/media/frigate  # NFS mount from TrueNAS
+      - type: tmpfs    # Reduce SSD writes for cache
+        target: /tmp/cache
+        tmpfs:
+          size: 1073741824  # 1GB
+    devices:
+      - /dev/dri:/dev/dri  # VAAPI hardware decoding (AMD 890M)
+    shm_size: "256mb"
+    networks:
+      - frigate_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/api/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  frigate_network:
+    name: frigate_network
+    ipam:
+      config:
+        - subnet: ${FRIGATE_NETWORK_SUBNET:-172.32.0.0/24}

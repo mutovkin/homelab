@@ -1,0 +1,33 @@
+---
+- name: Create SearXNG deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/searxng"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize SearXNG compose and config files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/searxng/"
+    dest: "{{ data_mount }}/deploy/searxng/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template SearXNG .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/searxng/.env"
+    mode: "0600"
+
+- name: Deploy SearXNG stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/searxng"
+    files:
+      - searxng.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

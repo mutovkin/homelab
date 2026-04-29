@@ -1,0 +1,4 @@
+---
+# Proxmox host group defaults
+proxmox_enterprise_repo: false # Use community (no-subscription) repo
+proxmox_zfs_scrub_schedule: "monthly"

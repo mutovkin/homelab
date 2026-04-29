@@ -1,0 +1,16 @@
+---
+# Master playbook — full end-to-end deployment
+# 1. Configure Proxmox host OS + provision VMs/LXCs
+# 2. Configure Docker inside guest VMs/LXCs
+# 3. Deploy Docker Compose services
+# Run: ansible-playbook playbooks/site.yml
+# Or: task deploy:full
+
+- name: Configure Proxmox hosts and provision guests
+  ansible.builtin.import_playbook: proxmox-hosts.yml
+
+- name: Configure Docker guests
+  ansible.builtin.import_playbook: configure-guests.yml
+
+- name: Deploy services
+  ansible.builtin.import_playbook: deploy-services.yml

@@ -1,0 +1,90 @@
+---
+# Beelink EQ12 (AZW) — host-specific variables
+# CPU: Intel N100 (4c/4t, Alder Lake-N)
+# RAM: 16GB (single DIMM)
+# NVMe: 1× 2TB TEAMGROUP TM8FP4002T
+# Net: 2× Intel I225-V 2.5GbE (enp2s0 → vmbr0)
+
+# Proxmox
+proxmox_node: pve
+proxmox_api_url: "https://{{ ansible_host }}:8006"
+
+# Hardware
+total_ram_gb: 16
+
+# Storage
+zfs_pool: rpool
+data_mount: /data
+
+# Network
+proxmox_bridge: vmbr0
+
+# === VM/LXC Definitions (managed by proxmox_guests role) ===
+# Ported from infrastructure/machines/eq12.ts
+
+proxmox_vms:
+  - vmid: 100
+    name: ha
+    cores: 2
+    memory: 4096
+    scsi:
+      scsi0: "local-zfs:32,format=raw"
+    bios: seabios
+    machine: q35
+    onboot: true
+    started: true
+    tags:
+      - proxmox-helper-scripts
+      - home-assistant
+    description: "Home Assistant OS — QEMU VM"
+
+proxmox_lxcs:
+  - vmid: 101
+    hostname: deb-docker
+    ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+    cores: 2
+    memory: 4096
+    root_disk_size: 24
+    storage: local-zfs
+    mounts:
+      mp0: "local-zfs:subvol-101-disk-1,size=110G,mp=/data,backup=1"
+    netif:
+      net0: "name=eth0,bridge=vmbr0,gw=192.168.23.1,hwaddr=AE:E1:F1:EE:F5:9A,ip=192.168.25.15/18,type=veth"
+    nesting: true
+    onboot: true
+    started: true
+    tags:
+      - docker
+    description: "Primary Docker host — runs all container services (observability, postgresql, vaultwarden, etc.)"
+
+  - vmid: 102
+    hostname: ubuntu-docker
+    ostemplate: "local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+    cores: 1
+    memory: 1024
+    root_disk_size: 8
+    storage: local-zfs
+    netif:
+      net0: "name=eth0,bridge=vmbr0,hwaddr=BC:24:11:C9:0F:0C,ip=dhcp,type=veth"
+    nesting: true
+    onboot: false
+    started: false
+    tags:
+      - docker
+    description: "Secondary Docker host (Ubuntu 22.04) — currently unused"
+
+  - vmid: 104
+    hostname: nginxproxymanager
+    ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+    cores: 2
+    memory: 1024
+    root_disk_size: 4
+    storage: local-zfs
+    netif:
+      net0: "name=eth0,bridge=vmbr0,gw=192.168.23.1,hwaddr=5E:E1:3E:81:01:5F,ip=192.168.25.20/18,type=veth"
+    nesting: false
+    onboot: true
+    started: true
+    tags:
+      - nginx-proxy-manager
+    description: "Nginx Proxy Manager — reverse proxy and SSL management"

@@ -1,0 +1,45 @@
+---
+- name: Create PostgreSQL deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/postgresql"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize PostgreSQL compose and config files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/postgresql/"
+    dest: "{{ data_mount }}/deploy/postgresql/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+      - "--exclude=backups/"
+      - "--exclude=data/"
+
+- name: Template PostgreSQL .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/postgresql/.env"
+    mode: "0600"
+
+- name: Create PostgreSQL data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/postgresql/data"
+    - "{{ data_mount }}/postgresql/config"
+    - "{{ data_mount }}/postgresql/config/pgadmin"
+
+- name: Deploy PostgreSQL stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/postgresql"
+    files:
+      - postgresql.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

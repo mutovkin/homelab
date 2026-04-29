@@ -1,0 +1,11 @@
+---
+# Configure Proxmox host OS and provision VMs/LXCs on all Proxmox machines
+# Run: ansible-playbook playbooks/proxmox-hosts.yml
+
+- name: Configure Proxmox hosts and provision guests
+  hosts: proxmox_hosts
+  become: true
+  roles:
+    - common
+    - proxmox_host
+    - proxmox_guests

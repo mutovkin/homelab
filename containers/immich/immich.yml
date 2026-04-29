@@ -1,0 +1,80 @@
+services:
+  immich-server:
+    container_name: immich-server
+    image: ghcr.io/immich-app/immich-server:release
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "2283:2283"
+    environment:
+      DB_HOSTNAME: postgres
+      DB_USERNAME: ${IMMICH_DB_USERNAME}
+      DB_PASSWORD: ${IMMICH_DB_PASSWORD}
+      DB_DATABASE_NAME: ${IMMICH_DB_DATABASE}
+      REDIS_HOSTNAME: immich-redis
+    volumes:
+      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    devices:
+      - /dev/dri:/dev/dri  # VAAPI hardware transcoding (AMD 890M)
+    depends_on:
+      immich-redis:
+        condition: service_healthy
+    networks:
+      - immich_network
+      - postgres_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:2283/api/server/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  immich-machine-learning:
+    container_name: immich-machine-learning
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    environment:
+      MACHINE_LEARNING_WORKERS: 1
+      MACHINE_LEARNING_WORKER_TIMEOUT: 120
+    volumes:
+      - immich-model-cache:/cache
+    devices:
+      - /dev/dri:/dev/dri  # VAAPI for ML acceleration
+    networks:
+      - immich_network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3003/ping\")'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  immich-redis:
+    container_name: immich-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - immich-redis-data:/data
+    networks:
+      - immich_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  immich-model-cache:
+  immich-redis-data:
+
+networks:
+  immich_network:
+    name: immich_network
+    ipam:
+      config:
+        - subnet: ${IMMICH_NETWORK_SUBNET:-172.31.0.0/24}
+  postgres_network:
+    external: true
+    name: postgres_network

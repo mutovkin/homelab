@@ -1,0 +1,11 @@
+---
+# Configure Docker and base packages inside VMs/LXCs
+# Run AFTER proxmox-hosts.yml has provisioned the VMs/LXCs
+# Run: ansible-playbook playbooks/configure-guests.yml
+
+- name: Configure Docker hosts
+  hosts: docker_hosts
+  become: true
+  roles:
+    - common
+    - docker_host

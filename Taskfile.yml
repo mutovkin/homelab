@@ -1,0 +1,98 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  ANSIBLE_DIR: ./ansible
+
+tasks:
+  # === Infrastructure: Proxmox Host Configuration + Guest Provisioning ===
+  infra:hosts:
+    desc: Configure Proxmox host OS and provision VMs/LXCs on all machines
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/proxmox-hosts.yml {{.CLI_ARGS}}
+
+  infra:hosts:check:
+    desc: Dry-run Proxmox host configuration and guest provisioning (no changes)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/proxmox-hosts.yml --check --diff {{.CLI_ARGS}}
+
+  # === Infrastructure: Guest Configuration (Ansible) ===
+  infra:guests:
+    desc: Configure Docker and base packages inside VMs/LXCs
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/configure-guests.yml {{.CLI_ARGS}}
+
+  # === Service Deployment (Ansible + Docker Compose) ===
+  deploy:services:
+    desc: Deploy all Docker Compose services
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
+
+  deploy:service:
+    desc: 'Deploy a single service (usage: task deploy:service -- --tags postgresql)'
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
+
+  # === Full Deployment ===
+  deploy:full:
+    desc: Run the full deployment pipeline (hosts -> guests -> services)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/site.yml {{.CLI_ARGS}}
+
+  # === System Upgrades ===
+  upgrade:full:
+    desc: Run full dist-upgrade on all guests (use -- --limit <host> to target specific hosts)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/configure-guests.yml -e apt_dist_upgrade=true {{.CLI_ARGS}}
+
+  # === Ansible Utilities ===
+  ansible:lint:
+    desc: Lint all Ansible playbooks and roles
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-lint
+
+  ansible:galaxy:
+    desc: Install Ansible Galaxy collections
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-galaxy install -r requirements.yml
+
+  ansible:inventory:
+    desc: Show Ansible inventory
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-inventory --list {{.CLI_ARGS}}
+
+  ansible:ping:
+    desc: Ping all hosts
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible all -m ping {{.CLI_ARGS}}
+
+  # === Docker Status ===
+  docker:status:
+    desc: Show status of all Docker containers across hosts
+    cmds:
+      - ssh root@deb-docker.lan 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'
+
+  # === Vault ===
+  vault:edit:
+    desc: 'Edit an encrypted vault file (usage: task vault:edit -- inventory/host_vars/eq12/vault.yml)'
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-vault edit {{.CLI_ARGS}}
+
+  vault:encrypt:
+    desc: Encrypt a file with ansible-vault
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-vault encrypt {{.CLI_ARGS}}

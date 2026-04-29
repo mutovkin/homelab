@@ -1,0 +1,22 @@
+---
+# defaults for docker_host role
+docker_log_driver: "json-file"
+docker_log_max_size: "10m"
+docker_log_max_file: "3"
+docker_default_address_pools:
+  - base: "172.20.0.0/14"
+    size: 24
+
+# GPU sharing / ROCm configuration
+# Override gpu_sharing in host_vars for GPU-enabled Docker hosts
+gpu_sharing:
+  enabled: false
+  rocm_usecases:
+    - rocm
+
+# ROCm version pinning — bump these when upgrading ROCm
+rocm_version: "7.2.2"
+rocm_build: "70202"
+rocm_graphics_version: "7.2.1"  # AMD quirk: graphics repo version differs from installer
+rocm_ubuntu_codename: "noble"
+hsa_gfx_version: "11.5.0"  # HSA_OVERRIDE_GFX_VERSION for Radeon 890M (gfx1150)
