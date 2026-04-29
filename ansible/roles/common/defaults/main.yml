@@ -12,3 +12,5 @@ common_packages:
   - ca-certificates
   - rsync
   - python3-yaml
+  - unattended-upgrades
+  - apt-listchanges

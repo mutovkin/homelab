@@ -1,5 +1,5 @@
 ---
-# N5 Pro Docker LXC (CT 201 / n5-docker) — host-specific variables
+# N5 Pro Docker LXC (CT 201 / n5pro-docker) — host-specific variables
 
 # Data mount point inside the LXC
 data_mount: /data
@@ -14,13 +14,15 @@ gpu_sharing:
 
 # Services to deploy on this Docker host
 # Each entry corresponds to an Ansible role in roles/services/
-services:
-  - postgresql
-  - immich
-  - frigate
-  - nextcloud
-  - portainer
-  - watchtower
+# Services to deploy — intentionally empty until host setup is complete
+services: []
+# services:
+#   - postgresql
+#   - immich
+#   - frigate
+#   - nextcloud
+#   - portainer
+#   - watchtower
 
 # Docker network subnets
 docker_networks:

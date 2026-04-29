@@ -16,7 +16,7 @@
         │           │           │       │   │           │
    ┌────┴────┐ ┌────┴─────┐ ┌───┴───┐  ┌┴───┴──┐  ┌─────┴───┐
    │ VM-100  │ │ CT-101   │ │CT-104 │  │VM-200 │  │ CT-201  │
-   │ Home    │ │deb-docker│ │ NPM   │  │TrueNAS│  │n5-docker│
+   │ Home    │ │deb-docker│ │ NPM   │  │TrueNAS│  │n5pro-docker│
    │Assistant│ │(Docker)  │ │       │  │       │  │(Docker) │
    └─────────┘ └────┬─────┘ └───────┘  └───────┘  └────┬────┘
                     │                                   │
@@ -74,7 +74,7 @@ All Docker networks use 172.x.x.x subnets to avoid conflicts with the LAN (192.1
 | Watchtower | `watchtower_network` | 172.25.0.0/24 | 172.25.0.1 |
 | Joplin | `postgres_network` (shared) | 172.21.0.0/24 | 172.21.0.1 |
 
-### N5 Pro — CT 201 (n5-docker)
+### N5 Pro — CT 201 (n5pro-docker)
 
 | Service Stack | Network Name | Subnet | Gateway |
 |---|---|---|---|
@@ -116,7 +116,7 @@ for direct access to 5× 26TB HDDs.
 | Host | Docker Host | Services |
 |---|---|---|
 | EQ12 | CT 101 (deb-docker) | PostgreSQL, Observability, Vaultwarden, SearXNG, Joplin, Portainer, Watchtower |
-| N5 Pro | CT 201 (n5-docker) | PostgreSQL, Immich, Frigate, NextCloud, Portainer, Watchtower |
+| N5 Pro | CT 201 (n5pro-docker) | PostgreSQL, Immich, Frigate, NextCloud, Portainer, Watchtower |
 
 Service placement is configured via `ansible/inventory/host_vars/*/vars.yml` — the
 `services` list variable controls which compose stacks deploy to which Docker host.

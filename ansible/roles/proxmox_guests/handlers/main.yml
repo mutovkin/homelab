@@ -1,10 +1,2 @@
 ---
-- name: restart lxc
-  community.proxmox.proxmox:
-    api_host: "{{ ansible_host }}"
-    api_user: "{{ vault_proxmox_api_user }}"
-    api_token_id: "{{ vault_proxmox_api_token_id }}"
-    api_token_secret: "{{ vault_proxmox_api_token_secret }}"
-    node: "{{ proxmox_node }}"
-    vmid: "{{ item.vmid }}"
-    state: restarted
+# Handlers for proxmox_guests role

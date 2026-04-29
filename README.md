@@ -86,7 +86,7 @@ homelab/
 | [Portainer](containers/portainer/) | 9000 | Container management UI |
 | [Watchtower](containers/watchtower/) | — | Automatic container updates |
 
-### N5 Pro (CT 201 — n5-docker)
+### N5 Pro (CT 201 — n5pro-docker)
 
 | Service | Port | Description |
 |---|---|---|

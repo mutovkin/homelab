@@ -42,9 +42,9 @@
 # Host only needs firmware blobs + udev rules. ROCm userspace is installed
 # inside the LXC by the docker_host role (configure-guests.yml).
 
-- name: Install AMD GPU firmware
+- name: Ensure Proxmox firmware is installed (contains AMD GPU firmware)
   ansible.builtin.apt:
-    name: firmware-amd-graphics
+    name: pve-firmware
     state: present
   when: gpu_sharing.enabled | default(false)
 

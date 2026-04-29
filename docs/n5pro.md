@@ -138,13 +138,13 @@ ROCm userspace libraries are installed inside the LXC container only.
 │  Managed by: proxmox_host role (gpu_sharing.enabled)  │
 │                                                       │
 │  amdgpu kernel driver ← inbox, loaded automatically   │
-│  firmware-amd-graphics ← apt package                  │
+│  pve-firmware ← apt package                           │
 │  udev rules (/etc/udev/rules.d/70-amdgpu.rules)       │
 │  /dev/dri/card0, /dev/dri/renderD128, /dev/kfd        │
 │         │              │              │               │
 │         ▼              ▼              ▼               │
 │  ┌──── bind-mount ──── bind-mount ── bind-mount ──┐   │
-│  │  CT 201 (n5-docker) — Ubuntu 24.04             │   │
+│  │  CT 201 (n5pro-docker) — Ubuntu 24.04             │   │
 │  │  Managed by: docker_host role (gpu_sharing)    │   │
 │  │                                                │   │
 │  │  amdgpu-install --usecase=rocm,hip,mllib       │   │
@@ -161,7 +161,7 @@ ROCm userspace libraries are installed inside the LXC container only.
 
 | Layer                 | What                                             | Managed by |
 |-----------------------|--------------------------------------------------|------------|
-| **Proxmox host**      | `firmware-amd-graphics` + udev rules             | `proxmox_host` role (`gpu_sharing.enabled`) |
+| **Proxmox host**      | `pve-firmware` + udev rules                      | `proxmox_host` role (`gpu_sharing.enabled`) |
 | **LXC config**        | `/dev/dri` + `/dev/kfd` bind-mount, cgroup allow | `proxmox_guests` role (`gpu_sharing: true` on LXC) |
 | **Inside LXC**        | `amdgpu-install --usecase=<list> --no-dkms`      | `docker_host` role (`gpu_sharing.enabled` + `rocm_usecases`) |
 | **Docker containers** | `--device /dev/dri --device /dev/kfd`            | Per-service compose files |
@@ -237,4 +237,4 @@ Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
 | ID  | Type | Name      | Cores | RAM    | Storage    | Notes |
 |-----|------|-----------|-------|--------|------------|-------|
 | 200 | VM   | truenas   | 4     | 16 GB  | 32 GB boot | UEFI/q35, SATA controller PCI passthrough |
-| 201 | CT   | n5-docker | 8     | 24 GB  | 8 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU sharing |
+| 201 | CT   | n5pro-docker | 8     | 24 GB  | 8 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU sharing |

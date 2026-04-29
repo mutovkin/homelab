@@ -51,6 +51,30 @@
   loop_control:
     label: "{{ item.item.stdout | default('unknown') }}"
 
+# --- TrueNAS ISO & PCI Mapping ---
+
+- name: Download TrueNAS ISO if missing
+  ansible.builtin.get_url:
+    url: "https://iso.sys.truenas.net/TrueNAS-26-BETA/26.0.0-BETA.1/TrueNAS-26.0.0-BETA.1.iso"
+    dest: "/var/lib/vz/template/iso/TrueNAS-26.0.0-BETA.1.iso"
+    mode: "0644"
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+
+- name: Check if truenas_sata PCI mapping exists
+  ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_sata
+  register: pci_mapping_check
+  failed_when: false
+  changed_when: false
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+
+- name: Create truenas_sata PCI mapping
+  ansible.builtin.command: pvesh create /cluster/mapping/pci -id truenas_sata -map node=n5pro,path=0000:c1:00.0
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+    and pci_mapping_check.rc != 0
+
 # --- VM provisioning ---
 
 - name: Provision virtual machines
@@ -74,6 +98,7 @@
     net: "{{ item.net | default({'net0': 'virtio,bridge=' + (item.net_bridge | default(proxmox_vm_defaults.net_bridge))}) }}"
     hostpci: "{{ item.hostpci | default({}) }}"
     efidisk0: "{{ item.efidisk0 | default(omit) }}"
+    ide: "{{ item.ide | default(omit) }}"
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
     state: present
@@ -114,12 +139,16 @@
     storage: "{{ item.storage | default(proxmox_lxc_defaults.storage) }}"
     disk: "{{ item.storage | default(proxmox_lxc_defaults.storage) }}:{{ item.root_disk_size | default(proxmox_lxc_defaults.root_disk_size) }}"
     mounts: "{{ item.mounts | default({}) }}"
-    netif: "{{ item.netif | default({'net0': 'name=eth0,bridge=' + (item.net_bridge | default(proxmox_lxc_defaults.net_bridge)) + ',ip=dhcp'}) }}"
+    netif: "{{ item.netif | default({'net0': 'name=eth0,bridge=' + (item.net_bridge | default(proxmox_lxc_defaults.net_bridge)) + ',ip=dhcp,type=veth'}) }}"
     onboot: "{{ item.onboot | default(proxmox_lxc_defaults.onboot) }}"
     unprivileged: "{{ item.unprivileged | default(proxmox_lxc_defaults.unprivileged) }}"
-    features:
-      - "keyctl=1"
-      - "nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
+    pubkey: >-
+      {% set keys = [] %}
+      {% for keyfile in q('fileglob', inventory_dir + '/../files/ssh_keys/*.pub') %}
+      {%   set _ = keys.append(lookup('file', keyfile)) %}
+      {% endfor %}
+      {{ keys | join('\n') }}
+    features: "{{ ['nesting=' ~ (item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0'))] if (item.unprivileged | default(proxmox_lxc_defaults.unprivileged)) else omit }}"
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
     state: present
@@ -127,6 +156,22 @@
   loop: "{{ proxmox_lxcs }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Set features for privileged LXC containers
+  become: true
+  ansible.builtin.shell: |
+    set -o pipefail
+    if ! grep -q "^features: nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}" /etc/pve/lxc/{{ item.vmid }}.conf; then
+      pct set {{ item.vmid }} -features nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}
+      echo "changed"
+    fi
+  register: pct_features
+  changed_when: pct_features.stdout == "changed"
+  loop: "{{ proxmox_lxcs }}"
+  when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — features"
+
 
 - name: Start LXC containers
   become: false
@@ -137,8 +182,21 @@
     api_token_secret: "{{ vault_proxmox_api_token_secret }}"
     node: "{{ proxmox_node }}"
     vmid: "{{ item.vmid }}"
+    hostname: "{{ item.hostname }}"
     state: started
   delegate_to: localhost
+  loop: "{{ proxmox_lxcs | selectattr('started', 'defined') | selectattr('started', 'equalto', true) | list + proxmox_lxcs | rejectattr('started', 'defined') | list }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Ensure LXC root disk is resized
+  become: true
+  ansible.builtin.command: "pct resize {{ item.vmid }} rootfs {{ item.root_disk_size | default(proxmox_lxc_defaults.root_disk_size) }}G"
+  register: pct_resize
+  failed_when: 
+    - pct_resize.rc != 0 
+    - "'disk is already at specified size' not in pct_resize.stderr"
+  changed_when: pct_resize.rc == 0
   loop: "{{ proxmox_lxcs | selectattr('started', 'defined') | selectattr('started', 'equalto', true) | list + proxmox_lxcs | rejectattr('started', 'defined') | list }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"

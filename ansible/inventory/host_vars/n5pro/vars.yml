@@ -18,7 +18,7 @@ system_ram_gb: 62 # Available to Proxmox (~62GB after UMA)
 #
 # Modern approach (Proxmox 9 / kernel 6.17+):
 #   The inbox amdgpu kernel driver handles the GPU. The host only needs
-#   firmware-amd-graphics + udev rules (managed by the proxmox_host role).
+#   pve-firmware + udev rules (managed by the proxmox_host role).
 #   NO ROCm installation on the Proxmox host.
 #
 #   ROCm userspace is installed inside the LXC container by the docker_host
@@ -43,7 +43,7 @@ gpu_sharing:
 # AMD Strix Halo Neural Processing Unit — available for AI workloads.
 # Not yet assigned to any VM/CT. Can be passed via hostpci (VM) or
 # cgroup device allow (LXC) once a workload needs it.
-npu_pci_address: "c8:00.1"  # IOMMU group 30
+npu_pci_address: "c8:00.1" # IOMMU group 30
 npu_device_id: "1022:17f0"
 
 # SATA controller passthrough (for TrueNAS VM)
@@ -64,9 +64,11 @@ proxmox_vms:
   - vmid: 200
     name: truenas
     cores: 4
-    memory: 16384
+    memory: 24576
+    ide:
+      ide2: "local:iso/TrueNAS-26.0.0-BETA.1.iso,media=cdrom"
     scsi:
-      scsi0: "local-zfs:32,format=raw"
+      scsi0: "local-zfs:64,format=raw"
     bios: ovmf
     machine: q35
     efidisk0:
@@ -75,28 +77,30 @@ proxmox_vms:
       efitype: 4m
       pre_enrolled_keys: false
     hostpci:
-      hostpci0: "0000:c1:00.0,pcie=1"  # JMicron SATA controller — 5× 26TB HDDs
+      hostpci0: "mapping=truenas_sata,pcie=1" # JMicron SATA controller via Proxmox Resource Mapping
     net_bridge: vmbr1
     onboot: true
     started: true
     tags:
       - truenas
       - storage
-    description: "TrueNAS SCALE — NAS and storage management. JMicron SATA controller passed through for direct access to 5× 26TB HDDs."
+    description: "TrueNAS SCALE — NAS and storage management. JMicron SATA controller passed through for direct access to 5x 26TB HDDs."
 
 proxmox_lxcs:
   - vmid: 201
-    hostname: n5-docker
+    hostname: n5pro-docker
     os: ubuntu-24.04
     cores: 8
-    memory: 24576  # 24GB — Immich + Frigate + NextCloud + overhead
-    root_disk_size: 8
+    memory: 24576 # 24GB — Immich + Frigate + NextCloud + overhead
+    root_disk_size: 24
     storage: local-zfs
+    unprivileged: false # required: host GID 993 (render) must pass through for /dev/kfd ROCm access
     mounts:
       mp0: "local-zfs:200,mp=/data"
-    net_bridge: vmbr1
+    netif:
+      net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:FC:95:51,ip=192.168.30.15/18,type=veth"
     nesting: true
-    gpu_sharing: true  # /dev/dri + /dev/kfd bind-mount for VAAPI and ROCm
+    gpu_sharing: true # /dev/dri + /dev/kfd bind-mount for VAAPI and ROCm
     onboot: true
     started: true
     tags:

@@ -55,6 +55,13 @@
   failed_when: false
   when: gpu_sharing.enabled | default(false)
 
+- name: Check if amdgpu-install tool is present
+  ansible.builtin.command: which amdgpu-install
+  register: amdgpu_install_check
+  changed_when: false
+  failed_when: false
+  when: gpu_sharing.enabled | default(false)
+
 - name: Download amdgpu-install package
   ansible.builtin.get_url:
     url: "https://repo.radeon.com/amdgpu-install/{{ rocm_version }}/ubuntu/{{ rocm_ubuntu_codename }}/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
@@ -62,7 +69,7 @@
     mode: "0644"
   when:
     - gpu_sharing.enabled | default(false)
-    - rocm_check.rc != 0
+    - amdgpu_install_check.rc != 0
 
 - name: Install amdgpu-install package
   ansible.builtin.apt:
@@ -70,7 +77,7 @@
     state: present
   when:
     - gpu_sharing.enabled | default(false)
-    - rocm_check.rc != 0
+    - amdgpu_install_check.rc != 0
 
 - name: Fix AMD graphics repository version
   ansible.builtin.replace:
@@ -82,6 +89,14 @@
     - rocm_check.rc != 0
     - rocm_version != rocm_graphics_version
 
+- name: Recover interrupted dpkg state before ROCm install
+  ansible.builtin.command: dpkg --configure -a
+  register: dpkg_configure
+  changed_when: dpkg_configure.stdout | length > 0
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_check.rc != 0
+
 - name: Install ROCm userspace via amdgpu-install
   ansible.builtin.command: >
     amdgpu-install -y
@@ -90,6 +105,7 @@
   when:
     - gpu_sharing.enabled | default(false)
     - rocm_check.rc != 0
+
 
 - name: Ensure root is in render and video groups
   ansible.builtin.user:

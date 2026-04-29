@@ -6,7 +6,7 @@
 # modifies /etc/pve/lxc/<vmid>.conf.
 #
 # Prerequisites (managed by proxmox_host role, gpu_sharing.enabled):
-#   1. firmware-amd-graphics package installed
+#   1. pve-firmware package installed
 #   2. amdgpu kernel module loaded (inbox in kernel 6.17+)
 #   3. udev rules deployed (/etc/udev/rules.d/70-amdgpu.rules)
 #
@@ -26,23 +26,37 @@
     path: /dev/kfd
   register: dev_kfd
 
-- name: "CT {{ item.vmid }} — Get /dev/kfd major:minor numbers"
-  ansible.builtin.command: stat -c '%t:%T' /dev/kfd
+- name: "CT {{ item.vmid }} — Get /dev/kfd major:minor numbers in decimal"
+  ansible.builtin.shell: "read -r major minor < <(stat -c '%t %T' /dev/kfd) && printf '%d:%d' \"0x$major\" \"0x$minor\""
+  args:
+    executable: /bin/bash
   register: dev_kfd_major_minor
   changed_when: false
   when: dev_kfd.stat.exists
 
-- name: "CT {{ item.vmid }} — Add GPU device passthrough to LXC config"
-  ansible.builtin.blockinfile:
+- name: "CT {{ item.vmid }} — Add GPU DRI passthrough to LXC config"
+  ansible.builtin.lineinfile:
     path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    marker: "# {mark} ANSIBLE MANAGED — GPU device passthrough"
-    block: |
-      # DRI devices — VAAPI hardware video encoding/decoding
-      lxc.cgroup2.devices.allow: c 226:* rwm
-      lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
-      {% if dev_kfd.stat.exists %}
-      # KFD device — AMD ROCm compute interface (required for ML workloads)
-      lxc.cgroup2.devices.allow: c {{ dev_kfd_major_minor.stdout.split(':')[0] }}:{{ dev_kfd_major_minor.stdout.split(':')[1] }} rwm
-      lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
-      {% endif %}
-  notify: restart lxc
+    line: "{{ dri_line }}"
+  loop:
+    - "lxc.cgroup2.devices.allow: c 226:* rwm"
+    - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+  loop_control:
+    loop_var: dri_line
+  register: lxc_dri_update
+
+- name: "CT {{ item.vmid }} — Add GPU KFD passthrough to LXC config"
+  ansible.builtin.lineinfile:
+    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
+    line: "{{ kfd_line }}"
+  loop:
+    - "lxc.cgroup2.devices.allow: c {{ dev_kfd_major_minor.stdout | default('') }} rwm"
+    - "lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file"
+  loop_control:
+    loop_var: kfd_line
+  when: dev_kfd.stat.exists
+  register: lxc_kfd_update
+
+- name: "CT {{ item.vmid }} — Restart LXC to apply GPU passthrough"
+  ansible.builtin.command: "pct reboot {{ item.vmid }}"
+  when: (lxc_dri_update.changed or (lxc_kfd_update is defined and lxc_kfd_update.changed))

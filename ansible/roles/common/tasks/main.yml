@@ -8,6 +8,12 @@
     update_cache: true
     cache_valid_time: 3600
 
+- name: Upgrade all packages (dist-upgrade)
+  ansible.builtin.apt:
+    upgrade: dist
+  register: apt_upgrade
+  changed_when: apt_upgrade.changed
+
 - name: Install common packages
   ansible.builtin.apt:
     name: "{{ common_packages }}"
@@ -20,3 +26,32 @@
     state: present
   with_fileglob:
     - "{{ playbook_dir }}/../files/ssh_keys/*.pub"
+
+# --- Automatic security updates ---
+
+- name: Enable unattended-upgrades periodic settings
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Download-Upgradeable-Packages "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+    mode: "0644"
+
+- name: Configure unattended-upgrades policy (security only, no auto-reboot)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    content: |
+      // Managed by Ansible — security-only automatic upgrades
+      Unattended-Upgrade::Origins-Pattern {
+          "origin=Debian,codename=${distro_codename},label=Debian-Security";
+          "origin=Ubuntu,codename=${distro_codename},label=Ubuntu";
+          "origin=Ubuntu,codename=${distro_codename},label=Ubuntu-Security";
+      };
+      Unattended-Upgrade::Package-Blacklist {};
+      Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "false";
+    mode: "0644"
