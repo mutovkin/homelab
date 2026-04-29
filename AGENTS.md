@@ -9,7 +9,7 @@ applyTo: "**"
 
 - **Name**: homelab
 - **Purpose**: Multi-machine homelab automation — Ansible + Docker Compose
-- **Branch**: `n5` (active development), `master` (stable)
+- **Branch**: `master` (stable), `feature/*` (new improvements)
 
 ## Operator Machines
 

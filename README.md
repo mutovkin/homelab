@@ -45,6 +45,26 @@ task infra:guests     # 2. Configure Docker inside VMs/LXCs
 task deploy:services  # 3. Deploy compose stacks
 ```
 
+## Secrets Strategy
+
+| Secret type                                  | Stored in                                | Encrypted by    |
+| -------------------------------------------- | ---------------------------------------- | --------------- |
+| Service credentials (DB passwords, API keys) | `ansible/inventory/**/vault.yml`         | ansible-vault   |
+| Proxmox API tokens                           | `ansible/inventory/**/vault.yml`         | ansible-vault   |
+| `.env` files on target hosts                 | Templated at deploy time from vault vars | Never committed |
+
+## Networking
+
+- **Cross-host:** Direct LAN (both machines on the same 192.168.x.x network)
+- **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20-25.x. N5 Pro: 172.30-35.x.
+- **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on EQ12
+- **NFS:** N5 Pro Docker LXC → TrueNAS VM for Frigate recordings and media storage
+
+## Hardware Passthrough
+
+- **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Used via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 for Frigate and Immich.
+- **TrueNAS SATA** — JMicron JMB58x controller at c1:00.0 uses full PCI passthrough in VM-200 (requires VM, not LXC).
+
 ## Repository Structure
 
 ```ascii
@@ -68,7 +88,6 @@ homelab/
 │   ├── nextcloud/
 │   ├── portainer/
 │   └── watchtower/
-├── REFACTORING.md         # Architectural decisions and proposal
 └── TASKS.md               # Implementation tracking
 ```
 
@@ -99,8 +118,6 @@ homelab/
 
 ## Documentation
 
-- [REFACTORING.md](REFACTORING.md) — Architecture decisions, consolidation rationale
-- [TASKS.md](TASKS.md) — Implementation progress tracking
 - [docs/architecture.md](docs/architecture.md) — Network topology, orchestration flow, port map
 - [docs/eq12.md](docs/eq12.md) — EQ12 hardware, VM/LXC inventory, ZFS layout
 - [docs/n5pro.md](docs/n5pro.md) — N5 Pro hardware, GPU config, planned workloads
