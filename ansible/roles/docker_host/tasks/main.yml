@@ -15,7 +15,11 @@
 
 - name: Add Docker repository
   ansible.builtin.apt_repository:
-    repo: "deb [arch={{ ansible_facts['architecture'] | replace('x86_64', 'amd64') }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }} {{ ansible_facts['distribution_release'] }} stable"
+    repo: >-
+      deb [arch={{ ansible_facts['architecture'] | replace('x86_64', 'amd64') }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}
+      {{ ansible_facts['distribution_release'] }} stable
     state: present
     filename: docker
 
@@ -64,7 +68,8 @@
 
 - name: Download amdgpu-install package
   ansible.builtin.get_url:
-    url: "https://repo.radeon.com/amdgpu-install/{{ rocm_version }}/ubuntu/{{ rocm_ubuntu_codename }}/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
+    # yamllint disable-line rule:line-length
+    url: "https://repo.radeon.com/amdgpu-install/{{ rocm_version }}/ubuntu/{{ rocm_ubuntu_codename }}/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"  # noqa: yaml[line-length]
     dest: "/tmp/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
     mode: "0644"
   when:
@@ -102,6 +107,7 @@
     amdgpu-install -y
     --usecase={{ gpu_sharing.rocm_usecases | join(',') }}
     --no-dkms
+  changed_when: true
   when:
     - gpu_sharing.enabled | default(false)
     - rocm_check.rc != 0

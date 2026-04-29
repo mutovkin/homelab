@@ -15,18 +15,18 @@
 #
 # Reference: docs/n5pro.md § GPU Passthrough
 
-- name: "CT {{ item.vmid }} — Verify /dev/dri exists on host"
+- name: "Verify /dev/dri exists on host — CT {{ item.vmid }}"
   ansible.builtin.stat:
     path: /dev/dri
   register: dev_dri
   failed_when: not dev_dri.stat.exists
 
-- name: "CT {{ item.vmid }} — Check if /dev/kfd exists on host (ROCm)"
+- name: "Check if /dev/kfd exists on host (ROCm) — CT {{ item.vmid }}"
   ansible.builtin.stat:
     path: /dev/kfd
   register: dev_kfd
 
-- name: "CT {{ item.vmid }} — Get /dev/kfd major:minor numbers in decimal"
+- name: "Get /dev/kfd major:minor numbers in decimal — CT {{ item.vmid }}"
   ansible.builtin.shell: "read -r major minor < <(stat -c '%t %T' /dev/kfd) && printf '%d:%d' \"0x$major\" \"0x$minor\""
   args:
     executable: /bin/bash
@@ -34,7 +34,7 @@
   changed_when: false
   when: dev_kfd.stat.exists
 
-- name: "CT {{ item.vmid }} — Add GPU DRI passthrough to LXC config"
+- name: "Add GPU DRI passthrough to LXC config — CT {{ item.vmid }}"
   ansible.builtin.lineinfile:
     path: "/etc/pve/lxc/{{ item.vmid }}.conf"
     line: "{{ dri_line }}"
@@ -45,7 +45,7 @@
     loop_var: dri_line
   register: lxc_dri_update
 
-- name: "CT {{ item.vmid }} — Add GPU KFD passthrough to LXC config"
+- name: "Add GPU KFD passthrough to LXC config — CT {{ item.vmid }}"
   ansible.builtin.lineinfile:
     path: "/etc/pve/lxc/{{ item.vmid }}.conf"
     line: "{{ kfd_line }}"
@@ -57,6 +57,7 @@
   when: dev_kfd.stat.exists
   register: lxc_kfd_update
 
-- name: "CT {{ item.vmid }} — Restart LXC to apply GPU passthrough"
+- name: "Restart LXC to apply GPU passthrough — CT {{ item.vmid }}"
   ansible.builtin.command: "pct reboot {{ item.vmid }}"
+  changed_when: true
   when: (lxc_dri_update.changed or (lxc_kfd_update is defined and lxc_kfd_update.changed))
