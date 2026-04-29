@@ -127,6 +127,14 @@
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
+- name: Fail if OS template resolution failed
+  ansible.builtin.fail:
+    msg: "OS '{{ item.os }}' was requested but no template was resolved. Check pveam available output."
+  loop: "{{ proxmox_lxcs | selectattr('os', 'defined') | list }}"
+  when: resolved_templates[item.os] | default('') | length == 0
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
 - name: Provision LXC containers
   become: false
   community.proxmox.proxmox:
