@@ -46,6 +46,24 @@ gpu_sharing:
 npu_pci_address: "c8:00.1" # IOMMU group 30
 npu_device_id: "1022:17f0"
 
+# === NUT (Network UPS Tools) — server ===
+# Goldenmate 1500VA UPS connected via USB
+nut_role: "server"
+nut_server:
+  ups_name: "goldenmate"
+  listen_address: "0.0.0.0"
+  listen_port: 3493
+  shutdowncmd: "/sbin/shutdown -h +0"
+  powerdownflag: "/etc/killpower"
+  ups:
+    driver: "usbhid-ups"
+    port: "auto"
+    desc: "Goldenmate 1500VA"
+    vendorid: "075d"
+    productid: "0300"
+    ignorelb: true
+    override_battery_charge_low: "30"
+
 # SATA controller passthrough (for TrueNAS VM)
 sata_controller_pci: "c1:00.0" # JMicron JMB58x, IOMMU group 17 — 5× 26TB HDDs
 

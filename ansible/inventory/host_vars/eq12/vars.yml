@@ -5,6 +5,15 @@
 # NVMe: 1× 2TB TEAMGROUP TM8FP4002T
 # Net: 2× Intel I225-V 2.5GbE (enp2s0 → vmbr0)
 
+# === NUT (Network UPS Tools) — client ===
+# Monitors N5 Pro's NUT server and shuts down on battery low
+nut_role: "client"
+nut_client:
+  monitor_ups_name: "goldenmate"
+  monitor_host: "192.168.30.5"
+  shutdowncmd: "/sbin/shutdown -h +0"
+  powerdownflag: "/etc/killpower"
+
 # Proxmox
 proxmox_node: pve
 proxmox_api_url: "https://{{ ansible_host }}:8006"

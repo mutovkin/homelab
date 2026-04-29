@@ -1,0 +1,8 @@
+# Managed by Ansible — upsd user definitions
+[{{ nut_users.master.username }}]
+    password = {{ vault_nut_master_password }}
+    upsmon master
+
+[{{ nut_users.slave.username }}]
+    password = {{ vault_nut_slave_password }}
+    upsmon slave

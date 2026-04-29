@@ -1,0 +1,37 @@
+---
+# defaults for nut role
+# Set nut_role: "server" or "client" in host_vars to enable
+
+nut_role: ""
+
+nut_mode: "{% if nut_role == 'server' %}netserver{% elif nut_role == 'client' %}netclient{% else %}none{% endif %}"
+
+# Server defaults (override in host_vars when nut_role == 'server')
+nut_server:
+  listen_address: "0.0.0.0"
+  listen_port: 3493
+  ups_name: "ups"
+  shutdowncmd: "/sbin/shutdown -h +0"
+  powerdownflag: "/etc/killpower"
+  ups:
+    driver: "usbhid-ups"
+    port: "auto"
+    desc: "UPS"
+    vendorid: ""
+    productid: ""
+    ignorelb: false
+    override_battery_charge_low: ""
+
+# Client defaults (override in host_vars when nut_role == 'client')
+nut_client:
+  monitor_ups_name: "ups"
+  monitor_host: ""
+  shutdowncmd: "/sbin/shutdown -h +0"
+  powerdownflag: "/etc/killpower"
+
+# Usernames for upsd.users (passwords come from vault)
+nut_users:
+  master:
+    username: "upsmon_master"
+  slave:
+    username: "upsmon_slave"

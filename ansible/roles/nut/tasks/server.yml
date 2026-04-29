@@ -1,0 +1,100 @@
+---
+# NUT server tasks — runs on the host physically connected to the UPS (N5 Pro)
+
+- name: Install NUT packages
+  ansible.builtin.apt:
+    name:
+      - nut
+      - nut-server
+      - nut-client
+    state: present
+
+- name: Deploy UPS udev rule
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible — NUT USB device permissions
+      SUBSYSTEM=="usb", ATTR{idVendor}=="{{ nut_server.ups.vendorid }}", ATTR{idProduct}=="{{ nut_server.ups.productid }}", MODE="0660", GROUP="nut"
+    dest: /etc/udev/rules.d/90-nut-ups.rules
+    mode: "0644"
+  notify: reload-udev
+
+- name: Deploy nut.conf
+  ansible.builtin.template:
+    src: nut.conf.j2
+    dest: /etc/nut/nut.conf
+    owner: root
+    group: nut
+    mode: "0644"
+  notify: restart-nut-server
+
+- name: Deploy ups.conf
+  ansible.builtin.template:
+    src: ups.conf.j2
+    dest: /etc/nut/ups.conf
+    owner: root
+    group: nut
+    mode: "0644"
+  notify: restart-nut-driver
+
+- name: Deploy upsd.conf
+  ansible.builtin.template:
+    src: upsd.conf.j2
+    dest: /etc/nut/upsd.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  notify: restart-nut-server
+
+- name: Deploy upsd.users
+  ansible.builtin.template:
+    src: upsd.users.j2
+    dest: /etc/nut/upsd.users
+    owner: root
+    group: nut
+    mode: "0640"
+  notify: restart-nut-server
+
+- name: Deploy upsmon.conf (server)
+  ansible.builtin.template:
+    src: upsmon-server.conf.j2
+    dest: /etc/nut/upsmon.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  notify: restart-nut-monitor
+
+- name: Ensure NUT runtime directory exists
+  ansible.builtin.file:
+    path: /var/run/nut
+    state: directory
+    owner: nut
+    group: nut
+    mode: "0770"
+
+- name: Enable and start NUT driver
+  ansible.builtin.systemd:
+    name: "nut-driver@{{ nut_server.ups_name }}.service"
+    enabled: true
+    state: started
+
+- name: Enable and start NUT server
+  ansible.builtin.systemd:
+    name: nut-server.service
+    enabled: true
+    state: started
+
+- name: Enable and start NUT monitor
+  ansible.builtin.systemd:
+    name: "{{ nut_monitor_service_name }}.service"
+    enabled: true
+    state: started
+
+- name: Verify UPS communication
+  ansible.builtin.command: "upsc {{ nut_server.ups_name }}"
+  register: nut_ups_status
+  changed_when: false
+  failed_when: "'ups.status' not in nut_ups_status.stdout"
+
+- name: Show UPS status
+  ansible.builtin.debug:
+    msg: "{{ nut_ups_status.stdout_lines }}"

@@ -1,0 +1,17 @@
+# Managed by Ansible — UPS device definitions
+[{{ nut_server.ups_name }}]
+    driver = {{ nut_server.ups.driver }}
+    port = {{ nut_server.ups.port }}
+    desc = "{{ nut_server.ups.desc }}"
+{% if nut_server.ups.vendorid %}
+    vendorid = {{ nut_server.ups.vendorid }}
+{% endif %}
+{% if nut_server.ups.productid %}
+    productid = {{ nut_server.ups.productid }}
+{% endif %}
+{% if nut_server.ups.ignorelb | default(false) %}
+    ignorelb
+{% endif %}
+{% if nut_server.ups.override_battery_charge_low %}
+    override.battery.charge.low = {{ nut_server.ups.override_battery_charge_low }}
+{% endif %}

@@ -9,3 +9,4 @@
     - common
     - proxmox_host
     - proxmox_guests
+    - nut

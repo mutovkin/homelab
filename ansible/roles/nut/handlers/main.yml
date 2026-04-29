@@ -1,0 +1,23 @@
+---
+- name: Reload udev rules
+  ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger
+  changed_when: true
+  listen: reload-udev
+
+- name: Restart NUT driver
+  ansible.builtin.systemd:
+    name: "nut-driver@{{ nut_server.ups_name }}.service"
+    state: restarted
+  listen: restart-nut-driver
+
+- name: Restart NUT server
+  ansible.builtin.systemd:
+    name: nut-server.service
+    state: restarted
+  listen: restart-nut-server
+
+- name: Restart NUT monitor
+  ansible.builtin.systemd:
+    name: "{{ nut_monitor_service_name }}.service"
+    state: restarted
+  listen: restart-nut-monitor
