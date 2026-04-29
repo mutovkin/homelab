@@ -64,6 +64,7 @@ task deploy:services  # 3. Deploy compose stacks
 
 - **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Used via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 for Frigate and Immich.
 - **TrueNAS SATA** — JMicron JMB58x controller at c1:00.0 uses full PCI passthrough in VM-200 (requires VM, not LXC).
+- **TrueNAS NVMe** — 2× WD SN850X 2TB at c6:00.0 and c3:00.0 passed through to VM-200 for mirrored ZFS special vdev.
 
 ## Repository Structure
 
