@@ -13,6 +13,26 @@
     filename: pve-no-subscription
   when: not proxmox_enterprise_repo
 
+# --- Subscription nag removal ---
+
+- name: Deploy Proxmox nag removal script
+  ansible.builtin.copy:
+    src: remove-proxmox-nag.sh
+    dest: /usr/local/bin/remove-proxmox-nag.sh
+    mode: "0755"
+  when: not proxmox_enterprise_repo
+  notify: remove-proxmox-nag
+
+- name: Deploy apt hook to re-apply nag removal after package updates
+  ansible.builtin.copy:
+    content: |
+      DPkg::Post-Invoke {
+          "if [ -x /usr/local/bin/remove-proxmox-nag.sh ]; then /usr/local/bin/remove-proxmox-nag.sh; fi";
+      };
+    dest: /etc/apt/apt.conf.d/80-remove-proxmox-nag
+    mode: "0644"
+  when: not proxmox_enterprise_repo
+
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
