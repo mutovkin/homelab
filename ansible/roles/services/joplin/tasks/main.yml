@@ -1,0 +1,40 @@
+---
+- name: Create Joplin deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/joplin"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Joplin compose files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/joplin/"
+    dest: "{{ data_mount }}/deploy/joplin/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+      - "--exclude=data/"
+
+- name: Template Joplin .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/joplin/.env"
+    mode: "0600"
+
+- name: Create Joplin data directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/joplin/data"
+    state: directory
+    mode: "0755"
+
+- name: Deploy Joplin stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/joplin"
+    files:
+      - joplin.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

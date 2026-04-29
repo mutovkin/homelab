@@ -1,0 +1,42 @@
+---
+# defaults for proxmox_guests role
+proxmox_vms: []
+proxmox_lxcs: []
+
+# Template patterns for auto-resolution via `pveam available`
+# LXC definitions use `os: ubuntu-24.04` — the role resolves the latest
+# matching template and downloads it automatically.
+proxmox_templates:
+  debian-13: "debian-13-standard"
+  debian-12: "debian-12-standard"
+  ubuntu-24.04: "ubuntu-24.04-standard"
+  ubuntu-22.04: "ubuntu-22.04-standard"
+
+# Default VM settings
+proxmox_vm_defaults:
+  cores: 2
+  sockets: 1
+  memory: 2048
+  disk_size: 32
+  storage: local-zfs
+  bios: seabios
+  machine: q35
+  net_bridge: vmbr0
+  net_model: virtio
+  onboot: true
+  started: true
+
+# Default LXC settings
+proxmox_lxc_defaults:
+  cores: 2
+  memory: 2048
+  swap: 512
+  root_disk_size: 8
+  storage: local-zfs
+  ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
+  net_bridge: vmbr0
+  onboot: true
+  started: true
+  nesting: false
+  unprivileged: true
+  gpu_sharing: false

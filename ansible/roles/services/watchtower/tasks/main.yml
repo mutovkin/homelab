@@ -1,0 +1,33 @@
+---
+- name: Create Watchtower deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/watchtower"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Watchtower compose files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/watchtower/"
+    dest: "{{ data_mount }}/deploy/watchtower/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template Watchtower .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/watchtower/.env"
+    mode: "0600"
+
+- name: Deploy Watchtower stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/watchtower"
+    files:
+      - watchtower.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

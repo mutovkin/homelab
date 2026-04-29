@@ -1,0 +1,17 @@
+---
+# defaults for common role
+timezone: UTC
+apt_dist_upgrade: false
+common_packages:
+  - curl
+  - wget
+  - htop
+  - vim
+  - jq
+  - unzip
+  - gnupg
+  - ca-certificates
+  - rsync
+  - python3-yaml
+  - unattended-upgrades
+  - apt-listchanges

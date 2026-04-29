@@ -1,0 +1,39 @@
+---
+- name: Create NextCloud deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/nextcloud"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize NextCloud compose and config files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/nextcloud/"
+    dest: "{{ data_mount }}/deploy/nextcloud/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template NextCloud .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/nextcloud/.env"
+    mode: "0600"
+
+- name: Create NextCloud data directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/nextcloud/data"
+    state: directory
+    mode: "0755"
+
+- name: Deploy NextCloud stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/nextcloud"
+    files:
+      - nextcloud.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

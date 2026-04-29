@@ -1,0 +1,39 @@
+---
+# N5 Pro Docker LXC (CT 201 / n5pro-docker) — host-specific variables
+
+# Data mount point inside the LXC
+data_mount: /data
+
+# GPU sharing — ROCm userspace installed by docker_host role
+gpu_sharing:
+  enabled: true
+  rocm_usecases:
+    - rocm
+    - hip
+    - mllib
+
+# Services to deploy on this Docker host
+# Each entry corresponds to an Ansible role in roles/services/
+# Services to deploy — intentionally empty until host setup is complete
+services: []
+# services:
+#   - postgresql
+#   - immich
+#   - frigate
+#   - nextcloud
+#   - portainer
+#   - watchtower
+
+# Docker network subnets
+docker_networks:
+  postgresql: "172.30.0.0/24"
+  immich: "172.31.0.0/24"
+  frigate: "172.32.0.0/24"
+  nextcloud: "172.33.0.0/24"
+  portainer: "172.34.0.0/24"
+  watchtower: "172.35.0.0/24"
+
+# NFS mount from TrueNAS (for Frigate recordings, media storage)
+truenas_nfs_server: "192.168.30.200"  # TrueNAS IP — update once assigned
+truenas_media_share: "/mnt/pool/media"
+truenas_frigate_share: "/mnt/pool/frigate"

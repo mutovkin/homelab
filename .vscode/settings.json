@@ -1,0 +1,6 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    "task": true,
+    "ansible-lint": true
+  }
+}

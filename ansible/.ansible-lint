@@ -1,0 +1,20 @@
+---
+skip_list:
+  # Nested service roles under roles/services/ are an intentional organisational
+  # pattern — not a naming problem.
+  - role-name
+  # Variables like gpu_sharing, proxmox_vms, proxmox_lxcs are shared across
+  # multiple roles and inventory host_vars.  Prefixing them with a single role
+  # name would break that contract.
+  - var-naming[no-role-prefix]
+  # Galaxy collections (community.docker, ansible.posix, community.general,
+  # community.proxmox) are installed at runtime but may not be present in the
+  # lint environment, causing false "unsupported parameters" warnings.
+  - args[module]
+
+# Vault-encrypted files can't be parsed without the vault password.
+exclude_paths:
+  - inventory/host_vars/eq12/vault.yml
+  - inventory/host_vars/eq12_docker/vault.yml
+  - inventory/host_vars/n5pro/vault.yml
+  - inventory/host_vars/n5pro_docker/vault.yml

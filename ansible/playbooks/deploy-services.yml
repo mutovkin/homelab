@@ -1,0 +1,69 @@
+---
+# Deploy Docker Compose services to hosts based on their service assignments
+# Each host's services list is defined in inventory/host_vars/*/vars.yml
+# Run: ansible-playbook playbooks/deploy-services.yml
+# Single service: ansible-playbook playbooks/deploy-services.yml --tags postgresql
+
+- name: Deploy container services
+  hosts: docker_hosts
+  become: true
+  tasks:
+    - name: Deploy Portainer
+      ansible.builtin.import_role:
+        name: services/portainer
+      when: "'portainer' in services"
+      tags: portainer
+
+    - name: Deploy PostgreSQL
+      ansible.builtin.import_role:
+        name: services/postgresql
+      when: "'postgresql' in services"
+      tags: postgresql
+
+    - name: Deploy Observability stack
+      ansible.builtin.import_role:
+        name: services/observability
+      when: "'observability' in services"
+      tags: observability
+
+    - name: Deploy Vaultwarden
+      ansible.builtin.import_role:
+        name: services/vaultwarden
+      when: "'vaultwarden' in services"
+      tags: vaultwarden
+
+    - name: Deploy SearXNG
+      ansible.builtin.import_role:
+        name: services/searxng
+      when: "'searxng' in services"
+      tags: searxng
+
+    - name: Deploy Joplin
+      ansible.builtin.import_role:
+        name: services/joplin
+      when: "'joplin' in services"
+      tags: joplin
+
+    - name: Deploy Watchtower
+      ansible.builtin.import_role:
+        name: services/watchtower
+      when: "'watchtower' in services"
+      tags: watchtower
+
+    - name: Deploy Immich
+      ansible.builtin.import_role:
+        name: services/immich
+      when: "'immich' in services"
+      tags: immich
+
+    - name: Deploy Frigate
+      ansible.builtin.import_role:
+        name: services/frigate
+      when: "'frigate' in services"
+      tags: frigate
+
+    - name: Deploy NextCloud
+      ansible.builtin.import_role:
+        name: services/nextcloud
+      when: "'nextcloud' in services"
+      tags: nextcloud

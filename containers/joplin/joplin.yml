@@ -1,5 +1,4 @@
 # docker-compose-joplin.yml
-version: '3.8'
 
 services:
   joplin-server:

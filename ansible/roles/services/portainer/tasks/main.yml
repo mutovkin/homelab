@@ -1,0 +1,33 @@
+---
+- name: Create Portainer deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/portainer"
+    state: directory
+    mode: "0755"
+
+- name: Create Portainer data directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/portainer"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Portainer compose files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/portainer/"
+    dest: "{{ data_mount }}/deploy/portainer/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Deploy Portainer stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/portainer"
+    files:
+      - portainer.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

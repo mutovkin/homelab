@@ -1,219 +1,115 @@
-# Homelab Server Configuration
+# Homelab
 
-## Status
+Multi-machine homelab configuration managed with **Ansible** and **Docker Compose**.
 
-Work in progress to document my current setup so that I can reproduce it if needed.
+## Machines
 
-## Hardware
+| Machine                              | CPU                                 | RAM                           | Storage              | Role                                                              |
+| ------------------------------------ | ----------------------------------- | ----------------------------- | -------------------- | ----------------------------------------------------------------- |
+| [Beelink EQ12 Pro](docs/eq12.md)     | Intel N100, 4 cores                 | 16GB                          | 2TB NVMe (ZFS)       | Proxmox — Home Assistant, Docker services, Nginx Proxy Manager    |
+| [Minisforum N5 Pro](docs/n5pro.md)   | AMD Ryzen AI 9 HX PRO 370, 12c/24t  | 96GB (32GB GPU / 62GB system) | 8TB NVMe + 130TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud                     |
 
-- Beelink EQ12 Pro
-  - 16GB RAM
-  - TEAMGROUP MP34 2TB SSD
-  - 4 CPU Cores
+## Architecture
 
-## Proxmox Virtual Environment
+Two-layer automation — see [docs/architecture.md](docs/architecture.md) for full details.
 
-### Node Configuration
+| Layer                         | Tool                     | What it manages                                                 |
+| ----------------------------- | ------------------------ | --------------------------------------------------------------- |
+| Host OS + VM/LXC provisioning | Ansible                  | Proxmox packages, repos, ZFS, GPU passthrough, VM/LXC lifecycle |
+| Services                      | Ansible + Docker Compose | Docker install, `.env` templating, compose stack deployment     |
 
-- **Node**: pve
-- **CGroup Mode**: 2
+## Quick Start
 
-### Virtual Machines (QEMU/KVM)
+### Prerequisites
 
-#### VM 100 - Home Assistant
+- [Ansible](https://docs.ansible.com/ansible/latest/installation_guide/) (2.15+)
+- [Task](https://taskfile.dev/installation/) (task runner)
+- SSH access to both Proxmox hosts
 
-- **Type**: QEMU VM
-- **Memory**: 4.0GB allocated
-- **CPU**: 2 cores
-- **Disk**: 32GB allocated
-- **Tags**: proxmox-helper-scripts
+### Setup
 
-### Containers (LXC)
+```bash
+# Install Ansible Galaxy collections
+cd ansible && ansible-galaxy install -r requirements.yml
+```
 
-#### Container 101 - deb-docker
+### Deploy
 
-Docker containers runtime environment.
-Decided to go with LXC approach in order maximize flexibility of limited RAM.
-In VM I would need to allocate specific amount of memory while in LXC it is more flexible
+```bash
+# Full deployment (all steps in order)
+task deploy:full
 
-- **Type**: LXC Container
-- **OS**: Debian-based
-- **Memory**: 4.0GB allocated
-- **CPU**: 2 cores
-- **Disk**: 8.0GB allocated
+# Or step by step:
+task infra:hosts      # 1. Configure Proxmox OS + provision VMs/LXCs
+task infra:guests     # 2. Configure Docker inside VMs/LXCs
+task deploy:services  # 3. Deploy compose stacks
+```
 
-#### Container 102 - ubuntu-docker
+## Repository Structure
 
-- **Type**: LXC Container
-- **OS**: Ubuntu-based
-- **Memory**: 1.0GB allocated
-- **CPU**: 1 core
-- **Disk**: 8.0GB allocated
-
-#### Container 103 - nginxproxymanager
-
-Tried to configure NGINX Proxy Manager within a Docker container running within `deb-docker`,
-however it always failed to run, so had to resort to using proxmox-helper-scripts.
-
-- **Type**: LXC Container
-- **Memory**: 1.0GB allocated
-- **CPU**: 2 cores
-- **Disk**: 4.0GB allocated
-- **Tags**: proxmox-helper-scripts
-
-### Storage Configuration
-
-#### Local Storage (local)
-
-- **Type**: Directory storage
-- **Content Types**: ISO images, Container templates, Backups
-- **Location**: `/var/lib/vz`
-
-#### Local ZFS (rpool)
-
-- **Type**: ZFS Pool
-- **Content Types**: Container root directories, VM disk images
-- **Pool Name**: rpool
-- **Deduplication**: Disabled
-- **Compression**: Enabled (default)
-
-#### ZFS Dataset Structure
-
-**Root Filesystem (`rpool/ROOT`)**
-
-- **rpool/ROOT/pve-1**: Proxmox host OS (mounted at `/`)
-
-**VM and Container Data (`rpool/data`)**
-
-- **vm-100-disk-0**: Home Assistant VM boot disk
-- **vm-100-disk-1**: Home Assistant VM main disk
-- **subvol-101-disk-0**: Container 101 (deb-docker) root disk (6GB quota)
-- **subvol-101-disk-1**: Container 101 (deb-docker) data disk (104GB quota)
-- **subvol-102-disk-0**: Container 102 (ubuntu-docker) disk (8GB quota)
-- **subvol-103-disk-0**: Container 103 (nginxproxymanager) disk (4GB quota)
-
-### Network Configuration
-
-- **SDN**: localnetwork (Software Defined Network)
-- **Bridge**: vmbr0 (default Proxmox bridge)
-
-### Resource Allocation Summary
-
-- **Total VMs**: 1
-- **Total Containers**: 3
-- **Total Memory Allocation**: 10GB (VM + Containers)
-- **Total Disk Allocation**: VM: 32GB, Containers: 25GB
+```ascii
+homelab/
+├── docs/                  # Machine specs + architecture diagrams
+│   ├── eq12.md
+│   ├── n5pro.md
+│   └── architecture.md
+├── ansible/               # Ansible — host config, VM/LXC provisioning, service deployment
+│   ├── inventory/         # Hosts, group vars, host vars, vault
+│   ├── playbooks/         # Orchestration playbooks
+│   └── roles/             # common, proxmox_host, proxmox_guests, docker_host, services/*
+├── containers/            # Docker Compose stacks (standalone-usable)
+│   ├── postgresql/
+│   ├── observability/
+│   ├── vaultwarden/
+│   ├── searxng/
+│   ├── joplin/
+│   ├── immich/
+│   ├── frigate/
+│   ├── nextcloud/
+│   ├── portainer/
+│   └── watchtower/
+├── REFACTORING.md         # Architectural decisions and proposal
+└── TASKS.md               # Implementation tracking
+```
 
 ## Container Services
 
-Detailed configuration files and documentation for each container service can be found in the `containers/` directory:
+### EQ12 (CT 101 — deb-docker)
 
-- **[Joplin](containers/joplin/)** - Note-taking application server
-- **[Observability](containers/observability/)** - Time Series and Logs aggregation and visualization
-- **[Portainer](containers/portainer/)** - User-friendly container deployment
-- **[PostgreSQL](containers/postgresql/)** - Database server with pgAdmin web interface
-- **[SearXNG](containers/searxng/)** - Privacy-respecting search engine
-- **[Vaultwarden](containers/vaultwarden/)** - Bitwarden-compatible password manager
-- **[Watchtower](containers/watchtower/)** - Automatic container updates
+| Service                                    | Port             | Description                              |
+| ------------------------------------------ | ---------------- | ---------------------------------------- |
+| [PostgreSQL](containers/postgresql/)       | 5432, 10080      | Database server + pgAdmin                |
+| [Observability](containers/observability/) | 8428, 9428, 3000 | VictoriaMetrics + VictoriaLogs + Grafana |
+| [Vaultwarden](containers/vaultwarden/)     | 8086             | Bitwarden-compatible password manager    |
+| [SearXNG](containers/searxng/)             | 18080            | Privacy-respecting search engine         |
+| [Joplin](containers/joplin/)               | 22300            | Note-taking server                       |
+| [Portainer](containers/portainer/)         | 9000             | Container management UI                  |
+| [Watchtower](containers/watchtower/)       | —                | Automatic container updates              |
 
-## Docker Network Mapping
+### N5 Pro (CT 201 — n5pro-docker)
 
-All containers use explicitly defined bridge networks with fixed subnets to prevent IP conflicts with the host LAN (192.168.x.x) and ensure predictable routing through Nginx Proxy Manager.
+| Service                                 | Port             | Description                                          |
+| --------------------------------------- | ---------------- | ---------------------------------------------------- |
+| [PostgreSQL](containers/postgresql/)    | 5432             | Database for Immich + NextCloud                      |
+| [Immich](containers/immich/)            | 2283             | Self-hosted photo/video management (GPU-accelerated) |
+| [Frigate](containers/frigate/)          | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
+| [NextCloud](containers/nextcloud/)      | 8080             | File sync and collaboration                          |
+| [Portainer](containers/portainer/)      | 9000             | Container management UI                              |
+| [Watchtower](containers/watchtower/)    | —                | Automatic container updates                          |
 
-| Container Stack | Network Name | Subnet | Gateway | Containers |
-|----------------|--------------|---------|---------|------------|
-| **Observability** | `observability_network` | 172.20.0.0/24 | 172.20.0.1 | victoriametrics, victorialogs, vector, telegraf, grafana |
-| **PostgreSQL** | `postgres_network` | 172.21.0.0/24 | 172.21.0.1 | postgres, pgadmin |
-| **SearXNG** | `searxng_network` | 172.22.0.0/24 | 172.22.0.1 | searxng |
-| **Portainer** | `default` | 172.23.0.0/24 | 172.23.0.1 | portainer |
-| **Vaultwarden** | `vaultwarden_network` | 172.24.0.0/24 | 172.24.0.1 | vaultwarden |
-| **Watchtower** | `watchtower_network` | 172.25.0.0/24 | 172.25.0.1 | watchtower |
-| **Joplin** | `postgres_network` (external) | 172.21.0.0/24 | 172.21.0.1 | joplin-server |
+## Documentation
 
-### Network Design Notes
+- [REFACTORING.md](REFACTORING.md) — Architecture decisions, consolidation rationale
+- [TASKS.md](TASKS.md) — Implementation progress tracking
+- [docs/architecture.md](docs/architecture.md) — Network topology, orchestration flow, port map
+- [docs/eq12.md](docs/eq12.md) — EQ12 hardware, VM/LXC inventory, ZFS layout
+- [docs/n5pro.md](docs/n5pro.md) — N5 Pro hardware, GPU config, planned workloads
 
-- **Subnet Isolation**: Each network uses a unique /24 subnet (254 usable IPs per network)
-- **172.x.x.x Range**: All subnets use Docker's traditional private range to avoid LAN conflicts
-- **Bridge Driver**: All networks use the bridge driver for container isolation with host NAT
-- **Shared Networks**: Joplin connects to `postgres_network` to access the database
-- **Gateway Assignment**: First IP (.1) in each subnet is the gateway
-
-### Troubleshooting Commands
-
-```bash
-# List all Docker networks
-docker network ls
-
-# Inspect a specific network
-docker network inspect observability_network
-
-# Check container IP addresses
-docker inspect <container_name> | grep IPAddress
-
-# View all container IPs
-docker ps -q | xargs docker inspect -f '{{.Name}} - {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
-```
-
-### Useful Proxmox Commands
-
-```bash
-# List all VMs
-qm list
-
-# List all containers  
-pct list
-
-# Get detailed resource information
-pvesh get /cluster/resources --type vm --output-format json
-
-# Check storage status
-pvesm status
-
-# Get complete cluster resource overview
-pvesh get /cluster/resources --output-format=json
-```
-
-### ZFS Management Commands
-
-```bash
-# Check ZFS pool status and health
-zpool status
-
-# Show detailed pool information with device layout
-zpool list -v
-
-# Get all properties of the rpool
-zpool get all rpool
-
-# Show specific ZFS pool properties
-zpool get compression,dedup,atime rpool
-
-# List all ZFS datasets in the pool
-zfs list -r rpool
-
-# Show ZFS dataset properties
-zfs get all rpool/data
-
-# Check ZFS pool history (configuration changes)
-zpool history rpool
-
-# Upgrade pool to enable all features (CAUTION: may affect compatibility)
-# zpool upgrade rpool
-
-# Manually start a scrub (data integrity check)
-zpool scrub rpool
-
-# Check scrub status
-zpool status -v rpool
-
-# Show ZFS ARC cache statistics
-cat /proc/spl/kstat/zfs/arcstats | grep -E "^(size|hits|misses|c_max)"
-
-# Show ZFS module parameters
+```shell
 modinfo zfs | grep parm
 ```
 
-#### ZFS Pool Configuration Notes
+### ZFS Pool Configuration Notes
 
 - **Feature Set**: Pool supports upgradeable features (use `zpool upgrade rpool` to enable)
 - **Scrub Schedule**: Automated scrubbing enabled for data integrity verification

@@ -1,0 +1,9 @@
+---
+# Shared secrets — encrypted with ansible-vault
+# Create with: ansible-vault create inventory/group_vars/all/vault.yml
+#
+# Example contents (uncomment and fill in after encrypting):
+# vault_smtp_host: smtp.example.com
+# vault_smtp_username: user@example.com
+# vault_smtp_password: app-password-here
+# vault_smtp_port: "587"

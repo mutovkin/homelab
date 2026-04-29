@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # VictoriaMetrics - Time-series database for metrics
   victoriametrics:
@@ -7,35 +5,43 @@ services:
     container_name: victoriametrics
     restart: unless-stopped
     ports:
-      - "8428:8428"  # HTTP API and Web UI (vmui)
-      - "8089:8089"  # InfluxDB HTTP API (for Home Assistant)
-      - "8089:8089/udp"  # InfluxDB UDP API
+      - "8428:8428" # HTTP API and Web UI (vmui)
+      - "8089:8089" # InfluxDB HTTP API (for Home Assistant)
+      - "8089:8089/udp" # InfluxDB UDP API
     volumes:
       - /data/victoriametrics:/victoria-metrics-data
     command:
-      - "--storageDataPath=/victoria-metrics-data"              # Path to store time-series data
-      - "--httpListenAddr=:8428"                                # HTTP API and Web UI (vmui) port
-      - "--influxListenAddr=:8089"                              # Enable InfluxDB protocol for Home Assistant
-      - "--retentionPeriod=5y"                                  # Keep metrics for 5 years (Home Assistant historical data)
-      - "--dedup.minScrapeInterval=15s"                         # Deduplicate metrics within 15s window (smooths HA transients)
-      - "--maxLabelsPerTimeseries=50"                           # Maximum labels per metric (prevents cardinality explosion)
-      - "--search.maxQueryDuration=30s"                         # Query timeout (prevents long-running queries)
-      - "--search.maxConcurrentRequests=12"                     # Max parallel queries (prevents overload)
-      - "--memory.allowedPercent=40"                            # Use 40% of available RAM (leaves room for OS page cache)
-      - "--httpAuth.username=${VM_AUTH_USERNAME:-}"             # Optional: HTTP Basic Auth username (empty = disabled)
-      - "--httpAuth.password=${VM_AUTH_PASSWORD:-}"             # Optional: HTTP Basic Auth password (empty = disabled)
+      - "--storageDataPath=/victoria-metrics-data" # Path to store time-series data
+      - "--httpListenAddr=:8428" # HTTP API and Web UI (vmui) port
+      - "--influxListenAddr=:8089" # Enable InfluxDB protocol for Home Assistant
+      - "--retentionPeriod=5y" # Keep metrics for 5 years (Home Assistant historical data)
+      - "--dedup.minScrapeInterval=15s" # Deduplicate metrics within 15s window (smooths HA transients)
+      - "--maxLabelsPerTimeseries=50" # Maximum labels per metric (prevents cardinality explosion)
+      - "--search.maxQueryDuration=30s" # Query timeout (prevents long-running queries)
+      - "--search.maxConcurrentRequests=12" # Max parallel queries (prevents overload)
+      - "--memory.allowedPercent=40" # Use 40% of available RAM (leaves room for OS page cache)
+      - "--httpAuth.username=${VM_AUTH_USERNAME:-}" # Optional: HTTP Basic Auth username (empty = disabled)
+      - "--httpAuth.password=${VM_AUTH_PASSWORD:-}" # Optional: HTTP Basic Auth password (empty = disabled)
     environment:
       TZ: ${TIMEZONE:-UTC}
     deploy:
       resources:
         limits:
-          memory: ${VM_MEMORY_LIMIT:-2G}  # Prevent OOM crashes
+          memory: ${VM_MEMORY_LIMIT:-2G} # Prevent OOM crashes
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8428/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:8428/health",
+        ]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 60s
     logging:
       driver: "json-file"
       options:
@@ -52,27 +58,35 @@ services:
     container_name: victorialogs
     restart: unless-stopped
     ports:
-      - "9428:9428"  # HTTP API and Web UI (select/vmui)
+      - "9428:9428" # HTTP API and Web UI (select/vmui)
     volumes:
       - /data/victorialogs:/victoria-logs-data
     command:
-      - "--storageDataPath=/victoria-logs-data"                # Path to store log data
-      - "--httpListenAddr=:9428"                                # HTTP API and Web UI (select/vmui) port
-      - "--retentionPeriod=90d"                                 # Keep logs for 90 days (use time-based retention)
-      - "--httpAuth.username=${VL_AUTH_USERNAME:-}"             # Optional: HTTP Basic Auth username (empty = disabled)
-      - "--httpAuth.password=${VL_AUTH_PASSWORD:-}"             # Optional: HTTP Basic Auth password (empty = disabled)
+      - "--storageDataPath=/victoria-logs-data" # Path to store log data
+      - "--httpListenAddr=:9428" # HTTP API and Web UI (select/vmui) port
+      - "--retentionPeriod=90d" # Keep logs for 90 days (use time-based retention)
+      - "--httpAuth.username=${VL_AUTH_USERNAME:-}" # Optional: HTTP Basic Auth username (empty = disabled)
+      - "--httpAuth.password=${VL_AUTH_PASSWORD:-}" # Optional: HTTP Basic Auth password (empty = disabled)
     environment:
       TZ: ${TIMEZONE:-UTC}
     deploy:
       resources:
         limits:
-          memory: ${VL_MEMORY_LIMIT:-1G}  # Prevent OOM crashes
+          memory: ${VL_MEMORY_LIMIT:-1G} # Prevent OOM crashes
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9428/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:9428/health",
+        ]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 60s
     logging:
       driver: "json-file"
       options:
@@ -85,17 +99,17 @@ services:
 
   # Vector - High-performance log collection and routing
   vector:
-    image: timberio/vector:latest-distroless-static  # Smallest, most secure (20-30MB)
+    image: timberio/vector:latest-distroless-static # Smallest, most secure (20-30MB)
     container_name: vector
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
-      - "8686:8686"  # Vector GraphQL API for monitoring and debugging
+      - "8686:8686" # Vector GraphQL API for monitoring and debugging
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /data/vector/vector.yaml:/etc/vector/vector.yaml:ro     # Vector configuration file
+      - /data/vector/vector.yaml:/etc/vector/vector.yaml:ro # Vector configuration file
       - /var/log:/var/log:ro
     command: --config /etc/vector/vector.yaml
     environment:
@@ -105,7 +119,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${VECTOR_MEMORY_LIMIT:-512M}  # Prevent OOM crashes
+          memory: ${VECTOR_MEMORY_LIMIT:-512M} # Prevent OOM crashes
     networks:
       - observability
     depends_on:
@@ -122,9 +136,9 @@ services:
     image: telegraf:latest
     container_name: telegraf
     restart: unless-stopped
+    user: telegraf:${DOCKER_GID:-996}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    user: "telegraf:${DOCKER_GID:-996}"  # Run as telegraf user with docker group
     volumes:
       - /data/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -136,12 +150,12 @@ services:
       HOST_SYS: /host/sys
       HOST_ETC: /host/etc
       TZ: ${TIMEZONE:-UTC}
-      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}  # VictoriaMetrics auth (if enabled)
+      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-} # VictoriaMetrics auth (if enabled)
       VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
     deploy:
       resources:
         limits:
-          memory: ${TELEGRAF_MEMORY_LIMIT:-256M}  # Prevent OOM crashes
+          memory: ${TELEGRAF_MEMORY_LIMIT:-256M} # Prevent OOM crashes
     networks:
       - observability
     depends_on:
@@ -159,31 +173,31 @@ services:
     container_name: grafana
     restart: unless-stopped
     ports:
-      - "3000:3000"  # Grafana Web UI
+      - "3000:3000" # Grafana Web UI
     volumes:
-      - /data/grafana/data:/var/lib/grafana                              # Persistent data (dashboards, users, etc.)
-      - /data/grafana/config/grafana.ini:/etc/grafana/grafana.ini:ro     # Custom Grafana configuration
-      - /data/grafana/dashboards:/var/lib/grafana/dashboards:ro          # Dashboard JSON files (auto-loaded)
-      - /data/grafana/provisioning:/etc/grafana/provisioning:ro          # Datasource/dashboard provisioning
+      - /data/grafana/data:/var/lib/grafana # Persistent data (dashboards, users, etc.)
+      - /data/grafana/config/grafana.ini:/etc/grafana/grafana.ini:ro # Custom Grafana configuration
+      - /data/grafana/dashboards:/var/lib/grafana/dashboards:ro # Dashboard JSON files (auto-loaded)
+      - /data/grafana/provisioning:/etc/grafana/provisioning:ro # Datasource/dashboard provisioning
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}                            # Admin username from .env
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}                    # Admin password from .env
-      GF_USERS_ALLOW_SIGN_UP: false                                      # Disable self-registration
-      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource,victoriametrics-metrics-datasource  # Auto-install VictoriaMetrics plugins
-      TZ: ${TIMEZONE:-UTC}                                               # Timezone for log timestamps
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER} # Admin username from .env
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD} # Admin password from .env
+      GF_USERS_ALLOW_SIGN_UP: false # Disable self-registration
+      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource,victoriametrics-metrics-datasource # Auto-install VictoriaMetrics plugins
+      TZ: ${TIMEZONE:-UTC} # Timezone for log timestamps
       GF_LOG_LEVEL: info
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL}
       GF_SERVER_SERVE_FROM_SUB_PATH: false
       GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN}
       GF_SECURITY_COOKIE_SECURE: true
-      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}                            # VictoriaMetrics auth credentials for datasource
-      VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}                            # VictoriaMetrics auth credentials for datasource
-      VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}                            # VictoriaLogs auth credentials for datasource
-      VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}                            # VictoriaLogs auth credentials for datasource
+      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-} # VictoriaMetrics auth credentials for datasource
+      VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-} # VictoriaMetrics auth credentials for datasource
+      VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-} # VictoriaLogs auth credentials for datasource
+      VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-} # VictoriaLogs auth credentials for datasource
     deploy:
       resources:
         limits:
-          memory: ${GRAFANA_MEMORY_LIMIT:-1G}  # Prevent OOM crashes
+          memory: ${GRAFANA_MEMORY_LIMIT:-1G} # Prevent OOM crashes
     networks:
       - observability
     depends_on:
@@ -200,6 +214,12 @@ services:
         max-file: "3"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 networks:
   observability:

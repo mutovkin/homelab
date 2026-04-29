@@ -1,0 +1,65 @@
+services:
+  nextcloud:
+    container_name: nextcloud
+    image: nextcloud:stable-apache
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "8080:80"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${NEXTCLOUD_DB_DATABASE}
+      POSTGRES_USER: ${NEXTCLOUD_DB_USERNAME}
+      POSTGRES_PASSWORD: ${NEXTCLOUD_DB_PASSWORD}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_TRUSTED_DOMAINS}
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_SECURE: tls
+      SMTP_NAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      MAIL_FROM_ADDRESS: ${SMTP_FROM_ADDRESS}
+      MAIL_DOMAIN: gmail.com
+      TZ: ${TIMEZONE:-America/Los_Angeles}
+    volumes:
+      - ${NEXTCLOUD_DATA_DIR}:/var/www/html
+    depends_on:
+      nextcloud-redis:
+        condition: service_healthy
+    networks:
+      - nextcloud_network
+      - postgres_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/status.php | grep -q '\"installed\":true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  nextcloud-redis:
+    container_name: nextcloud-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - nextcloud-redis-data:/data
+    networks:
+      - nextcloud_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  nextcloud-redis-data:
+
+networks:
+  nextcloud_network:
+    name: nextcloud_network
+    ipam:
+      config:
+        - subnet: ${NEXTCLOUD_NETWORK_SUBNET:-172.33.0.0/24}
+  postgres_network:
+    external: true
+    name: postgres_network

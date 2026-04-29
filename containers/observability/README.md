@@ -57,13 +57,13 @@ After evaluating various solutions, the VictoriaMetrics ecosystem was chosen for
 
 ## Components
 
-| Service | Ports | Purpose |
-|---------|-------|---------|
-| **VictoriaMetrics** | 8428 (HTTP/UI)<br>8089 (InfluxDB)<br>2003 (Graphite)<br>4242 (OpenTSDB) | Time-series database for metrics storage |
-| **VictoriaLogs** | 9428 (HTTP/UI) | High-performance log aggregation and storage |
-| **Vector** | 8686 (GraphQL API) | High-performance log collection and routing |
-| **Telegraf** | - | Metrics collection (SNMP, Docker, system) |
-| **Grafana** | 3000 (Web UI) | Unified visualization dashboard |
+| Service              | Ports                                                             | Purpose                                         |
+| -------------------- | ----------------------------------------------------------------- | ----------------------------------------------- |
+| **VictoriaMetrics**  | 8428 (HTTP/UI)<br>8089 (InfluxDB)<br>2003 (Graphite)<br>4242 (OpenTSDB) | Time-series database for metrics storage        |
+| **VictoriaLogs**     | 9428 (HTTP/UI)                                                    | High-performance log aggregation and storage    |
+| **Vector**           | 8686 (GraphQL API)                                                | High-performance log collection and routing     |
+| **Telegraf**         | -                                                                 | Metrics collection (SNMP, Docker, system)       |
+| **Grafana**          | 3000 (Web UI)                                                     | Unified visualization dashboard                 |
 
 ## Deployment
 
@@ -708,36 +708,36 @@ docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 ### VictoriaMetrics vs InfluxDB 3.x
 
-| Feature | VictoriaMetrics | InfluxDB 3.x (Closed Source) |
-|---------|-----------------|------------------------------|
-| **License** | ✅ Apache 2.0 (Open Source) | ❌ Proprietary (Closed Source) |
-| **Disk Usage** | ✅ 1x (best compression) | ❌ 10-15x larger |
-| **Memory** | ✅ Low (~200-500MB) | ❌ High (~1-2GB+) |
-| **Query Language** | ✅ PromQL/MetricsQL | SQL (limited) |
-| **Setup Complexity** | ✅ None (instant) | ❌ Manual CLI setup required |
-| **Web UI** | ✅ Built-in (`/vmui`) | ❌ Separate container needed |
-| **Query Speed** | ✅ Sub-second | Slower |
-| **Community** | ✅ Active & growing | Declining after v3 changes |
-| **Long-term Support** | ✅ Guaranteed (open source) | ⚠️  Uncertain (proprietary) |
-| **Home Assistant** | ✅ Native InfluxDB protocol | ✅ InfluxDB v2 API |
-| **Telegraf Support** | ✅ Prometheus remote write | ✅ InfluxDB output |
-| **Resource Efficiency** | ✅ Best-in-class | Average |
+| Feature              | VictoriaMetrics                | InfluxDB 3.x (Closed Source)     |
+| -------------------- | ------------------------------ | -------------------------------- |
+| **License**          | ✅ Apache 2.0 (Open Source)    | ❌ Proprietary (Closed Source)    |
+| **Disk Usage**       | ✅ 1x (best compression)       | ❌ 10-15x larger                  |
+| **Memory**           | ✅ Low (~200-500MB)            | ❌ High (~1-2GB+)                 |
+| **Query Language**   | ✅ PromQL/MetricsQL            | SQL (limited)                    |
+| **Setup Complexity** | ✅ None (instant)              | ❌ Manual CLI setup required      |
+| **Web UI**           | ✅ Built-in (`/vmui`)          | ❌ Separate container needed      |
+| **Query Speed**      | ✅ Sub-second                  | Slower                           |
+| **Community**        | ✅ Active & growing            | Declining after v3 changes       |
+| **Long-term Support** | ✅ Guaranteed (open source)   | ⚠️  Uncertain (proprietary)       |
+| **Home Assistant**   | ✅ Native InfluxDB protocol    | ✅ InfluxDB v2 API                |
+| **Telegraf Support** | ✅ Prometheus remote write     | ✅ InfluxDB output                |
+| **Resource Efficiency** | ✅ Best-in-class            | Average                          |
 
 ### VictoriaLogs vs Loki
 
-| Feature | VictoriaLogs | Loki |
-|---------|--------------|------|
-| **License** | ✅ Apache 2.0 (Open Source) | ✅ Apache 2.0 (Open Source) |
-| **Disk Usage** | ✅ 1x (best compression) | ❌ 5x larger |
-| **Memory** | ✅ Very Low (~100-200MB) | ⚠️  Medium (~500MB+) |
-| **Ingestion Speed** | ✅ 10x faster | Slower |
-| **Query Speed** | ✅ 10x faster | Slower |
-| **Query Language** | ✅ LogsQL (intuitive) | ⚠️  LogQL (complex) |
-| **Setup Complexity** | ✅ Zero config | ❌ Complex YAML configs |
-| **Web UI** | ✅ Built-in (`/select/vmui`) | ❌ Needs Grafana |
-| **Full-text Search** | ✅ Excellent | ⚠️  Limited |
-| **Log Agent** | Vector (Rust, fast) | Promtail (Go) |
-| **Resource Efficiency** | ✅ Best-in-class | Good |
+| Feature               | VictoriaLogs                 | Loki                           |
+| --------------------- | ---------------------------- | ------------------------------ |
+| **License**           | ✅ Apache 2.0 (Open Source)  | ✅ Apache 2.0 (Open Source)     |
+| **Disk Usage**        | ✅ 1x (best compression)     | ❌ 5x larger                    |
+| **Memory**            | ✅ Very Low (~100-200MB)     | ⚠️  Medium (~500MB+)            |
+| **Ingestion Speed**   | ✅ 10x faster                | Slower                         |
+| **Query Speed**       | ✅ 10x faster                | Slower                         |
+| **Query Language**    | ✅ LogsQL (intuitive)        | ⚠️  LogQL (complex)             |
+| **Setup Complexity**  | ✅ Zero config               | ❌ Complex YAML configs         |
+| **Web UI**            | ✅ Built-in (`/select/vmui`) | ❌ Needs Grafana                |
+| **Full-text Search**  | ✅ Excellent                 | ⚠️  Limited                     |
+| **Log Agent**         | Vector (Rust, fast)          | Promtail (Go)                  |
+| **Resource Efficiency** | ✅ Best-in-class           | Good                           |
 
 **Bottom Line**: VictoriaMetrics + VictoriaLogs provide better performance, lower resource usage, and stay fully open source - perfect for homelabs!
 

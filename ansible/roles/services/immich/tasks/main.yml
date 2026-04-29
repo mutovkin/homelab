@@ -1,0 +1,41 @@
+---
+- name: Create Immich deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/immich"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Immich compose and config files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/immich/"
+    dest: "{{ data_mount }}/deploy/immich/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template Immich .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/immich/.env"
+    mode: "0600"
+
+- name: Create Immich data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/immich/upload"
+
+- name: Deploy Immich stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/immich"
+    files:
+      - immich.yml
+    state: present
+    pull: always
+  tags:
+    - deploy
