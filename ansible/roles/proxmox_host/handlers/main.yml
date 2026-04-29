@@ -3,3 +3,8 @@
   ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger
   changed_when: true
   listen: reload-udev
+
+- name: Remove Proxmox subscription nag
+  ansible.builtin.command: /usr/local/bin/remove-proxmox-nag.sh
+  changed_when: true
+  listen: remove-proxmox-nag
