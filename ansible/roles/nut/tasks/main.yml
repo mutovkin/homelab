@@ -1,0 +1,24 @@
+---
+# NUT (Network UPS Tools) role
+# Set nut_role: "server" or "client" in host_vars to enable.
+
+- name: Detect NUT monitor service name # noqa: command-instead-of-module
+  ansible.builtin.shell: |
+    set -o pipefail
+    systemctl list-unit-files 'nut-monitor.service' | grep -q 'nut-monitor' && echo nut-monitor || echo nut-client
+  register: nut_monitor_detect
+  changed_when: false
+  when: nut_role in ["server", "client"]
+
+- name: Set NUT monitor service name fact
+  ansible.builtin.set_fact:
+    nut_monitor_service_name: "{{ nut_monitor_detect.stdout }}"
+  when: nut_role in ["server", "client"]
+
+- name: Include server tasks
+  ansible.builtin.include_tasks: server.yml
+  when: nut_role == "server"
+
+- name: Include client tasks
+  ansible.builtin.include_tasks: client.yml
+  when: nut_role == "client"

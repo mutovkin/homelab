@@ -1,0 +1,8 @@
+# Managed by Ansible — upsmon configuration (server/master)
+MONITOR {{ nut_server.ups_name }}@localhost 1 {{ nut_users.master.username }} {{ vault_nut_master_password }} master
+
+SHUTDOWNCMD "{{ nut_server.shutdowncmd }}"
+POWERDOWNFLAG {{ nut_server.powerdownflag }}
+
+MINSUPPLIES 1
+SHUTDOWNEXIT yes
