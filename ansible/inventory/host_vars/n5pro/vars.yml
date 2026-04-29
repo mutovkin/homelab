@@ -96,13 +96,18 @@ proxmox_vms:
       pre_enrolled_keys: false
     hostpci:
       hostpci0: "mapping=truenas_sata,pcie=1" # JMicron SATA controller via Proxmox Resource Mapping
+      hostpci1: "mapping=truenas_nvme0,pcie=1" # WD SN850X 2TB NVMe (c6:00.0) for mirrored special vdev
+      hostpci2: "mapping=truenas_nvme1,pcie=1" # WD SN850X 2TB NVMe (c3:00.0) for mirrored special vdev
     net_bridge: vmbr1
     onboot: true
     started: true
     tags:
       - truenas
       - storage
-    description: "TrueNAS SCALE — NAS and storage management. JMicron SATA controller passed through for direct access to 5x 26TB HDDs."
+    description: >-
+      TrueNAS SCALE — NAS and storage management.
+      JMicron SATA controller passed through for direct access to 5x 26TB HDDs.
+      2x WD SN850X 2TB NVMe passed through for mirrored ZFS special vdev.
 
 proxmox_lxcs:
   - vmid: 201
