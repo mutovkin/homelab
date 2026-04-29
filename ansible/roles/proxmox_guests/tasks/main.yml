@@ -77,6 +77,44 @@
     proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
     and pci_mapping_check.rc != 0
 
+- name: Check if truenas_nvme0 PCI mapping exists
+  ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_nvme0
+  register: pci_nvme0_mapping_check
+  failed_when: false
+  changed_when: false
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+
+- name: Create truenas_nvme0 PCI mapping
+  ansible.builtin.command: >-
+    pvesh create /cluster/mapping/pci
+    -id truenas_nvme0
+    -map id=15b7:5030,iommugroup=22,node=n5pro,path=0000:c6:00.0,subsystem-id=15b7:5030
+    -description "WD SN850X 2TB NVMe for TrueNAS special vdev"
+  changed_when: true
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+    and pci_nvme0_mapping_check.rc != 0
+
+- name: Check if truenas_nvme1 PCI mapping exists
+  ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_nvme1
+  register: pci_nvme1_mapping_check
+  failed_when: false
+  changed_when: false
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+
+- name: Create truenas_nvme1 PCI mapping
+  ansible.builtin.command: >-
+    pvesh create /cluster/mapping/pci
+    -id truenas_nvme1
+    -map id=15b7:5030,iommugroup=19,node=n5pro,path=0000:c3:00.0,subsystem-id=15b7:5030
+    -description "WD SN850X 2TB NVMe for TrueNAS special vdev"
+  changed_when: true
+  when: >
+    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+    and pci_nvme1_mapping_check.rc != 0
+
 # --- VM provisioning ---
 
 - name: Provision virtual machines

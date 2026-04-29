@@ -28,11 +28,11 @@
 
 ### NVMe
 
-| Device | Model                               | Capacity | Role                       |
-| ------ | ----------------------------------- | -------- | -------------------------- |
-| nvme0  | WD Black SN850X 4TB (`WDS400T2X0E`) | 4 TB     | Proxmox boot / ZFS `rpool` |
-| nvme1  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | Available                  |
-| nvme2  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | Available                  |
+| Device | Model                               | Capacity | PCI      | IOMMU Group | Role                               |
+| ------ | ----------------------------------- | -------- | -------- | ----------- | ---------------------------------- |
+| nvme0  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c6:00.0` | 22          | TrueNAS mirrored special vdev      |
+| nvme1  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c3:00.0` | 19          | TrueNAS mirrored special vdev      |
+| nvme2  | WD Black SN850X 4TB (`WDS400T2X0E`) | 4 TB     | `c2:00.0` | 18          | Proxmox boot / ZFS `rpool`         |
 
 ### SATA HDD (via JMicron JMB58x controller)
 
@@ -91,6 +91,9 @@
 | Group | Devices                                    | Notes                                     |
 | ----- | ------------------------------------------ | ----------------------------------------- |
 | 17    | JMicron JMB58x SATA controller (`c1:00.0`) | Pass to TrueNAS for direct HDD access     |
+| 18    | WD SN850X 4TB NVMe (`c2:00.0`)             | Boot drive — do not pass through          |
+| 19    | WD SN850X 2TB NVMe (`c3:00.0`)             | TrueNAS mirrored special vdev             |
+| 22    | WD SN850X 2TB NVMe (`c6:00.0`)             | TrueNAS mirrored special vdev             |
 | 23    | AMD Radeon 890M GPU (`c7:00.0`)            | Isolated — clean passthrough              |
 | 24    | AMD HDMI/DP audio (`c7:00.1`)              | Pair with GPU for video+audio passthrough |
 | 30    | AMD Strix Halo NPU (`c8:00.1`)             | AI accelerator                            |
@@ -101,6 +104,7 @@
 
 - NAS / storage server
 - Pass through JMicron JMB58x SATA controller (IOMMU group 17) for direct access to 5× 26TB HDDs
+- Pass through 2× WD SN850X 2TB NVMe (IOMMU groups 19 and 22) for mirrored ZFS special vdev
 - Boot disk on ZFS local-zfs
 
 ### CT 201: Docker Host
