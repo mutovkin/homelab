@@ -134,6 +134,7 @@
     machine: "{{ item.machine | default(proxmox_vm_defaults.machine) }}"
     onboot: "{{ item.onboot | default(proxmox_vm_defaults.onboot) }}"
     scsihw: virtio-scsi-single
+    vga: "{{ item.vga | default(omit) }}"
     scsi: "{{ item.scsi | default({}) }}"
     net: "{{ item.net | default({'net0': 'virtio,bridge=' + (item.net_bridge | default(proxmox_vm_defaults.net_bridge))}) }}"
     hostpci: "{{ item.hostpci | default({}) }}"

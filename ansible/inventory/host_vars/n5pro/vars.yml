@@ -89,6 +89,7 @@ proxmox_vms:
       scsi0: "local-zfs:64,format=raw"
     bios: ovmf
     machine: q35
+    vga: virtio
     efidisk0:
       storage: local-zfs
       format: raw
