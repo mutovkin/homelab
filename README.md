@@ -4,19 +4,19 @@ Multi-machine homelab configuration managed with **Ansible** and **Docker Compos
 
 ## Machines
 
-| Machine | CPU | RAM | Storage | Role |
-|---|---|---|---|---|
-| [Beelink EQ12 Pro](docs/eq12.md) | Intel N100, 4 cores | 16GB | 2TB NVMe (ZFS) | Proxmox — Home Assistant, Docker services, Nginx Proxy Manager |
-| [Minisforum N5 Pro](docs/n5pro.md) | AMD Ryzen AI 9 HX PRO 370, 12c/24t | 96GB (32GB GPU / 62GB system) | 8TB NVMe + 130TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud |
+| Machine                              | CPU                                 | RAM                           | Storage              | Role                                                              |
+| ------------------------------------ | ----------------------------------- | ----------------------------- | -------------------- | ----------------------------------------------------------------- |
+| [Beelink EQ12 Pro](docs/eq12.md)     | Intel N100, 4 cores                 | 16GB                          | 2TB NVMe (ZFS)       | Proxmox — Home Assistant, Docker services, Nginx Proxy Manager    |
+| [Minisforum N5 Pro](docs/n5pro.md)   | AMD Ryzen AI 9 HX PRO 370, 12c/24t  | 96GB (32GB GPU / 62GB system) | 8TB NVMe + 130TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud                     |
 
 ## Architecture
 
 Two-layer automation — see [docs/architecture.md](docs/architecture.md) for full details.
 
-| Layer | Tool | What it manages |
-|---|---|---|
-| Host OS + VM/LXC provisioning | Ansible | Proxmox packages, repos, ZFS, GPU passthrough, VM/LXC lifecycle |
-| Services | Ansible + Docker Compose | Docker install, `.env` templating, compose stack deployment |
+| Layer                         | Tool                     | What it manages                                                 |
+| ----------------------------- | ------------------------ | --------------------------------------------------------------- |
+| Host OS + VM/LXC provisioning | Ansible                  | Proxmox packages, repos, ZFS, GPU passthrough, VM/LXC lifecycle |
+| Services                      | Ansible + Docker Compose | Docker install, `.env` templating, compose stack deployment     |
 
 ## Quick Start
 
@@ -76,26 +76,26 @@ homelab/
 
 ### EQ12 (CT 101 — deb-docker)
 
-| Service | Port | Description |
-|---|---|---|
-| [PostgreSQL](containers/postgresql/) | 5432, 10080 | Database server + pgAdmin |
+| Service                                    | Port             | Description                              |
+| ------------------------------------------ | ---------------- | ---------------------------------------- |
+| [PostgreSQL](containers/postgresql/)       | 5432, 10080      | Database server + pgAdmin                |
 | [Observability](containers/observability/) | 8428, 9428, 3000 | VictoriaMetrics + VictoriaLogs + Grafana |
-| [Vaultwarden](containers/vaultwarden/) | 8086 | Bitwarden-compatible password manager |
-| [SearXNG](containers/searxng/) | 18080 | Privacy-respecting search engine |
-| [Joplin](containers/joplin/) | 22300 | Note-taking server |
-| [Portainer](containers/portainer/) | 9000 | Container management UI |
-| [Watchtower](containers/watchtower/) | — | Automatic container updates |
+| [Vaultwarden](containers/vaultwarden/)     | 8086             | Bitwarden-compatible password manager    |
+| [SearXNG](containers/searxng/)             | 18080            | Privacy-respecting search engine         |
+| [Joplin](containers/joplin/)               | 22300            | Note-taking server                       |
+| [Portainer](containers/portainer/)         | 9000             | Container management UI                  |
+| [Watchtower](containers/watchtower/)       | —                | Automatic container updates              |
 
 ### N5 Pro (CT 201 — n5pro-docker)
 
-| Service | Port | Description |
-|---|---|---|
-| [PostgreSQL](containers/postgresql/) | 5432 | Database for Immich + NextCloud |
-| [Immich](containers/immich/) | 2283 | Self-hosted photo/video management (GPU-accelerated) |
-| [Frigate](containers/frigate/) | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated) |
-| [NextCloud](containers/nextcloud/) | 8080 | File sync and collaboration |
-| [Portainer](containers/portainer/) | 9000 | Container management UI |
-| [Watchtower](containers/watchtower/) | — | Automatic container updates |
+| Service                                 | Port             | Description                                          |
+| --------------------------------------- | ---------------- | ---------------------------------------------------- |
+| [PostgreSQL](containers/postgresql/)    | 5432             | Database for Immich + NextCloud                      |
+| [Immich](containers/immich/)            | 2283             | Self-hosted photo/video management (GPU-accelerated) |
+| [Frigate](containers/frigate/)          | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
+| [NextCloud](containers/nextcloud/)      | 8080             | File sync and collaboration                          |
+| [Portainer](containers/portainer/)      | 9000             | Container management UI                              |
+| [Watchtower](containers/watchtower/)    | —                | Automatic container updates                          |
 
 ## Documentation
 
@@ -105,11 +105,11 @@ homelab/
 - [docs/eq12.md](docs/eq12.md) — EQ12 hardware, VM/LXC inventory, ZFS layout
 - [docs/n5pro.md](docs/n5pro.md) — N5 Pro hardware, GPU config, planned workloads
 
+```shell
 modinfo zfs | grep parm
-
 ```
 
-#### ZFS Pool Configuration Notes
+### ZFS Pool Configuration Notes
 
 - **Feature Set**: Pool supports upgradeable features (use `zpool upgrade rpool` to enable)
 - **Scrub Schedule**: Automated scrubbing enabled for data integrity verification

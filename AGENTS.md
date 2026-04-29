@@ -15,10 +15,10 @@ applyTo: "**"
 
 This repo is operated from two control machines. All docs, scripts, and instructions must support both:
 
-| Machine | OS | Package Manager | Shell |
-|---|---|---|---|
-| Mac (macOS) | macOS (Homebrew) | `brew` | zsh |
-| PC (Omarchy 3.6) | Arch Linux | `pacman` / `yay` | zsh |
+| Machine          | OS               | Package Manager  | Shell |
+| ---------------- | ---------------- | ---------------- | ----- |
+| Mac (macOS)      | macOS (Homebrew) | `brew`           | zsh   |
+| PC (Omarchy 3.6) | Arch Linux       | `pacman` / `yay` | zsh   |
 
 When writing installation instructions, always provide commands for **both** platforms.
 

@@ -4,11 +4,11 @@ NVR (Network Video Recorder) with realtime AI object detection.
 
 ## Services
 
-| Service | Port | Purpose |
-|---|---|---|
-| frigate | 5000 | Web UI |
+| Service | Port | Purpose    |
+| ------- | ---- | ---------- |
+| frigate | 5000 | Web UI     |
 | frigate | 8554 | RTSP feeds |
-| frigate | 8555 | WebRTC |
+| frigate | 8555 | WebRTC     |
 
 ## Dependencies
 

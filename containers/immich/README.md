@@ -4,11 +4,11 @@ Self-hosted photo and video management.
 
 ## Services
 
-| Service | Port | Purpose |
-|---|---|---|
-| immich-server | 2283 | Main API + web UI |
-| immich-machine-learning | 3003 (internal) | Face/object recognition ML |
-| immich-redis | 6379 (internal) | Cache and job queue |
+| Service                  | Port            | Purpose                    |
+| ------------------------ | --------------- | -------------------------- |
+| immich-server            | 2283            | Main API + web UI          |
+| immich-machine-learning  | 3003 (internal) | Face/object recognition ML |
+| immich-redis             | 6379 (internal) | Cache and job queue        |
 
 ## Dependencies
 

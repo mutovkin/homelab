@@ -1,4 +1,9 @@
 ---
+- name: Stat Docker socket
+  ansible.builtin.stat:
+    path: /var/run/docker.sock
+  register: docker_socket_stat
+
 - name: Create observability deploy directory
   ansible.builtin.file:
     path: "{{ data_mount }}/deploy/observability"

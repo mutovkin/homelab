@@ -136,7 +136,7 @@ services:
     image: telegraf:latest
     container_name: telegraf
     restart: unless-stopped
-    user: telegraf:996 # Obtained via `stat -c '%g' /var/run/docker.sock` on host
+    user: telegraf:${DOCKER_GID:-996}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     volumes:

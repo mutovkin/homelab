@@ -4,9 +4,9 @@ Self-hosted file sync, share, and collaboration platform.
 
 ## Services
 
-| Service | Port | Purpose |
-|---|---|---|
-| nextcloud | 8080 | Web UI (Apache) |
+| Service         | Port            | Purpose                        |
+| --------------- | --------------- | ------------------------------ |
+| nextcloud       | 8080            | Web UI (Apache)                |
 | nextcloud-redis | 6379 (internal) | Session and file locking cache |
 
 ## Dependencies

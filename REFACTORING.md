@@ -14,10 +14,10 @@ This repository started as configuration for a single Beelink EQ12 Pro machine. 
 
 ## Machines
 
-| Machine | CPU | RAM | Storage | Role |
-|---|---|---|---|---|
-| Beelink EQ12 Pro | Intel N100, 4 cores | 16GB | 2TB NVMe (ZFS) | Proxmox — HA, Docker services, Nginx Proxy Manager |
-| Minisforum N5 Pro | AMD Ryzen AI 9 HX PRO 370, 12c/24t | 96GB (32GB GPU UMA) | 8TB NVMe + 5×26TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud |
+| Machine            | CPU                                | RAM                 | Storage               | Role                                                           |
+| ------------------ | ---------------------------------- | ------------------- | --------------------- | -------------------------------------------------------------- |
+| Beelink EQ12 Pro   | Intel N100, 4 cores                | 16GB                | 2TB NVMe (ZFS)        | Proxmox — HA, Docker services, Nginx Proxy Manager             |
+| Minisforum N5 Pro  | AMD Ryzen AI 9 HX PRO 370, 12c/24t | 96GB (32GB GPU UMA) | 8TB NVMe + 5×26TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud                  |
 
 ## Architecture: Two-Layer Automation
 
@@ -85,11 +85,11 @@ homelab/
 
 ## Secrets Strategy
 
-| Secret type | Stored in | Encrypted by |
-|---|---|---|
-| Service credentials (DB passwords, API keys) | `ansible/inventory/**/vault.yml` | ansible-vault |
-| Proxmox API tokens | `ansible/inventory/**/vault.yml` | ansible-vault |
-| `.env` files on target hosts | Templated at deploy time from vault vars | Never committed |
+| Secret type                                  | Stored in                                | Encrypted by    |
+| -------------------------------------------- | ---------------------------------------- | --------------- |
+| Service credentials (DB passwords, API keys) | `ansible/inventory/**/vault.yml`         | ansible-vault   |
+| Proxmox API tokens                           | `ansible/inventory/**/vault.yml`         | ansible-vault   |
+| `.env` files on target hosts                 | Templated at deploy time from vault vars | Never committed |
 
 ## Networking
 

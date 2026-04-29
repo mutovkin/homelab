@@ -6,8 +6,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      TZ: America/Los_Angeles
-      WATCHTOWER_SCHEDULE: 0 30 4 * * *
+      TZ: ${WATCHTOWER_TIMEZONE}
+      WATCHTOWER_SCHEDULE: ${WATCHTOWER_SCHEDULE}
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_NO_STARTUP_MESSAGE: "true"

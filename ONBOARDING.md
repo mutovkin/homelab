@@ -35,18 +35,18 @@ the Proxmox API.
 
 **Key concepts:**
 
-| Term                       | What it means |
-|----------------------------|---------------|
+| Term                       | What it means                                                                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Inventory**              | The list of machines Ansible manages (`ansible/inventory/hosts.yml`). Groups machines by role (e.g., `proxmox_hosts`, `docker_hosts`). |
-| **Playbook**               | A YAML file describing a sequence of tasks to run on a set of hosts. Like a recipe. |
-| **Role**                   | A reusable bundle of tasks, templates, and defaults. Our roles live in `ansible/roles/`. |
-| **Task**                   | A single action: install a package, copy a file, start a service, provision a VM, deploy a Docker stack. |
-| **Handler**                | A task that only runs when *notified* — e.g., restart Docker only if its config changed. |
-| **Idempotent**             | Running the same playbook twice produces the same result. If a package is already installed, Ansible skips it. |
-| **Check mode** (`--check`) | Dry-run mode. Ansible shows what it *would* change without actually changing anything. Always safe. |
-| **Diff** (`--diff`)        | Shows the exact line-by-line differences Ansible would apply. Combine with `--check` for a safe preview. |
-| **Vault**                  | Ansible's built-in encryption for secrets. Passwords never appear in plain text in Git. |
-| **Tags**                   | Labels on tasks that let you run only a subset. E.g., `--tags postgresql` runs only PostgreSQL deployment. |
+| **Playbook**               | A YAML file describing a sequence of tasks to run on a set of hosts. Like a recipe.                                                    |
+| **Role**                   | A reusable bundle of tasks, templates, and defaults. Our roles live in `ansible/roles/`.                                               |
+| **Task**                   | A single action: install a package, copy a file, start a service, provision a VM, deploy a Docker stack.                               |
+| **Handler**                | A task that only runs when *notified* — e.g., restart Docker only if its config changed.                                               |
+| **Idempotent**             | Running the same playbook twice produces the same result. If a package is already installed, Ansible skips it.                         |
+| **Check mode** (`--check`) | Dry-run mode. Ansible shows what it *would* change without actually changing anything. Always safe.                                    |
+| **Diff** (`--diff`)        | Shows the exact line-by-line differences Ansible would apply. Combine with `--check` for a safe preview.                               |
+| **Vault**                  | Ansible's built-in encryption for secrets. Passwords never appear in plain text in Git.                                                |
+| **Tags**                   | Labels on tasks that let you run only a subset. E.g., `--tags postgresql` runs only PostgreSQL deployment.                             |
 
 ### How Ansible Manages Everything
 
@@ -143,7 +143,7 @@ task ansible:ping
 This runs `ansible all -m ping`, which SSH's into each host in the inventory and runs
 a trivial "are you there?" check. Expected output:
 
-```
+```text
 eq12 | SUCCESS => {
     "ping": "pong"
 }
@@ -217,11 +217,11 @@ grants specific permissions. This is more secure because:
 
 **What the three vault variables mean:**
 
-| Variable | Example | What it is |
-|----------|---------|------------|
-| `vault_proxmox_api_user` | `root@pam` | The Proxmox user the token belongs to |
-| `vault_proxmox_api_token_id` | `ansible` | The name you give the token (you pick this) |
-| `vault_proxmox_api_token_secret` | `aabbccdd-1122-...` | The secret value Proxmox generates (shown once) |
+| Variable                          | Example              | What it is                                      |
+| --------------------------------- | -------------------- | ----------------------------------------------- |
+| `vault_proxmox_api_user`          | `root@pam`           | The Proxmox user the token belongs to           |
+| `vault_proxmox_api_token_id`      | `ansible`            | The name you give the token (you pick this)     |
+| `vault_proxmox_api_token_secret`  | `aabbccdd-1122-...`  | The secret value Proxmox generates (shown once) |
 
 **Create a token on each Proxmox host:**
 
@@ -412,7 +412,7 @@ ansible-playbook playbooks/proxmox-hosts.yml --check --diff -v
 
 **Reading the output:**
 
-```
+```text
 TASK [common : Set timezone] ********************
 ok: [eq12]          ← Already correct, no change needed
 
@@ -458,15 +458,15 @@ we need to **delete each stack from Portainer, then immediately redeploy via Ans
 
 Your stacks as Portainer sees them:
 
-| Portainer Stack | Containers |
-|----------------|------------|
-| postgres | postgres, pgadmin4 |
-| observability | grafana, victoriametrics, victorialogs, vector, telegraf |
-| vaultwarden | vaultwarden |
-| searxng | searxng |
-| joplin | joplin-server |
-| watchtower | watchtower |
-| portainer | portainer (self-managed) |
+| Portainer Stack | Containers                                                     |
+| --------------- | -------------------------------------------------------------- |
+| postgres        | postgres, pgadmin4                                             |
+| observability   | grafana, victoriametrics, victorialogs, vector, telegraf       |
+| vaultwarden     | vaultwarden                                                    |
+| searxng         | searxng                                                        |
+| joplin          | joplin-server                                                  |
+| watchtower      | watchtower                                                     |
+| portainer       | portainer (self-managed)                                       |
 
 ### 6b. Migrate one stack at a time
 
@@ -526,6 +526,7 @@ The container should show `Up` with a fresh start time. Spot-check the service i
 ### 6e. What about Portainer going forward?
 
 Portainer remains installed and useful as a **monitoring dashboard**:
+
 - View container logs in a web UI
 - Inspect container details, resource usage, networking
 - Start/stop/restart individual containers in emergencies
@@ -551,7 +552,7 @@ task deploy:services -- --check --diff --limit eq12_docker
 
 **What to look for in the output:**
 
-```
+```text
 TASK [services/postgresql : Synchronize PostgreSQL compose and config files] ***
 ok: [eq12_docker]    ← Files already match. No changes.
 
@@ -697,17 +698,17 @@ If you lose `.vault_password`, you cannot decrypt your vault files. You'll need 
 
 ## Glossary
 
-| Term                  | Definition |
-|-----------------------|------------|
-| **IaC**               | Infrastructure as Code — defining infrastructure in version-controlled files instead of clicking through GUIs |
+| Term                  | Definition                                                                                                           |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **IaC**               | Infrastructure as Code — defining infrastructure in version-controlled files instead of clicking through GUIs        |
 | **Idempotent**        | Running the same operation twice produces the same result. "Install htop" does nothing if htop is already installed. |
-| **Inventory**         | Ansible's list of hosts, organized into groups. Lives in `ansible/inventory/`. |
-| **Playbook**          | A YAML file that defines a sequence of automation tasks to run. |
-| **Role**              | A reusable, organized collection of tasks, templates, and variables with a standard directory structure. |
-| **Vault**             | Ansible's encryption system for secrets. Not to be confused with HashiCorp Vault or Vaultwarden. |
-| **Vault password**    | The single password that encrypts/decrypts all vault files. Stored in `.vault_password` (gitignored). |
-| **Check mode**        | Ansible's `--check` flag. Simulates a run without making changes. |
-| **Handler**           | An Ansible task that runs only when triggered by a change (e.g., "restart Docker" only if `daemon.json` changed). |
-| **Tag**               | A label on Ansible tasks/roles that lets you selectively run subsets (e.g., `--tags postgresql`). |
-| **Synchronize**       | An Ansible module that wraps rsync. Copies files from your Mac to the remote host efficiently. |
-| **docker_compose_v2** | An Ansible module that runs `docker compose up/down/pull`. Used by our service roles to deploy stacks. |
+| **Inventory**         | Ansible's list of hosts, organized into groups. Lives in `ansible/inventory/`.                                       |
+| **Playbook**          | A YAML file that defines a sequence of automation tasks to run.                                                      |
+| **Role**              | A reusable, organized collection of tasks, templates, and variables with a standard directory structure.             |
+| **Vault**             | Ansible's encryption system for secrets. Not to be confused with HashiCorp Vault or Vaultwarden.                     |
+| **Vault password**    | The single password that encrypts/decrypts all vault files. Stored in `.vault_password` (gitignored).                |
+| **Check mode**        | Ansible's `--check` flag. Simulates a run without making changes.                                                    |
+| **Handler**           | An Ansible task that runs only when triggered by a change (e.g., "restart Docker" only if `daemon.json` changed).    |
+| **Tag**               | A label on Ansible tasks/roles that lets you selectively run subsets (e.g., `--tags postgresql`).                    |
+| **Synchronize**       | An Ansible module that wraps rsync. Copies files from your Mac to the remote host efficiently.                       |
+| **docker_compose_v2** | An Ansible module that runs `docker compose up/down/pull`. Used by our service roles to deploy stacks.               |
