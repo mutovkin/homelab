@@ -1,0 +1,43 @@
+---
+# NUT client tasks — runs on hosts that monitor a remote NUT server (EQ12)
+
+- name: Install NUT packages
+  ansible.builtin.apt:
+    name:
+      - nut
+      - nut-client
+    state: present
+
+- name: Deploy nut.conf
+  ansible.builtin.template:
+    src: nut.conf.j2
+    dest: /etc/nut/nut.conf
+    owner: root
+    group: nut
+    mode: "0644"
+  notify: restart-nut-monitor
+
+- name: Deploy upsmon.conf (client)
+  ansible.builtin.template:
+    src: upsmon-client.conf.j2
+    dest: /etc/nut/upsmon.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  notify: restart-nut-monitor
+
+- name: Enable and start NUT monitor
+  ansible.builtin.systemd:
+    name: "{{ nut_monitor_service_name }}.service"
+    enabled: true
+    state: started
+
+- name: Verify connection to remote NUT server
+  ansible.builtin.command: "upsc {{ nut_client.monitor_ups_name }}@{{ nut_client.monitor_host }}"
+  register: nut_remote_status
+  changed_when: false
+  failed_when: "'ups.status' not in nut_remote_status.stdout"
+
+- name: Show remote UPS status
+  ansible.builtin.debug:
+    msg: "{{ nut_remote_status.stdout_lines }}"
