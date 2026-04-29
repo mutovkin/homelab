@@ -1,6 +1,7 @@
 ---
 # defaults for common role
 timezone: UTC
+apt_dist_upgrade: false
 common_packages:
   - curl
   - wget

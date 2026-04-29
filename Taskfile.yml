@@ -46,6 +46,13 @@ tasks:
     cmds:
       - ansible-playbook playbooks/site.yml {{.CLI_ARGS}}
 
+  # === System Upgrades ===
+  upgrade:full:
+    desc: Run full dist-upgrade on all guests (use -- --limit <host> to target specific hosts)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/configure-guests.yml -e apt_dist_upgrade=true {{.CLI_ARGS}}
+
   # === Ansible Utilities ===
   ansible:lint:
     desc: Lint all Ansible playbooks and roles
