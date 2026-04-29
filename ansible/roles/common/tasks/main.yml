@@ -38,11 +38,11 @@
       APT::Periodic::AutocleanInterval "7";
     mode: "0644"
 
-- name: Configure unattended-upgrades policy (security only, no auto-reboot)
+- name: Configure unattended-upgrades policy (security + stable updates, no auto-reboot)
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/50unattended-upgrades
     content: |
-      // Managed by Ansible — security-only automatic upgrades
+      // Managed by Ansible — security + stable automatic upgrades
       Unattended-Upgrade::Origins-Pattern {
           "origin=Debian,codename=${distro_codename},label=Debian-Security";
           "origin=Ubuntu,codename=${distro_codename},label=Ubuntu";
