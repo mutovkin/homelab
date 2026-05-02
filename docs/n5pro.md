@@ -226,6 +226,13 @@ For Docker containers, pass it as `-e HSA_OVERRIDE_GFX_VERSION=11.5.0`.
 
 The `proxmox_guests` role adds these to `/etc/pve/lxc/201.conf`:
 
+#### AppArmor for Docker
+Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor profile to be unconfined. Otherwise, Proxmox enforces a restrictive default profile that blocks Docker's `apparmor_parser` when it attempts to load its `docker-default` profile, preventing containers from starting.
+```text
+lxc.apparmor.profile: unconfined
+```
+
+#### GPU Passthrough
 ```text
 # DRI devices — VAAPI hardware video encoding/decoding
 lxc.cgroup2.devices.allow: c 226:* rwm

@@ -1,7 +1,7 @@
 services:
   lms:
     container_name: lms
-    image: lmscommunity/logitechmediaserver:stable
+    image: lmscommunity/lyrionmusicserver:stable
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=true"

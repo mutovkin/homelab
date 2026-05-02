@@ -2,5 +2,11 @@
   "chat.tools.terminal.autoApprove": {
     "task": true,
     "ansible-lint": true
+  },
+  "[yaml]": {
+    "editor.formatOnSave": false,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "never"
+    }
   }
 }

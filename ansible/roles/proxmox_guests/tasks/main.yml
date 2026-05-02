@@ -287,6 +287,20 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — features"
 
+# Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor
+# profile to be unconfined. Otherwise, Proxmox applies a default profile that blocks
+# Docker's `apparmor_parser` when it attempts to load the `docker-default` profile.
+- name: Disable AppArmor for privileged LXC containers (required for Docker)
+  become: true
+  ansible.builtin.lineinfile:
+    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
+    line: "lxc.apparmor.profile: unconfined"
+    regexp: "^lxc\\.apparmor\\.profile:"
+    state: present
+  loop: "{{ proxmox_lxcs }}"
+  when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — apparmor"
 
 - name: Start LXC containers
   become: false

@@ -41,6 +41,26 @@
     mode: "0644"
   notify: restart-docker
 
+# --- AppArmor workaround for Docker-in-LXC ---
+# Privileged LXC containers have lxc.apparmor.profile=unconfined, but Docker
+# still detects AppArmor in the kernel and tries to load its docker-default
+# profile — which fails because the container lacks policy admin privileges.
+# Stopping and masking AppArmor inside the container prevents this.
+- name: Stop and disable AppArmor (Docker-in-LXC workaround)
+  when: docker_lxc | default(false)
+  block:
+    - name: Stop AppArmor service
+      ansible.builtin.systemd:
+        name: apparmor
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Mask AppArmor to prevent re-activation
+      ansible.builtin.systemd:
+        name: apparmor
+        masked: true
+
 - name: Ensure Docker is started and enabled
   ansible.builtin.systemd:
     name: docker

@@ -15,18 +15,22 @@ gpu_sharing:
 # NFS client — install nfs-common for Docker NFS volume driver
 nfs_enabled: true
 
+# Docker runs inside a privileged LXC container — AppArmor profile loading
+# fails because the container lacks policy admin privileges. This flag stops
+# and masks AppArmor inside the container so Docker doesn't attempt to use it.
+docker_lxc: true
+
 # Services to deploy on this Docker host
 # Each entry corresponds to an Ansible role in roles/services/
-# Services to deploy — intentionally empty until host setup is complete
-services: []
+services:
+  - lms
+  - portainer
+  - watchtower
 # services:
 #   - postgresql
 #   - immich
 #   - frigate
 #   - nextcloud
-#   - portainer
-#   - watchtower
-#   - lms
 
 # Docker network subnets
 docker_networks:
