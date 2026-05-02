@@ -1,0 +1,43 @@
+services:
+  lms:
+    container_name: lms
+    image: lmscommunity/logitechmediaserver:stable
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "${LMS_WEB_PORT}:${LMS_WEB_PORT}"  # Web UI — must be 1:1, HTTP_PORT must match
+      - "${LMS_CLI_PORT}:9090"             # CLI/JSON-RPC
+      - "3483:3483"                        # Slimproto (Squeezebox players)
+      - "3483:3483/udp"
+    environment:
+      - HTTP_PORT=${LMS_WEB_PORT}
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIMEZONE:-America/Los_Angeles}
+      - EXTRA_ARGS=--advertiseaddr=${LMS_ADVERTISE_ADDR}
+    volumes:
+      - ${LMS_CONFIG_DIR}:/config
+      - lms_music:/music:ro          # NFS volume — read-only music library
+    networks:
+      - lms_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${LMS_WEB_PORT} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  lms_music:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${LMS_NFS_ADDR},nfsvers=4,ro,soft,timeo=100,retrans=3"
+      device: ":${LMS_NFS_PATH}"
+
+networks:
+  lms_network:
+    name: lms_network
+    ipam:
+      config:
+        - subnet: ${LMS_NETWORK_SUBNET:-172.36.0.0/24}

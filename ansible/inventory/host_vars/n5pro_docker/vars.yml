@@ -12,6 +12,9 @@ gpu_sharing:
     - hip
     - mllib
 
+# NFS client — install nfs-common for Docker NFS volume driver
+nfs_enabled: true
+
 # Services to deploy on this Docker host
 # Each entry corresponds to an Ansible role in roles/services/
 # Services to deploy — intentionally empty until host setup is complete
@@ -23,6 +26,7 @@ services: []
 #   - nextcloud
 #   - portainer
 #   - watchtower
+#   - lms
 
 # Docker network subnets
 docker_networks:
@@ -32,8 +36,18 @@ docker_networks:
   nextcloud: "172.33.0.0/24"
   portainer: "172.34.0.0/24"
   watchtower: "172.35.0.0/24"
+  lms: "172.36.0.0/24"
 
 # NFS mount from TrueNAS (for Frigate recordings, media storage)
 truenas_nfs_server: "192.168.30.200"  # TrueNAS IP — update once assigned
 truenas_media_share: "/mnt/pool/media"
 truenas_frigate_share: "/mnt/pool/frigate"
+
+# Host-only NFS (vmbr2) — dedicated path for container NFS volumes
+truenas_hostonly_ip: "10.99.99.2"  # TrueNAS IP on vmbr2 (manual config in TrueNAS)
+truenas_music_share: "/mnt/vault/media/music/lossless"
+
+# Lyrion Music Server
+lms_web_port: "9001"
+lms_cli_port: "9090"
+lms_advertise_addr: "192.168.30.15"  # Docker host LAN IP — visible to Squeezebox players

@@ -58,7 +58,7 @@ task deploy:services  # 3. Deploy compose stacks
 - **Cross-host:** Direct LAN (both machines on the same 192.168.x.x network)
 - **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20-25.x. N5 Pro: 172.30-35.x.
 - **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on EQ12
-- **NFS:** N5 Pro Docker LXC → TrueNAS VM for Frigate recordings and media storage
+- **NFS:** N5 Pro Docker LXC → TrueNAS VM for Frigate recordings, media storage, and Lyrion music library
 
 ## Hardware Passthrough
 
@@ -87,6 +87,7 @@ homelab/
 │   ├── immich/
 │   ├── frigate/
 │   ├── nextcloud/
+│   ├── lyrion/
 │   ├── portainer/
 │   └── watchtower/
 └── TASKS.md               # Implementation tracking
@@ -114,6 +115,7 @@ homelab/
 | [Immich](containers/immich/)            | 2283             | Self-hosted photo/video management (GPU-accelerated) |
 | [Frigate](containers/frigate/)          | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
 | [NextCloud](containers/nextcloud/)      | 8080             | File sync and collaboration                          |
+| [Lyrion](containers/lyrion/)            | 9001, 9090, 3483 | Music server (Squeezebox/LMS) — NFS from TrueNAS     |
 | [Portainer](containers/portainer/)      | 9000             | Container management UI                              |
 | [Watchtower](containers/watchtower/)    | —                | Automatic container updates                          |
 

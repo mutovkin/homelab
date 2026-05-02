@@ -144,3 +144,12 @@
   ansible.builtin.debug:
     msg: "{{ 'ROCm is working — agents detected' if rocm_verify.rc == 0 else 'ROCm verification failed — /dev/kfd may not be available yet (reboot host?)' }}"
   when: gpu_sharing.enabled | default(false)
+
+# --- NFS client support ---
+# Required for Docker NFS volume driver to mount remote shares.
+
+- name: Install nfs-common for NFS volume support
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+  when: nfs_enabled | default(false)

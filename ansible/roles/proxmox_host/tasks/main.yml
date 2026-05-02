@@ -87,3 +87,60 @@
       - video
     append: true
   when: gpu_sharing.enabled | default(false)
+
+# --- Host-only bridge for NFS traffic ---
+
+- name: Get host-only bridge configuration
+  ansible.builtin.command: "pvesh get /nodes/{{ proxmox_node }}/network/{{ hostonly_bridge }} --output-format json"
+  register: hostonly_bridge_json
+  failed_when: false
+  changed_when: false
+  when: hostonly_bridge is defined
+
+- name: Set fact for bridge existence and current IP
+  ansible.builtin.set_fact:
+    hostonly_bridge_exists: "{{ hostonly_bridge_json.rc == 0 }}"
+    hostonly_bridge_current_ip: "{{ (hostonly_bridge_json.stdout | default('{}') | from_json).address | default('') }}"
+  when: hostonly_bridge is defined
+
+- name: Backup /etc/network/interfaces before making changes
+  ansible.builtin.copy:
+    src: /etc/network/interfaces
+    dest: "/etc/network/interfaces.ansible_bak_{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    mode: "0644"
+  when:
+    - hostonly_bridge is defined
+    - not hostonly_bridge_exists or hostonly_bridge_current_ip != hostonly_host_ip
+
+- name: Create host-only bridge
+  ansible.builtin.command: >-
+    pvesh create /nodes/{{ proxmox_node }}/network
+    -type bridge
+    -iface {{ hostonly_bridge }}
+    -autostart 1
+  changed_when: true
+  when:
+    - hostonly_bridge is defined
+    - not hostonly_bridge_exists
+
+- name: Assign host IP on host-only bridge
+  ansible.builtin.command: >-
+    pvesh set /nodes/{{ proxmox_node }}/network/{{ hostonly_bridge }}
+    -type bridge
+    -address {{ hostonly_host_ip }}
+    -netmask {{ hostonly_host_netmask }}
+  register: hostonly_bridge_ip
+  changed_when: true
+  when:
+    - hostonly_bridge is defined
+    - hostonly_bridge_current_ip != hostonly_host_ip
+
+- name: Apply network configuration
+  ansible.builtin.command: "pvesh set /nodes/{{ proxmox_node }}/network"
+  async: 45
+  poll: 0
+  changed_when: true
+  when:
+    - hostonly_bridge is defined
+    - not hostonly_bridge_exists or (hostonly_bridge_ip.changed | default(false))
