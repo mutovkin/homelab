@@ -78,19 +78,18 @@ homelab/
 │   ├── inventory/         # Hosts, group vars, host vars, vault
 │   ├── playbooks/         # Orchestration playbooks
 │   └── roles/             # common, proxmox_host, proxmox_guests, docker_host, services/*
-├── containers/            # Docker Compose stacks (standalone-usable)
-│   ├── postgresql/
-│   ├── observability/
-│   ├── vaultwarden/
-│   ├── searxng/
-│   ├── joplin/
-│   ├── immich/
-│   ├── frigate/
-│   ├── nextcloud/
-│   ├── lyrion/
-│   ├── portainer/
-│   └── watchtower/
-└── TASKS.md               # Implementation tracking
+└── containers/            # Docker Compose stacks (standalone-usable)
+    ├── postgresql/
+    ├── observability/
+    ├── vaultwarden/
+    ├── searxng/
+    ├── joplin/
+    ├── immich/
+    ├── frigate/
+    ├── nextcloud/
+    ├── lyrion/
+    ├── portainer/
+    └── watchtower/
 ```
 
 ## Container Services

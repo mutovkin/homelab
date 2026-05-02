@@ -30,9 +30,9 @@
 
 | Device | Model                               | Capacity | PCI      | IOMMU Group | Role                               |
 | ------ | ----------------------------------- | -------- | -------- | ----------- | ---------------------------------- |
-| nvme0  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c6:00.0` | 22          | TrueNAS mirrored special vdev      |
-| nvme1  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c3:00.0` | 19          | TrueNAS mirrored special vdev      |
-| nvme2  | WD Black SN850X 4TB (`WDS400T2X0E`) | 4 TB     | `c2:00.0` | 18          | Proxmox boot / ZFS `rpool`         |
+| nvme0  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c6:00.0` | 22         | TrueNAS mirrored special vdev      |
+| nvme1  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c3:00.0` | 19         | TrueNAS mirrored special vdev      |
+| nvme2  | WD Black SN850X 4TB (`WDS400T2X0E`) | 4 TB     | `c2:00.0` | 18         | Proxmox boot / ZFS `rpool`         |
 
 ### SATA HDD (via JMicron JMB58x controller)
 
@@ -227,12 +227,15 @@ For Docker containers, pass it as `-e HSA_OVERRIDE_GFX_VERSION=11.5.0`.
 The `proxmox_guests` role adds these to `/etc/pve/lxc/201.conf`:
 
 #### AppArmor for Docker
+
 Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor profile to be unconfined. Otherwise, Proxmox enforces a restrictive default profile that blocks Docker's `apparmor_parser` when it attempts to load its `docker-default` profile, preventing containers from starting.
+
 ```text
 lxc.apparmor.profile: unconfined
 ```
 
 #### GPU Passthrough
+
 ```text
 # DRI devices — VAAPI hardware video encoding/decoding
 lxc.cgroup2.devices.allow: c 226:* rwm
@@ -266,17 +269,17 @@ Containers that need TrueNAS storage (Lyrion, Frigate, etc.) use Docker NFS volu
 │                                                             │
 │  vmbr2 — host-only bridge (no physical NIC)                 │
 │  10.99.99.1/24 — host IP                                    │
-│       │                    │                                 │
-│       ▼                    ▼                                 │
+│       │                    │                                │
+│       ▼                    ▼                                │
 │  VM 200 (TrueNAS)     CT 201 (Docker LXC)                   │
-│  10.99.99.2            10.99.99.3                            │
-│       │                    │                                 │
-│       │   NFS over vmbr2    │                                │
-│       └────────────────────►│                                │
-│                    Docker NFS volume driver                   │
-│                         │                                    │
-│                         ▼                                    │
-│                   Lyrion container (/music:ro)               │
+│  10.99.99.2            10.99.99.3                           │
+│       │                     │                               │
+│       │   NFS over vmbr2    │                               │
+│       └────────────────────►│                               │
+│                    Docker NFS volume driver                 │
+│                             │                               │
+│                             ▼                               │
+│                   Lyrion container (/music:ro)              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
