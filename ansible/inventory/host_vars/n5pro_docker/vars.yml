@@ -53,5 +53,4 @@ truenas_music_share: "/mnt/vault/media/music/lossless"
 
 # Lyrion Music Server
 lms_web_port: "9001"
-lms_cli_port: "9090"
 lms_advertise_addr: "192.168.30.15"  # Docker host LAN IP — visible to Squeezebox players
