@@ -1,0 +1,50 @@
+---
+- name: Create Lyrion deploy directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/deploy/lyrion"
+    state: directory
+    mode: "0755"
+
+- name: Synchronize Lyrion compose files
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/lyrion/"
+    dest: "{{ data_mount }}/deploy/lyrion/"
+    delete: false
+    rsync_opts:
+      - "--exclude=.env"
+      - "--exclude=.env.example"
+      - "--exclude=README.md"
+
+- name: Template Lyrion .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/lyrion/.env"
+    mode: "0600"
+
+- name: Create Lyrion data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/lyrion/config"
+
+- name: Install ffmpeg via custom-init.sh
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      apt-get update -qq
+      apt-get install --no-install-recommends -qy ffmpeg
+    dest: "{{ data_mount }}/lyrion/config/custom-init.sh"
+    mode: "0755"
+
+- name: Deploy Lyrion stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ data_mount }}/deploy/lyrion"
+    files:
+      - lyrion.yml
+    state: present
+    pull: always
+  tags:
+    - deploy

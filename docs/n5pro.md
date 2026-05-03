@@ -30,9 +30,9 @@
 
 | Device | Model                               | Capacity | PCI      | IOMMU Group | Role                               |
 | ------ | ----------------------------------- | -------- | -------- | ----------- | ---------------------------------- |
-| nvme0  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c6:00.0` | 22          | TrueNAS mirrored special vdev      |
-| nvme1  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c3:00.0` | 19          | TrueNAS mirrored special vdev      |
-| nvme2  | WD Black SN850X 4TB (`WDS400T2X0E`) | 4 TB     | `c2:00.0` | 18          | Proxmox boot / ZFS `rpool`         |
+| nvme0  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c6:00.0` | 22         | TrueNAS mirrored special vdev      |
+| nvme1  | WD Black SN850X 2TB (`WDS200T2X0E`) | 2 TB     | `c3:00.0` | 19         | TrueNAS mirrored special vdev      |
+| nvme2  | WD Black SN850X 4TB (`WDS400T2X0E`) | 4 TB     | `c2:00.0` | 18         | Proxmox boot / ZFS `rpool`         |
 
 ### SATA HDD (via JMicron JMB58x controller)
 
@@ -81,9 +81,11 @@
 | --------- | ---------------- | ------ | ------ | ------------------ | ------ |
 | nic0      | Realtek RTL8126  | 5 GbE  | vmbr0  | DHCP (from Mac)    | UP     |
 | nic1      | Aquantia AQC113  | 10 GbE | vmbr1  | 192.168.30.5/18    | UP     |
+| —         | host-only        | N/A    | vmbr2  | 10.99.99.1/24      | UP     |
 
 - **vmbr0** (nic0 / 5GbE): DHCP — connected to Mac for internet sharing, metric 100
 - **vmbr1** (nic1 / 10GbE): Static 192.168.30.5/18 — gateway 192.168.23.1, metric 200
+- **vmbr2** (host-only): No physical NIC — isolated bridge for NFS traffic between TrueNAS and Docker LXC. Paravirtualized VirtIO processes at RAM speed. Managed by Ansible (`proxmox_host` role).
 - **Cross-host**: Direct LAN to EQ12 via vmbr1
 
 ## IOMMU Groups (key groups for passthrough)
@@ -106,13 +108,18 @@
 - Pass through JMicron JMB58x SATA controller (IOMMU group 17) for direct access to 5× 26TB HDDs
 - Pass through 2× WD SN850X 2TB NVMe (IOMMU groups 19 and 22) for mirrored ZFS special vdev
 - Boot disk on ZFS local-zfs
+- net0: vmbr1 (10GbE LAN), net1: vmbr2 (host-only NFS at 10.99.99.2)
+- Boots first (`startup: order=1`)
 
 ### CT 201: Docker Host
 
-- Immich, Frigate, NextCloud, PostgreSQL
+- Immich, Frigate, NextCloud, PostgreSQL, Lyrion Music Server
 - 8 cores, 24 GB RAM, Ubuntu 24.04
 - GPU access via `/dev/dri` + `/dev/kfd` bind-mount (VAAPI + ROCm)
 - ROCm userspace installed by `docker_host` role
+- net0: vmbr1 (10GbE LAN at 192.168.30.15), net1: vmbr2 (host-only NFS at 10.99.99.3)
+- NFS feature enabled for Docker NFS volume driver
+- Boots after TrueNAS (`startup: order=2, up=60`)
 - Will share centralized monitoring with EQ12
 
 ### GPU Passthrough VM (TBD)
@@ -219,6 +226,16 @@ For Docker containers, pass it as `-e HSA_OVERRIDE_GFX_VERSION=11.5.0`.
 
 The `proxmox_guests` role adds these to `/etc/pve/lxc/201.conf`:
 
+#### AppArmor for Docker
+
+Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor profile to be unconfined. Otherwise, Proxmox enforces a restrictive default profile that blocks Docker's `apparmor_parser` when it attempts to load its `docker-default` profile, preventing containers from starting.
+
+```text
+lxc.apparmor.profile: unconfined
+```
+
+#### GPU Passthrough
+
 ```text
 # DRI devices — VAAPI hardware video encoding/decoding
 lxc.cgroup2.devices.allow: c 226:* rwm
@@ -238,11 +255,41 @@ lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
 - ROCm docs: [ROCm installation guide](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/)
 - Legacy setup scripts: <https://github.com/mutovkin/proxmox-gpu-setup-scripts> (no longer needed for host setup)
 
+## NFS Architecture
+
+Containers that need TrueNAS storage (Lyrion, Frigate, etc.) use Docker NFS volumes instead of `/etc/fstab` mounts. This is a deliberate choice to avoid a boot-order race condition:
+
+1. **Dependency inversion** — The NFS mount is bound to the container's lifecycle, not the host boot sequence. Docker handles the mount when starting the container.
+2. **Fail-safe booting** — If TrueNAS isn't ready when a container starts, the NFS mount fails and the container crashes immediately. This prevents Lyrion from booting against an empty directory and corrupting its database.
+3. **Self-healing** — `restart: unless-stopped` causes Docker to continuously retry. Once TrueNAS finishes booting and exports the NFS share, the next restart succeeds.
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  Proxmox Host (n5pro)                                       │
+│                                                             │
+│  vmbr2 — host-only bridge (no physical NIC)                 │
+│  10.99.99.1/24 — host IP                                    │
+│       │                    │                                │
+│       ▼                    ▼                                │
+│  VM 200 (TrueNAS)     CT 201 (Docker LXC)                   │
+│  10.99.99.2            10.99.99.3                           │
+│       │                     │                               │
+│       │   NFS over vmbr2    │                               │
+│       └────────────────────►│                               │
+│                    Docker NFS volume driver                 │
+│                             │                               │
+│                             ▼                               │
+│                   Lyrion container (/music:ro)              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Boot order:** TrueNAS (order=1) boots first. Docker LXC (order=2, up=60) waits 60 seconds before starting, giving TrueNAS time to initialize its network stack and export NFS shares.
+
 ## VM/LXC Definitions
 
 Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
 
-| ID  | Type | Name          | Cores | RAM   | Storage                  | Notes                                      |
-| --- | ---- | ------------- | ----- | ----- | ------------------------ | ------------------------------------------ |
-| 200 | VM   | truenas       | 4     | 16 GB | 32 GB boot               | UEFI/q35, SATA controller PCI passthrough  |
-| 201 | CT   | n5pro-docker  | 8     | 24 GB | 8 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU sharing         |
+| ID  | Type | Name          | Cores | RAM   | Storage                  | Notes                                                  |
+| --- | ---- | ------------- | ----- | ----- | ------------------------ | ------------------------------------------------------ |
+| 200 | VM   | truenas       | 4     | 16 GB | 32 GB boot               | UEFI/q35, SATA+NVMe PCI passthrough, dual NIC, boot=1  |
+| 201 | CT   | n5pro-docker  | 8     | 24 GB | 8 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU, NFS, dual NIC, boot=2      |

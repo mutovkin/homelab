@@ -67,3 +67,9 @@
         name: services/nextcloud
       when: "'nextcloud' in services"
       tags: nextcloud
+
+    - name: Deploy Lyrion Music Server
+      ansible.builtin.import_role:
+        name: services/lms
+      when: "'lms' in services"
+      tags: lms

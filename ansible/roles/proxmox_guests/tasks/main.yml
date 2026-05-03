@@ -142,11 +142,66 @@
     ide: "{{ item.ide | default(omit) }}"
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
+    startup: "{{ item.startup | default(omit) }}"
     state: present
   delegate_to: localhost
   loop: "{{ proxmox_vms }}"
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }})"
+
+# proxmox_kvm state=present only creates VMs — it does not update existing ones.
+# This task applies network interface changes to already-existing VMs.
+
+- name: Update VM network interfaces on existing VMs
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      args=""
+      {% for nic_name, nic_val in item.net.items() %}
+      # Get the current configuration (e.g. "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1")
+      current=$(qm config {{ item.vmid }} | grep "^{{ nic_name }}:" | cut -d' ' -f2- || true)
+      desired="{{ nic_val }}"
+
+      if [ -z "$current" ]; then
+        # Interface doesn't exist yet, simply add it
+        args="$args -{{ nic_name }} $desired"
+      else
+        # Extract existing auto-generated MAC address if present
+        mac=$(echo "$current" | grep -oE '[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' || true)
+
+        # If current has a MAC but our desired config doesn't specify one, we MUST preserve the MAC.
+        # If we don't, Proxmox replaces the entire NIC and the guest OS loses its network configuration.
+        if [ -n "$mac" ] && ! echo "$desired" | grep -qEi '([0-9a-f]{2}:){5}[0-9a-f]{2}'; then
+
+          # Strip MAC from current string so we can cleanly compare the remaining properties
+          current_no_mac=$(echo "$current" | sed -E "s/=$mac//i")
+
+          if [ "$current_no_mac" != "$desired" ]; then
+            # Non-MAC configuration differs. We inject the preserved MAC back into the desired string
+            # e.g. "virtio,bridge=vmbr2" -> "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr2"
+            model=$(echo "$desired" | cut -d',' -f1)
+            rest=$(echo "$desired" | cut -d',' -f2-)
+            args="$args -{{ nic_name }} ${model}=${mac},${rest}"
+          fi
+        else
+          # Direct comparison (either neither has a MAC, or desired explicitly provides one)
+          if [ "$current" != "$desired" ]; then
+            args="$args -{{ nic_name }} $desired"
+          fi
+        fi
+      fi
+      {% endfor %}
+
+      if [ -n "$args" ]; then
+        qm set {{ item.vmid }} $args
+        echo "changed"
+      fi
+  register: vm_net_update
+  changed_when: vm_net_update.stdout == "changed"
+  loop: "{{ proxmox_vms | selectattr('net', 'defined') | list }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }}) — net update"
 
 - name: Start virtual machines
   become: false
@@ -206,6 +261,7 @@
       | default(proxmox_lxc_defaults.unprivileged)) else omit }}
     tags: "{{ item.tags | default([]) }}"
     description: "{{ item.description | default('') }}"
+    startup: "{{ item.startup | default(omit) }}"
     state: present
   delegate_to: localhost
   loop: "{{ proxmox_lxcs }}"
@@ -216,8 +272,12 @@
   become: true
   ansible.builtin.shell: |
     set -o pipefail
-    if ! grep -q "^features: nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}" /etc/pve/lxc/{{ item.vmid }}.conf; then
-      pct set {{ item.vmid }} -features nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}
+    features="nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
+    {% if item.nfs_enabled | default(false) %}
+    features="$features,nfs=1"
+    {% endif %}
+    if ! grep -q "^features: $features" /etc/pve/lxc/{{ item.vmid }}.conf; then
+      pct set {{ item.vmid }} -features "$features"
       echo "changed"
     fi
   register: pct_features
@@ -227,6 +287,20 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — features"
 
+# Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor
+# profile to be unconfined. Otherwise, Proxmox applies a default profile that blocks
+# Docker's `apparmor_parser` when it attempts to load the `docker-default` profile.
+- name: Disable AppArmor for privileged LXC containers (required for Docker)
+  become: true
+  ansible.builtin.lineinfile:
+    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
+    line: "lxc.apparmor.profile: unconfined"
+    regexp: "^lxc\\.apparmor\\.profile:"
+    state: present
+  loop: "{{ proxmox_lxcs }}"
+  when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — apparmor"
 
 - name: Start LXC containers
   become: false
