@@ -23,24 +23,14 @@
     state: present
     filename: docker
 
-- name: Install Docker Engine and Compose plugin
-  ansible.builtin.apt:
-    name:
-      - docker-ce
-      - docker-ce-cli
-      - containerd.io
-      - docker-buildx-plugin
-      - docker-compose-plugin
-    state: present
-    update_cache: true
-
 # --- AppArmor workaround for Docker-in-LXC ---
 # Privileged LXC containers have lxc.apparmor.profile=unconfined, but Docker
 # still detects AppArmor in the kernel and tries to load its docker-default
 # profile — which fails because the container lacks policy admin privileges.
 # Stopping and masking AppArmor inside the container prevents this.
-# This must run BEFORE Docker daemon configuration to ensure Docker starts
-# with AppArmor already disabled.
+# This MUST run BEFORE the docker-ce package is installed: the package's
+# postinst auto-starts dockerd immediately, so AppArmor has to be masked
+# first or that first daemon start races AppArmor on a fresh host.
 - name: Stop and disable AppArmor (Docker-in-LXC workaround)
   when: docker_lxc | default(false)
   block:
@@ -55,6 +45,18 @@
       ansible.builtin.systemd:
         name: apparmor
         masked: true
+      failed_when: false
+
+- name: Install Docker Engine and Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
 
 - name: Configure Docker daemon
   ansible.builtin.template:
