@@ -23,8 +23,10 @@
   when: nut_role in ["server", "client"]
 
 - name: Set NUT monitor service name fact
+  # Fall back to nut-monitor (the Debian/PVE unit) when detection produced no
+  # output — e.g. in --check mode the detect shell is skipped and stdout is empty.
   ansible.builtin.set_fact:
-    nut_monitor_service_name: "{{ nut_monitor_detect.stdout }}"
+    nut_monitor_service_name: "{{ nut_monitor_detect.stdout | default('', true) | trim or 'nut-monitor' }}"
   when: nut_role in ["server", "client"]
 
 - name: Include server tasks

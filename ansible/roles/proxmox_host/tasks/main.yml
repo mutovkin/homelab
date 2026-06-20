@@ -104,7 +104,10 @@
     # stripping any CIDR suffix so it compares cleanly against the plain
     # hostonly_host_ip (e.g. "10.99.99.1"). Without this the comparison never
     # matches and the network is reconfigured on every run.
-    _bridge_cfg: "{{ hostonly_bridge_json.stdout | default('{}') | from_json }}"
+    # `default('{}', true)` also substitutes when stdout is an empty string —
+    # e.g. in --check mode the pvesh command is skipped and stdout is '' rather
+    # than undefined, which would otherwise make from_json fail.
+    _bridge_cfg: "{{ hostonly_bridge_json.stdout | default('{}', true) | from_json }}"
     _bridge_addr: "{{ _bridge_cfg.address | default(_bridge_cfg.cidr | default('')) }}"
   ansible.builtin.set_fact:
     hostonly_bridge_exists: "{{ hostonly_bridge_json.rc == 0 }}"
