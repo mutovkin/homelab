@@ -5,6 +5,8 @@ services:
     image: joplin/server:latest
     container_name: joplin-server
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

@@ -3,6 +3,8 @@ services:
     image: postgres:18
     container_name: postgres
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     environment:
@@ -37,6 +39,8 @@ services:
     image: dpage/pgadmin4:9
     container_name: pgadmin4
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     environment:

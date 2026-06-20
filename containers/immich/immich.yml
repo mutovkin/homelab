@@ -3,6 +3,8 @@ services:
     container_name: immich-server
     image: ghcr.io/immich-app/immich-server:release
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
@@ -34,6 +36,8 @@ services:
     container_name: immich-machine-learning
     image: ghcr.io/immich-app/immich-machine-learning:release
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     environment:
@@ -55,6 +59,8 @@ services:
     container_name: immich-redis
     image: redis:7-alpine
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     volumes:
       - immich-redis-data:/data
     networks:

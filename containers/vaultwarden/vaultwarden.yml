@@ -5,6 +5,8 @@ services:
     image: vaultwarden/server:latest
     container_name: vaultwarden
     restart: always
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:

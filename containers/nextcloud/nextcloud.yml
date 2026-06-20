@@ -3,6 +3,8 @@ services:
     container_name: nextcloud
     image: nextcloud:stable-apache
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
@@ -41,6 +43,8 @@ services:
     container_name: nextcloud-redis
     image: redis:7-alpine
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     volumes:
       - nextcloud-redis-data:/data
     networks:

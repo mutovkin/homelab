@@ -3,6 +3,8 @@ services:
     container_name: frigate
     image: ghcr.io/blakeblackshear/frigate:stable
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
