@@ -36,5 +36,3 @@
       - joplin.yml
     state: present
     pull: always
-  tags:
-    - deploy
