@@ -98,9 +98,17 @@
   when: hostonly_bridge is defined
 
 - name: Set fact for bridge existence and current IP
+  vars:
+    # pvesh may report the address under 'address' or 'cidr' (e.g. "10.99.99.1/24")
+    # depending on the PVE version. Normalize by taking whichever is present and
+    # stripping any CIDR suffix so it compares cleanly against the plain
+    # hostonly_host_ip (e.g. "10.99.99.1"). Without this the comparison never
+    # matches and the network is reconfigured on every run.
+    _bridge_cfg: "{{ hostonly_bridge_json.stdout | default('{}') | from_json }}"
+    _bridge_addr: "{{ _bridge_cfg.address | default(_bridge_cfg.cidr | default('')) }}"
   ansible.builtin.set_fact:
     hostonly_bridge_exists: "{{ hostonly_bridge_json.rc == 0 }}"
-    hostonly_bridge_current_ip: "{{ (hostonly_bridge_json.stdout | default('{}') | from_json).address | default('') }}"
+    hostonly_bridge_current_ip: "{{ _bridge_addr | regex_replace('/.*$', '') }}"
   when: hostonly_bridge is defined
 
 - name: Backup /etc/network/interfaces before making changes
@@ -136,10 +144,12 @@
     - hostonly_bridge is defined
     - hostonly_bridge_current_ip != hostonly_host_ip
 
+# Applying (reloading) the staged network config. vmbr2 has no physical NIC,
+# so reloading it cannot drop the management connection — run synchronously so
+# a failed apply surfaces instead of being lost to fire-and-forget.
 - name: Apply network configuration
   ansible.builtin.command: "pvesh set /nodes/{{ proxmox_node }}/network"
-  async: 45
-  poll: 0
+  register: hostonly_bridge_apply
   changed_when: true
   when:
     - hostonly_bridge is defined
