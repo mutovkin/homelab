@@ -8,7 +8,11 @@ nut_mode: "{% if nut_role == 'server' %}netserver{% elif nut_role == 'client' %}
 
 # Server defaults (override in host_vars when nut_role == 'server')
 nut_server:
-  listen_address: "0.0.0.0"
+  # Bind upsd to specific addresses, not 0.0.0.0. Default to loopback only;
+  # add the host's LAN IP in host_vars so remote clients can connect. Keep
+  # 127.0.0.1 so the server's own upsmon (MONITOR ...@localhost) still works.
+  listen_addresses:
+    - "127.0.0.1"
   listen_port: 3493
   ups_name: "ups"
   shutdowncmd: "/sbin/shutdown -h +0"
