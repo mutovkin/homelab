@@ -3,6 +3,13 @@
 proxmox_vms: []
 proxmox_lxcs: []
 
+# TrueNAS ISO version — single source of truth. Bump this one value to upgrade;
+# the download URL/dest and the existence-check path all derive from it so they
+# cannot drift apart. The VM's ide2 cdrom reference in n5pro host_vars uses the
+# same filename.
+truenas_iso_version: "26.0.0-BETA.2"
+truenas_iso_filename: "TrueNAS-{{ truenas_iso_version }}.iso"
+
 # Template patterns for auto-resolution via `pveam available`
 # LXC definitions use `os: ubuntu-24.04` — the role resolves the latest
 # matching template and downloads it automatically.

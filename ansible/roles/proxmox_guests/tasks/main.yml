@@ -58,15 +58,15 @@
 
 - name: Check if TrueNAS ISO exists
   ansible.builtin.stat:
-    path: "/var/lib/vz/template/iso/TrueNAS-26.0.0-BETA.2.iso"
+    path: "/var/lib/vz/template/iso/{{ truenas_iso_filename }}"
   register: truenas_iso_stat
   when: >
     proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
 
 - name: Download TrueNAS ISO if missing
   ansible.builtin.get_url:
-    url: "https://iso.sys.truenas.net/TrueNAS-26-BETA/26.0.0-BETA.2/TrueNAS-26.0.0-BETA.2.iso"
-    dest: "/var/lib/vz/template/iso/TrueNAS-26.0.0-BETA.2.iso"
+    url: "https://iso.sys.truenas.net/TrueNAS-26-BETA/{{ truenas_iso_version }}/{{ truenas_iso_filename }}"
+    dest: "/var/lib/vz/template/iso/{{ truenas_iso_filename }}"
     mode: "0644"
   when: >
     proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
