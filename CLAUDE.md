@@ -38,8 +38,10 @@ homelab/
 ├── CLAUDE.md / AGENTS.md   # this file (AGENTS.md is a symlink)
 ├── README.md               # human-facing overview, service tables
 ├── ONBOARDING.md           # bring existing infra under Ansible safely
+├── CONCEPTS.md             # shared domain vocabulary (entities, processes, status concepts)
 ├── Taskfile.yml            # task runner — see Key Commands
 ├── docs/                   # architecture.md, eq12.md, n5pro.md, ups.md
+│   └── solutions/          # documented fixes to past problems, by category, with YAML frontmatter (module, tags, problem_type)
 ├── ansible/
 │   ├── inventory/          # hosts.yml, group_vars/, host_vars/ (+ vault.yml)
 │   ├── playbooks/          # site.yml, proxmox-hosts.yml, configure-guests.yml, deploy-services.yml
