@@ -2,6 +2,18 @@
 # NUT (Network UPS Tools) role
 # Set nut_role: "server" or "client" in host_vars to enable.
 
+# Install the base packages up front so the systemd unit files exist before
+# we detect the monitor service name. On a fresh host the units do not exist
+# until nut-client is installed; detecting first would wrongly fall back to
+# 'nut-client' on distros where the unit is actually 'nut-monitor'.
+- name: Install base NUT packages
+  ansible.builtin.apt:
+    name:
+      - nut
+      - nut-client
+    state: present
+  when: nut_role in ["server", "client"]
+
 - name: Detect NUT monitor service name # noqa: command-instead-of-module
   ansible.builtin.shell: |
     set -o pipefail
