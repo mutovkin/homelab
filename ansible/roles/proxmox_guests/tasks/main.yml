@@ -56,21 +56,33 @@
 
 # --- TrueNAS ISO & PCI Mapping ---
 
-- name: Check if TrueNAS ISO exists
-  ansible.builtin.stat:
-    path: "/var/lib/vz/template/iso/{{ truenas_iso_filename }}"
-  register: truenas_iso_stat
+# Refuse to fetch the ISO unverified: a blank/short checksum would make get_url
+# silently skip verification, defeating the whole point.
+- name: Assert TrueNAS ISO checksum is configured
+  ansible.builtin.assert:
+    that:
+      - truenas_iso_sha256 is defined
+      - truenas_iso_sha256 | length == 64
+    fail_msg: >-
+      truenas_iso_sha256 is missing or not a 64-char sha256. Refusing to fetch
+      the TrueNAS ISO unverified — update it alongside truenas_iso_version in
+      proxmox_guests/defaults/main.yml.
   when: >
     proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
 
-- name: Download TrueNAS ISO if missing
+# No stat existence-gate: get_url with a checksum is already idempotent — it
+# skips the network fetch when the on-disk file matches, re-downloads when it
+# does not, and fails loudly if the result still mismatches. Gating on mere
+# existence would skip verification of an existing-but-corrupt file (the exact
+# "trusted forever" bug this guards against).
+- name: Ensure TrueNAS ISO is present and matches published checksum
   ansible.builtin.get_url:
     url: "https://iso.sys.truenas.net/TrueNAS-26-BETA/{{ truenas_iso_version }}/{{ truenas_iso_filename }}"
     dest: "/var/lib/vz/template/iso/{{ truenas_iso_filename }}"
+    checksum: "sha256:{{ truenas_iso_sha256 }}"
     mode: "0644"
   when: >
     proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
-    and not truenas_iso_stat.stat.exists | default(false)
 
 - name: Check if truenas_sata PCI mapping exists
   ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_sata

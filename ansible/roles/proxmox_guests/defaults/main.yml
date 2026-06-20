@@ -9,6 +9,10 @@ proxmox_lxcs: []
 # same filename.
 truenas_iso_version: "26.0.0-BETA.2"
 truenas_iso_filename: "TrueNAS-{{ truenas_iso_version }}.iso"
+# Published SHA256 (the .iso.sha256 sidecar at iso.sys.truenas.net). Update
+# alongside truenas_iso_version. Used to verify the download so a corrupt or
+# partial file is re-fetched / fails loudly instead of being trusted forever.
+truenas_iso_sha256: "8a6ad50e5ad56092bd017621d45c4e442d24b5d0e3eecf916e0295c81724f47b"
 
 # Template patterns for auto-resolution via `pveam available`
 # LXC definitions use `os: ubuntu-24.04` — the role resolves the latest
