@@ -1,6 +1,9 @@
-# Ignore everything under .claude/ except the shared, version-controlled settings
+# Ignore everything under .claude/ except shared, version-controlled config
 .claude/*
 !.claude/settings.json
+!.claude/skills
+.claude/skills/*
+!.claude/skills/homelab-change-loop
 
 # Ansible
 .vault_password
