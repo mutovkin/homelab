@@ -141,6 +141,8 @@
 
 - name: Provision virtual machines
   become: false
+  no_log: true  # hides vault_proxmox_api_token_secret from -v/logs. NOTE: also
+  # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
@@ -227,6 +229,8 @@
 
 - name: Start virtual machines
   become: false
+  no_log: true  # hides vault_proxmox_api_token_secret from -v/logs. NOTE: also
+  # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
@@ -253,6 +257,8 @@
 
 - name: Provision LXC containers
   become: false
+  no_log: true  # hides vault_proxmox_api_token_secret from -v/logs. NOTE: also
+  # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
@@ -326,6 +332,8 @@
 
 - name: Start LXC containers
   become: false
+  no_log: true  # hides vault_proxmox_api_token_secret from -v/logs. NOTE: also
+  # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
     api_user: "{{ vault_proxmox_api_user }}"
