@@ -51,7 +51,11 @@ npu_device_id: "1022:17f0"
 nut_role: "server"
 nut_server:
   ups_name: "goldenmate"
-  listen_address: "0.0.0.0"
+  # Loopback for the local upsmon + the LAN IP the eq12 client connects to
+  # (192.168.30.5). Not 0.0.0.0 — no need to expose upsd on every interface.
+  listen_addresses:
+    - "127.0.0.1"
+    - "192.168.30.5"
   listen_port: 3493
   shutdowncmd: "/sbin/shutdown -h +0"
   powerdownflag: "/etc/killpower"

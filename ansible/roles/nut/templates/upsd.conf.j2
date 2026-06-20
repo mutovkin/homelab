@@ -1,2 +1,5 @@
 # Managed by Ansible — upsd listen directives
-LISTEN {{ nut_server.listen_address }} {{ nut_server.listen_port }}
+{# default to loopback if a host overrides nut_server without listen_addresses #}
+{% for addr in nut_server.listen_addresses | default(['127.0.0.1']) %}
+LISTEN {{ addr }} {{ nut_server.listen_port | default(3493) }}
+{% endfor %}
