@@ -71,8 +71,8 @@ cd ansible
 ansible-lint roles/<role>/ -q          # must be clean
 ansible-playbook playbooks/site.yml --syntax-check
 ```
-Baseline is clean — keep it clean. (No `yamllint` installed; `ansible-lint`
-covers YAML.)
+Baseline is clean — keep it clean. (YAML is linted via `ansible-lint`'s bundled
+yamllint rules — no separate `yamllint` invocation.)
 
 ### 4. Dry-run against live hosts
 ```bash
