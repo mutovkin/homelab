@@ -1,4 +1,6 @@
-.claude
+# Ignore everything under .claude/ except the shared, version-controlled settings
+.claude/*
+!.claude/settings.json
 
 # Ansible
 .vault_password
