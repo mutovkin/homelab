@@ -21,6 +21,8 @@ services:
     image: lmscommunity/lyrionmusicserver:stable
     restart: unless-stopped
     network_mode: host              # Required for UDP broadcast discovery
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     environment:

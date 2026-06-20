@@ -90,7 +90,7 @@ proxmox_vms:
     cores: 4
     memory: 24576
     ide:
-      ide2: "local:iso/TrueNAS-26.0.0-BETA.1.iso,media=cdrom"
+      ide2: "local:iso/TrueNAS-26.0.0-BETA.2.iso,media=cdrom"
     scsi:
       scsi0: "local-zfs:64,format=raw"
     bios: ovmf

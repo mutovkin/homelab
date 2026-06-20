@@ -3,6 +3,8 @@ services:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

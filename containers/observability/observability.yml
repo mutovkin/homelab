@@ -4,6 +4,8 @@ services:
     image: victoriametrics/victoria-metrics:latest
     container_name: victoriametrics
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     ports:
       - "8428:8428" # HTTP API and Web UI (vmui)
       - "8089:8089" # InfluxDB HTTP API (for Home Assistant)
@@ -57,6 +59,8 @@ services:
     image: victoriametrics/victoria-logs:latest
     container_name: victorialogs
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     ports:
       - "9428:9428" # HTTP API and Web UI (select/vmui)
     volumes:
@@ -102,6 +106,8 @@ services:
     image: timberio/vector:latest-distroless-static # Smallest, most secure (20-30MB)
     container_name: vector
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:
@@ -136,6 +142,8 @@ services:
     image: telegraf:latest
     container_name: telegraf
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     user: telegraf:${DOCKER_GID:-996}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
@@ -172,6 +180,8 @@ services:
     image: grafana/grafana:latest
     container_name: grafana
     restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
     ports:
       - "3000:3000" # Grafana Web UI
     volumes:
