@@ -89,4 +89,11 @@ then succeeds and dependent stacks start.
 ## Related Issues
 
 - Issue #36 (this outage); blocks #12 (lms ffmpeg) end-to-end verification.
+- [[proxmox-boot-order-inversion-breaks-nfs-volume-mount]] — **differential
+  diagnosis.** Same symptom (lms can't mount `/music`), different durable cause.
+  If the TrueNAS NFS service is *enabled* and serving but dependents still fail to
+  mount after a *reboot* (not a crash), the culprit is Proxmox boot ordering
+  (consumer LXC starting before the TrueNAS VM), not service state. Note that
+  TrueNAS auto-start alone is insufficient — a reboot can still strand dependents
+  if the Docker LXC boots before the TrueNAS VM finishes booting.
 - [[docker-compose-shared-network-subnet-recreate]] — other Compose volume/network gotchas.

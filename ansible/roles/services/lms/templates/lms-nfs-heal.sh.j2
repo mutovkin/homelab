@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Managed by Ansible (services/lms role) — see issue #36.
+#
+# On boot the docker LXC can come up before the TrueNAS VM has finished booting
+# and started NFS. The lms stack's /music is a docker `local` NFS volume that is
+# mounted at container-create time; if NFS isn't serving yet the mount fails and
+# the stack never recovers on its own (restart policy can't remount a failed
+# volume). This oneshot waits for NFS to be reachable, then (re-)ups the stack so
+# it self-heals regardless of boot ordering or how slowly TrueNAS boots.
+set -euo pipefail
+
+NFS_ADDR="{{ truenas_hostonly_ip }}"
+NFS_PATH="{{ truenas_music_share }}"
+DEPLOY_DIR="{{ data_mount }}/deploy/lyrion"
+# Keep COMPOSE_FILE in sync with the `files:` arg of the "Deploy Lyrion stack"
+# task in roles/services/lms/tasks/main.yml — both must name the same compose
+# file or this self-heal path would bring up a different config than Ansible.
+COMPOSE_FILE="lyrion.yml"
+MAX_WAIT={{ lms_nfs_heal_max_wait | default(600) }}   # seconds before giving up
+INTERVAL=10
+
+# Readiness = nfsd registered AND the music export actually published. rpcinfo
+# alone can pass while TrueNAS is still importing ZFS, before the export exists —
+# a soft mount would then succeed against a missing export and serve an empty
+# /music. showmount confirms the real export is being served (#36).
+nfs_ready() {
+  rpcinfo -T tcp "$NFS_ADDR" nfs >/dev/null 2>&1 \
+    && showmount -e "$NFS_ADDR" 2>/dev/null | grep -q "$NFS_PATH"
+}
+
+waited=0
+until nfs_ready; do
+  if [ "$waited" -ge "$MAX_WAIT" ]; then
+    echo "lms-nfs-heal: NFS export $NFS_PATH on $NFS_ADDR not ready after ${MAX_WAIT}s; giving up." >&2
+    exit 1
+  fi
+  echo "lms-nfs-heal: waiting for NFS export $NFS_PATH on $NFS_ADDR (${waited}s/${MAX_WAIT}s)…"
+  sleep "$INTERVAL"
+  waited=$((waited + INTERVAL))
+done
+
+echo "lms-nfs-heal: NFS export ready on $NFS_ADDR; ensuring lms stack is up."
+cd "$DEPLOY_DIR"
+if ! docker compose -f "$COMPOSE_FILE" --env-file .env up -d; then
+  echo "lms-nfs-heal: 'docker compose up' FAILED after NFS became reachable — stack NOT healed." >&2
+  exit 1
+fi

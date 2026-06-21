@@ -1,0 +1,16 @@
+# Managed by Ansible (services/lms role) — see issue #36.
+[Unit]
+Description=Heal the lms (Lyrion) stack once TrueNAS NFS is reachable
+# Docker must be up so `docker compose up` works; network must be online so the
+# host-only vmbr2 path to TrueNAS exists before we start probing NFS.
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/lms-nfs-heal.sh
+
+[Install]
+WantedBy=multi-user.target
