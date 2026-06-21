@@ -123,21 +123,32 @@ public repo (do **not** read it from the host file):
 - Templating to the actual bind-mount path with recreate-on-change ensures config
   edits both arrive in the container and take effect.
 
-## Favicon resolver caveat (it took down search — #63)
+## Favicon resolver caveat — it took down search, then worked (#63, #65)
 
-Setting `search.favicon_resolver` is deceptively expensive. The result template
-calls `favicon_url()` for **every** result, which opens a SQLite favicon cache at
-`/var/cache/searxng/faviconcache.db` (the `/data/searxng/data` bind mount). That
-dir was created **root-owned** by the role, but searxng runs as **UID 977**, so
-`sqlite3` raised `unable to open database file` → the Jinja result template
-raised → **HTTP 500 on every search**. (Before a `favicons.toml` existed it
-"only" logged `missing favicon config` and 404'd; adding the toml escalated it to
-a full outage.)
+Setting `search.favicon_resolver` makes the result template call `favicon_url()`
+for **every** result, which opens a SQLite favicon cache. The cache **path must
+be writable by the searxng worker** or every search 500s
+(`unable to open database file` → the Jinja result template raises).
 
-We dropped the feature (cosmetic, not worth it). To re-enable favicons safely you
-must make the favicon cache writable by the searxng UID — `chown` the data volume
-to 977 (or point the cache at a writable path) **before** setting the resolver,
-and verify a real `/search` returns 200, not just that the container is healthy.
+The non-obvious trap: the `searxng/searxng` worker runs **as root (uid 0)**, but
+the compose stack uses `cap_drop: ALL` **without `DAC_OVERRIDE`**, so root can
+**not** bypass file permissions. The `/data/searxng/data` → `/var/cache/searxng`
+bind mount is owned `977:977` mode 755, so the root worker can't write it. A
+`favicons.toml` that pointed `db_url` there (#61) → 500 on every search (#63).
+(Without any `favicons.toml` it "only" logs `missing favicon config` and 404s.)
+
+**Working fix (#65): do NOT override `db_url`.** searxng's default favicon cache
+is `/tmp/faviconcache.db`; `/tmp` is `1777`, writable by the root worker. Ship a
+minimal `favicons.toml` (`cfg_schema = 1`, no `[favicons.cache]` override) +
+`search.favicon_resolver: duckduckgo`. Favicons then render and the proxy serves
+real icons (`/favicon_proxy?authority=…` → 200 `image/x-icon`). The cache is
+ephemeral (rebuilt after a container recreate) — fine for favicons. A persistent
+cache would require making the data-volume dir writable by the root worker
+(`chown` it to `0:0` or `chmod 0777`), which fights the image's own startup.
+
+Diagnosing worker writability: check the **worker** uid (`cat /proc/<worker>/status`),
+not `docker exec id` (which defaults to root), and test the real path with
+`docker exec searxng python3 -c "import sqlite3; sqlite3.connect('<path>')…"`.
 
 ## Prevention
 
