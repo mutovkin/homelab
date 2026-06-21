@@ -98,6 +98,13 @@ Hard-won lessons — check here before debugging from scratch.
   `apparmor_parser: Access denied`. Fixes (both applied): the `docker_host` role masks
   AppArmor *before* configuring/starting Docker, and every compose service sets
   `security_opt: ["apparmor:unconfined"]`. New services must include this.
+- **AppArmor 4.1 / PVE 9 ABI regression (host profiles).** PVE 9's AppArmor 4.1 default
+  ABI enforces fine-grained `AF_UNIX` mediation that older bundled profiles (e.g.
+  `dhclient`) predate, so unix sockets are denied (`failed protocol match`) — flooding the
+  console on DHCP hosts. Fix is an ABI pin (`abi <abi/3.0>,`) in the profile **preamble**
+  (inert inside the block / a local include) plus a `network unix dgram,` grant. Test
+  deterministically with `aa-exec -p <profile> -- python3 -c 'socket(AF_UNIX,SOCK_DGRAM)'`.
+  Full runbook: [docs/solutions/integration-issues/proxmox-dhclient-apparmor-af-unix-denial.md](docs/solutions/integration-issues/proxmox-dhclient-apparmor-af-unix-denial.md).
 - **Proxmox privileged LXC feature flags.** Setting flags like `nesting=1` on a
   *privileged* container via API token returns `403 Forbidden` — Proxmox requires a
   `root@pam` password session. Workaround: omit `features` in the `community.proxmox.proxmox`
