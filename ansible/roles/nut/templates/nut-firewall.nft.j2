@@ -1,0 +1,24 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible — restricts the NUT upsd port to approved clients.
+# Self-contained table: it ONLY governs tcp/{{ nut_server.listen_port }} and
+# cannot affect SSH, the Proxmox API, NFS, or any other traffic. Deleting and
+# recreating the table on each load keeps it idempotent.
+# NOTE: the allowlist is IPv4 (ip saddr) only — upsd here binds IPv4 addresses.
+# If upsd is ever bound to an IPv6 address, add matching `ip6 saddr` accepts
+# below, or IPv6 clients to this port will be dropped.
+add table inet nut_fw
+delete table inet nut_fw
+table inet nut_fw {
+  chain input {
+    type filter hook input priority -10; policy accept;
+    # Only filter the upsd port; everything else is untouched (policy accept).
+    tcp dport != {{ nut_server.listen_port }} accept
+    iif "lo" accept
+    ip saddr 127.0.0.1 accept
+{% for client in nut_allowed_clients %}
+    ip saddr {{ client }} accept
+{% endfor %}
+    # Any other source reaching the upsd port is dropped.
+    tcp dport {{ nut_server.listen_port }} drop
+  }
+}

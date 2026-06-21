@@ -36,6 +36,17 @@
     mode: "0644"
   notify: restart-nut-driver
 
+- name: Assert upsd binds specific addresses (no wildcards)
+  ansible.builtin.assert:
+    that:
+      - nut_server.listen_addresses | intersect(['0.0.0.0', '0.0.0.0/0', '::', '::/0', '*']) | length == 0
+    fail_msg: >-
+      nut_server.listen_addresses contains a wildcard bind ({{
+      nut_server.listen_addresses | intersect(['0.0.0.0', '0.0.0.0/0', '::', '::/0', '*']) }}).
+      Bind upsd to specific addresses (loopback + the LAN IP clients use) instead
+      of all interfaces.
+    success_msg: "upsd binds specific addresses only (no wildcard)."
+
 - name: Deploy upsd.conf
   ansible.builtin.template:
     src: upsd.conf.j2
@@ -98,3 +109,40 @@
 - name: Show UPS status
   ansible.builtin.debug:
     msg: "{{ nut_ups_status.stdout_lines }}"
+
+# --- Firewall: restrict upsd port to approved client IPs (defense in depth) ---
+# Self-contained nftables table that only governs the upsd port — cannot affect
+# SSH/Proxmox/NFS. Skipped entirely when nut_allowed_clients is empty.
+- name: Restrict upsd port to approved clients
+  when: nut_allowed_clients | length > 0
+  block:
+    - name: Ensure nftables include dir exists
+      ansible.builtin.file:
+        path: /etc/nftables.d
+        state: directory
+        mode: "0755"
+
+    - name: Deploy NUT firewall ruleset
+      ansible.builtin.template:
+        src: nut-firewall.nft.j2
+        dest: /etc/nftables.d/nut-firewall.nft
+        mode: "0644"
+        validate: "/usr/sbin/nft -c -f %s"
+      notify: reload-nut-firewall
+
+    - name: Deploy NUT firewall systemd unit
+      ansible.builtin.template:
+        src: nut-firewall.service.j2
+        dest: /etc/systemd/system/nut-firewall.service
+        mode: "0644"
+      notify: reload-nut-firewall
+
+    - name: Enable and start NUT firewall
+      ansible.builtin.systemd:
+        name: nut-firewall.service
+        enabled: true
+        state: started
+        daemon_reload: true
+      # In --check the unit file isn't actually written, so enable/start can't
+      # find it. Skip this one task in check mode; a real run writes it first.
+      when: not ansible_check_mode
