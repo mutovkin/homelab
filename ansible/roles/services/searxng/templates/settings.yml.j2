@@ -32,6 +32,10 @@ search:
   formats:
     - html
     - json
+
+ui:
+  # Open result links in a new browser tab.
+  results_on_new_tab: true
 {% if vault_searxng_brave_api_key is defined and (vault_searxng_brave_api_key | length > 0) %}
 
 engines:
