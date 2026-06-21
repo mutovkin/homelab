@@ -26,6 +26,12 @@ nut_server:
     ignorelb: false
     override_battery_charge_low: ""
 
+# Firewall: restrict the upsd port to specific client source IPs (defense in
+# depth on top of binding to specific addresses). Empty list = no firewall rule
+# managed (the role skips it). Loopback is always allowed implicitly. Set in
+# host_vars, e.g. nut_allowed_clients: ["192.168.25.5"].
+nut_allowed_clients: []
+
 # Client defaults (override in host_vars when nut_role == 'client')
 nut_client:
   monitor_ups_name: "ups"

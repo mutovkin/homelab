@@ -49,6 +49,9 @@ npu_device_id: "1022:17f0"
 # === NUT (Network UPS Tools) — server ===
 # Goldenmate 1500VA UPS connected via USB
 nut_role: "server"
+# Only the eq12 client (connects from 192.168.25.5) may reach upsd over the LAN.
+nut_allowed_clients:
+  - "192.168.25.5"
 nut_server:
   ups_name: "goldenmate"
   # Loopback for the local upsmon + the LAN IP the eq12 client connects to
