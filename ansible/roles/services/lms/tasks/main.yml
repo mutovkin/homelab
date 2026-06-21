@@ -30,12 +30,19 @@
   loop:
     - "{{ data_mount }}/lyrion/config"
 
-- name: Install ffmpeg via custom-init.sh
+# The LMS image runs /config/custom-init.sh on every container start (its
+# sanctioned extension hook). ffmpeg is needed for transcoding but isn't in the
+# base image. Guard the install so a normal restart is a fast no-op instead of an
+# apt-get update + install every boot (slow, network-dependent, and noisy).
+- name: Install ffmpeg via custom-init.sh (idempotent — skips if already present)
   ansible.builtin.copy:
     content: |
       #!/bin/bash
-      apt-get update -qq
-      apt-get install --no-install-recommends -qy ffmpeg
+      # Managed by Ansible — installs ffmpeg once; no-op on subsequent starts.
+      if ! command -v ffmpeg >/dev/null 2>&1; then
+        apt-get update -qq
+        apt-get install --no-install-recommends -qy ffmpeg
+      fi
     dest: "{{ data_mount }}/lyrion/config/custom-init.sh"
     mode: "0755"
 
