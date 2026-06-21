@@ -29,5 +29,10 @@ engines:
   - name: braveapi
     engine: braveapi
     api_key: "{{ vault_searxng_brave_api_key }}"
-    results_per_page: 50
+    # Brave Web Search API caps `count` at 20 — higher values 422. (The old
+    # config's 50 silently failed.)
+    results_per_page: 20
+    # The image ships braveapi as inactive: true; activate it (merge keeps the
+    # default's inactive flag otherwise, so it would never load).
+    inactive: false
 {% endif %}
