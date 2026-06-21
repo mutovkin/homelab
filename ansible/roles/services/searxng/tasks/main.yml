@@ -44,14 +44,13 @@
     mode: "0644"
   register: searxng_settings_tpl
 
-# Required once search.favicon_resolver is set, else favicons 404 with
-# "missing favicon config". Static file (no secrets) -> copy, not template.
-- name: Deploy SearXNG favicons.toml to the container mount path
-  ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../../containers/searxng/config/favicons.toml"
-    dest: "{{ data_mount }}/searxng/config/favicons.toml"
-    mode: "0644"
-  register: searxng_favicons
+# Remove any stale favicons.toml (the favicon feature was dropped — its cache
+# db isn't writable by the searxng UID and 500s every search). Safe if absent.
+- name: Remove obsolete SearXNG favicons.toml
+  ansible.builtin.file:
+    path: "{{ data_mount }}/searxng/config/favicons.toml"
+    state: absent
+  register: searxng_favicons_rm
 
 - name: Deploy SearXNG stack
   community.docker.docker_compose_v2:
@@ -60,6 +59,6 @@
       - searxng.yml
     state: present
     pull: always
-    # Reload the bind-mounted config when settings.yml or favicons.toml changed
-    # (compose won't restart on a mounted-file content change by itself).
-    recreate: "{{ 'always' if (searxng_settings_tpl.changed or searxng_favicons.changed) else 'auto' }}"
+    # Reload the bind-mounted config when settings.yml changed or stale favicon
+    # config was removed (compose won't restart on a mounted-file change alone).
+    recreate: "{{ 'always' if (searxng_settings_tpl.changed or searxng_favicons_rm.changed) else 'auto' }}"
