@@ -139,7 +139,7 @@ proxmox_lxcs:
     os: ubuntu-24.04
     cores: 8
     memory: 24576 # 24GB — Immich + Frigate + NextCloud + overhead
-    root_disk_size: 24
+    root_disk_size: 64 # was 24; bumped after rootfs hit 80% (logs/images). See #48
     storage: local-zfs
     unprivileged: false # required: host GID 993 (render) must pass through for /dev/kfd ROCm access
     mounts:
