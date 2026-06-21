@@ -21,3 +21,12 @@
     name: "{{ nut_monitor_service_name }}.service"
     state: restarted
   listen: restart-nut-monitor
+
+- name: Reload NUT firewall
+  ansible.builtin.systemd:
+    name: nut-firewall.service
+    state: restarted
+    daemon_reload: true
+  # In --check the unit file isn't written, so a restart can't find it.
+  when: not ansible_check_mode
+  listen: reload-nut-firewall

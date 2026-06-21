@@ -1,0 +1,13 @@
+[Unit]
+Description=NUT upsd firewall (Ansible-managed nftables table inet nut_fw)
+After=nftables.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/nut-firewall.nft
+ExecStop=/usr/sbin/nft delete table inet nut_fw
+
+[Install]
+WantedBy=multi-user.target
