@@ -9,6 +9,11 @@ proxmox_lxcs: []
 # same filename.
 truenas_iso_version: "26.0.0-BETA.2"
 truenas_iso_filename: "TrueNAS-{{ truenas_iso_version }}.iso"
+# Upstream channel directory. BETA releases live under TrueNAS-26-BETA; a stable
+# release lives under a different path, so bump this together with the version
+# when changing channels (it does not derive from the version).
+truenas_iso_channel: "TrueNAS-26-BETA"
+truenas_iso_base_url: "https://iso.sys.truenas.net/{{ truenas_iso_channel }}"
 # Published SHA256 (the .iso.sha256 sidecar at iso.sys.truenas.net). Update
 # alongside truenas_iso_version. Used to verify the download so a corrupt or
 # partial file is re-fetched / fails loudly instead of being trusted forever.
