@@ -34,7 +34,6 @@ services:
 
 # Docker network subnets
 docker_networks:
-  postgresql: "172.30.0.0/24"
   immich: "172.31.0.0/24"
   frigate: "172.32.0.0/24"
   nextcloud: "172.33.0.0/24"

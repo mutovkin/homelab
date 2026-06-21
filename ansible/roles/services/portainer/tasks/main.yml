@@ -22,6 +22,12 @@
       - "--exclude=.env.example"
       - "--exclude=README.md"
 
+- name: Template Portainer .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ data_mount }}/deploy/portainer/.env"
+    mode: "0600"
+
 - name: Deploy Portainer stack
   community.docker.docker_compose_v2:
     project_src: "{{ data_mount }}/deploy/portainer"
