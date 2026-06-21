@@ -4,3 +4,7 @@ proxmox_enterprise_repo: false
 proxmox_zfs_scrub_schedule: monthly
 gpu_sharing:
   enabled: false
+# Extra kernel cmdline parameters appended to /etc/kernel/cmdline (UEFI+ZFS via
+# proxmox-boot-tool). Per-host opt-in (e.g. n5pro sets pcie_ports=native to force
+# native PCIe AER on a passthrough host). Empty = leave the cmdline untouched.
+kernel_cmdline_extra: []
