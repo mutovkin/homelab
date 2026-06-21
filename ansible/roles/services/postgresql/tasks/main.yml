@@ -34,6 +34,19 @@
     - "{{ data_mount }}/postgresql/config"
     - "{{ data_mount }}/postgresql/config/pgadmin"
 
+# Pre-create the shared network as EXTERNAL so it persists independent of this
+# compose project — when watchtower recreates postgres/pgadmin they reattach to
+# the still-present network instead of coming up detached (#45). Idempotent: a
+# matching existing network is left as-is.
+- name: Ensure shared postgres_network exists (external)
+  community.docker.docker_network:
+    name: postgres_network
+    driver: bridge
+    ipam_config:
+      - subnet: 172.21.0.0/24
+        gateway: 172.21.0.1
+    state: present
+
 - name: Deploy PostgreSQL stack
   community.docker.docker_compose_v2:
     project_src: "{{ data_mount }}/deploy/postgresql"
