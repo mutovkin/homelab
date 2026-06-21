@@ -10,5 +10,12 @@
 *.retry
 ansible/.ansible/
 
+# Rendered service secrets — templated onto hosts at deploy time, never committed
+*.env
+.env
+# …but keep the committed example/template files
+!*.env.example
+!*.env.template
+
 # OS
 .DS_Store
