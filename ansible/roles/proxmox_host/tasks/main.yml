@@ -100,6 +100,31 @@
     profile_text: "{{ dhclient_profile_content.content | b64decode }}"
   when: dhclient_apparmor_profile.stat.exists
 
+# --- Kernel cmdline (UEFI + ZFS root via proxmox-boot-tool) ---
+# Append per-host extra params (kernel_cmdline_extra) to /etc/kernel/cmdline and
+# refresh the boot entries. Idempotent: only rewrites when a param is missing.
+# Takes effect on the next reboot. No-op where kernel_cmdline_extra is empty.
+- name: Read current kernel cmdline
+  ansible.builtin.slurp:
+    src: /etc/kernel/cmdline
+  register: proxmox_kernel_cmdline
+  when: kernel_cmdline_extra | length > 0
+  check_mode: false
+  tags:
+    - kernel_cmdline
+
+- name: Ensure extra kernel cmdline parameters are present
+  ansible.builtin.copy:
+    dest: /etc/kernel/cmdline
+    content: "{{ ((proxmox_kernel_cmdline.content | b64decode | trim).split() + kernel_cmdline_extra) | unique | join(' ') }}\n"
+    mode: "0644"
+  when:
+    - kernel_cmdline_extra | length > 0
+    - kernel_cmdline_extra | difference((proxmox_kernel_cmdline.content | b64decode).split()) | length > 0
+  notify: refresh-boot
+  tags:
+    - kernel_cmdline
+
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
