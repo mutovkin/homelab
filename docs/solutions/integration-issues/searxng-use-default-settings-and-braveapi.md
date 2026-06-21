@@ -123,7 +123,7 @@ public repo (do **not** read it from the host file):
 - Templating to the actual bind-mount path with recreate-on-change ensures config
   edits both arrive in the container and take effect.
 
-## Favicon resolver caveat — it took down search, then worked (#63, #65)
+## Favicon resolver caveat — it took down search, then worked (#63, #65, #67)
 
 Setting `search.favicon_resolver` makes the result template call `favicon_url()`
 for **every** result, which opens a SQLite favicon cache. The cache **path must
@@ -137,14 +137,21 @@ bind mount is owned `977:977` mode 755, so the root worker can't write it. A
 `favicons.toml` that pointed `db_url` there (#61) → 500 on every search (#63).
 (Without any `favicons.toml` it "only" logs `missing favicon config` and 404s.)
 
-**Working fix (#65): do NOT override `db_url`.** searxng's default favicon cache
-is `/tmp/faviconcache.db`; `/tmp` is `1777`, writable by the root worker. Ship a
-minimal `favicons.toml` (`cfg_schema = 1`, no `[favicons.cache]` override) +
-`search.favicon_resolver: duckduckgo`. Favicons then render and the proxy serves
-real icons (`/favicon_proxy?authority=…` → 200 `image/x-icon`). The cache is
-ephemeral (rebuilt after a container recreate) — fine for favicons. A persistent
-cache would require making the data-volume dir writable by the root worker
-(`chown` it to `0:0` or `chmod 0777`), which fights the image's own startup.
+**First fix (#65):** point the cache at searxng's default `/tmp/faviconcache.db`
+(`/tmp` is `1777`, writable by the root worker). Works, but `/tmp` is wiped on
+every container recreate — so the daily watchtower update re-fetches all icons.
+
+**Persistent fix (#67): a dedicated root-owned bind mount, outside the
+entrypoint-managed paths.** The entrypoint force-chowns `/etc/searxng` and
+`/var/cache/searxng` to `977` on every start, so those can't host a
+root-writable cache. Mount a *sibling* path instead —
+`/data/searxng/favicons -> /var/cache/searxng-favicons` (host dir left
+**root-owned**, never touched by the entrypoint) — and set
+`favicons.toml`'s `db_url = "/var/cache/searxng-favicons/faviconcache.db"`. The
+root worker owns it → writable; it's a host volume → survives recreates
+(verified: same db inode before/after a force-recreate). Worker stays root, so
+zero startup risk. Full config: minimal `favicons.toml` (`cfg_schema = 1` +
+`[favicons.cache] db_url`) + `search.favicon_resolver: duckduckgo`.
 
 Diagnosing worker writability: check the **worker** uid (`cat /proc/<worker>/status`),
 not `docker exec id` (which defaults to root), and test the real path with

@@ -13,6 +13,9 @@
   loop:
     - "{{ data_mount }}/searxng/config"
     - "{{ data_mount }}/searxng/data"
+    # Persistent favicon cache — left root-owned (the worker's uid) and outside
+    # the entrypoint-managed paths so it isn't chowned to 977. See favicons.toml.
+    - "{{ data_mount }}/searxng/favicons"
 
 # Sync the compose file (project_src). settings.yml is deployed separately to the
 # container mount path below (config/ here would be unused), so exclude it.

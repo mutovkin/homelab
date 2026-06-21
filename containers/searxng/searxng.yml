@@ -12,6 +12,10 @@ services:
     volumes:
       - /data/searxng/config:/etc/searxng
       - /data/searxng/data:/var/cache/searxng
+      # Persistent favicon cache. Kept OUTSIDE /var/cache/searxng because the
+      # entrypoint force-chowns that to 977, but the worker runs as root — so a
+      # root-owned dir here stays writable by the worker and survives recreates.
+      - /data/searxng/favicons:/var/cache/searxng-favicons
     environment:
       - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-localhost}/
       - SEARXNG_SECRET=${SEARXNG_SECRET:-}
