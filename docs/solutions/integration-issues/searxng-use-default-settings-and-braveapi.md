@@ -123,10 +123,29 @@ public repo (do **not** read it from the host file):
 - Templating to the actual bind-mount path with recreate-on-change ensures config
   edits both arrive in the container and take effect.
 
+## Favicon resolver caveat (it took down search — #63)
+
+Setting `search.favicon_resolver` is deceptively expensive. The result template
+calls `favicon_url()` for **every** result, which opens a SQLite favicon cache at
+`/var/cache/searxng/faviconcache.db` (the `/data/searxng/data` bind mount). That
+dir was created **root-owned** by the role, but searxng runs as **UID 977**, so
+`sqlite3` raised `unable to open database file` → the Jinja result template
+raised → **HTTP 500 on every search**. (Before a `favicons.toml` existed it
+"only" logged `missing favicon config` and 404'd; adding the toml escalated it to
+a full outage.)
+
+We dropped the feature (cosmetic, not worth it). To re-enable favicons safely you
+must make the favicon cache writable by the searxng UID — `chown` the data volume
+to 977 (or point the cache at a writable path) **before** setting the resolver,
+and verify a real `/search` returns 200, not just that the container is healthy.
+
 ## Prevention
 
 - Never pin the full SearXNG `settings.yml`; use `use_default_settings` plus a
   small override block.
+- A healthy container ≠ working search. After any config change, hit
+  `/search?q=X` and assert **HTTP 200** — a template/render error (e.g. favicons)
+  only surfaces on an actual query, not in the healthcheck.
 - Keep service config templated to the **actual bind-mount path**, with
   recreate-on-change wired to the template's `.changed`.
 - Keep secrets in ansible-vault, gated by `is defined and | length > 0`; never
