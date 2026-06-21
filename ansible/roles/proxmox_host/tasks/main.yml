@@ -33,6 +33,73 @@
     mode: "0644"
   when: not proxmox_enterprise_repo
 
+# --- AppArmor: stop the dhclient AF_UNIX denial flood (PVE 9 / apparmor 4.1) ---
+# dhclient's syslog/NSS unix dgram socket is denied ("failed protocol match"),
+# flooding the console on any host whose interface uses DHCP (n5pro vmbr0).
+# Inert on static-IP hosts (eq12), which run no dhclient. Fix detail below.
+- name: Check for the shipped dhclient AppArmor profile
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/usr.sbin.dhclient
+  register: dhclient_apparmor_profile
+  check_mode: false
+
+# Two-part fix (PVE 9 ships AppArmor 4.1, upstream apparmor#561):
+#   1. The 4.1 default ABI enforces fine-grained AF_UNIX mediation that the
+#      dhclient profile predates, so af_unix sockets are denied regardless of
+#      any rule. Pin the profile to the 3.0 ABI (coarse network-class AF_UNIX
+#      mediation) via an `abi` declaration in the profile PREAMBLE — it has no
+#      effect inside the profile block / a local include, only at file top, so
+#      we insert at BOF (independent of any anchor line) and assert placement.
+#   2. Under the 3.0 ABI, grant the unix dgram socket via a `network unix`
+#      rule (the profile's existing idiom) in the local override.
+# Both are gated on the base profile existing; a host without it skips cleanly.
+# NOTE: task 1 edits a dpkg-owned file — an apparmor-profiles upgrade can revert
+# it (the local override survives); re-running this role restores the pin.
+# Runbook: docs/solutions/integration-issues/proxmox-dhclient-apparmor-af-unix-denial.md
+- name: Pin dhclient AppArmor profile to the 3.0 ABI (preamble)
+  ansible.builtin.lineinfile:
+    path: /etc/apparmor.d/usr.sbin.dhclient
+    insertbefore: BOF
+    line: "abi <abi/3.0>,"
+  when: dhclient_apparmor_profile.stat.exists
+  notify: reload-apparmor-dhclient
+
+- name: Allow dhclient unix dgram socket (AppArmor local override)
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible (proxmox_host role).
+      # Grant the unix dgram socket dhclient uses for syslog/NSS. Effective only
+      # with the `abi <abi/3.0>,` preamble pin (see the lineinfile task above);
+      # without it AppArmor 4.1 denies af_unix regardless. apparmor#561. Runbook:
+      # docs/solutions/integration-issues/proxmox-dhclient-apparmor-af-unix-denial.md
+      network unix dgram,
+    dest: /etc/apparmor.d/local/usr.sbin.dhclient
+    mode: "0644"
+  when: dhclient_apparmor_profile.stat.exists
+  notify: reload-apparmor-dhclient
+
+# Guard against a silently-ineffective fix: the abi pin only works in the
+# preamble, so confirm it landed before the profile block.
+- name: Read back the dhclient profile to verify the abi pin placement
+  ansible.builtin.slurp:
+    src: /etc/apparmor.d/usr.sbin.dhclient
+  register: dhclient_profile_content
+  when: dhclient_apparmor_profile.stat.exists
+  check_mode: false
+
+- name: Assert the abi pin precedes the profile block (else the fix is inert)
+  ansible.builtin.assert:
+    that:
+      - "profile_text.find('abi <abi/3.0>,') != -1"
+      - "profile_text.find('abi <abi/3.0>,') < profile_text.find('/{,usr/}sbin/dhclient ')"
+    fail_msg: >-
+      'abi <abi/3.0>,' is missing or not in the preamble of
+      /etc/apparmor.d/usr.sbin.dhclient — the AppArmor af_unix fix would be inert.
+    success_msg: "abi pin correctly placed in the dhclient profile preamble."
+  vars:
+    profile_text: "{{ dhclient_profile_content.content | b64decode }}"
+  when: dhclient_apparmor_profile.stat.exists
+
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true

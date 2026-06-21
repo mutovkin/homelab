@@ -8,3 +8,8 @@
   ansible.builtin.command: /usr/local/bin/remove-proxmox-nag.sh
   changed_when: true
   listen: remove-proxmox-nag
+
+- name: Reload AppArmor dhclient profile
+  ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.dhclient
+  changed_when: true
+  listen: reload-apparmor-dhclient
