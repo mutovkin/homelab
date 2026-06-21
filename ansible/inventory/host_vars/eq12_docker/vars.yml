@@ -18,7 +18,6 @@ services:
 # Docker network subnets (must match compose files)
 docker_networks:
   observability: "172.20.0.0/24"
-  postgresql: "172.21.0.0/24"
   searxng: "172.22.0.0/24"
   portainer: "172.23.0.0/24"
   vaultwarden: "172.24.0.0/24"
