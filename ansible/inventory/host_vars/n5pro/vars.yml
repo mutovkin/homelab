@@ -78,6 +78,13 @@ sata_controller_pci: "c1:00.0" # JMicron JMB58x, IOMMU group 17 — 5× 26TB HDD
 zfs_pool: rpool # 4TB NVMe boot disk
 data_mount: /data
 
+# Force native PCIe port services so AER (PCIe Advanced Error Reporting) is
+# logged — firmware does not grant it via ACPI _OSC, leaving us blind to the
+# fault class most likely behind the 2026-06-04 hard freeze (#43, #49). This is
+# a passthrough host (SATA + NVMe to TrueNAS), where AER visibility matters most.
+kernel_cmdline_extra:
+  - pcie_ports=native
+
 # Network
 proxmox_bridge: vmbr1 # 10GbE (Aquantia AQC113) — primary management
 proxmox_bridge_secondary: vmbr0 # 5GbE (Realtek RTL8126) — DHCP internet
