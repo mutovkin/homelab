@@ -41,3 +41,7 @@ search:
   formats:
     - html
     - json
+
+ui:
+  # Open result links in a new browser tab.
+  results_on_new_tab: true
