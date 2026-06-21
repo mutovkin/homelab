@@ -5,7 +5,18 @@
     state: directory
     mode: "0755"
 
-- name: Synchronize SearXNG compose and config files
+- name: Ensure SearXNG config and cache directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/searxng/config"
+    - "{{ data_mount }}/searxng/data"
+
+# Sync the compose file (project_src). settings.yml is deployed separately to the
+# container mount path below (config/ here would be unused), so exclude it.
+- name: Synchronize SearXNG compose file
   become: false
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../../containers/searxng/"
@@ -15,12 +26,23 @@
       - "--exclude=.env"
       - "--exclude=.env.example"
       - "--exclude=README.md"
+      - "--exclude=config/"
 
 - name: Template SearXNG .env file
   ansible.builtin.template:
     src: env.j2
     dest: "{{ data_mount }}/deploy/searxng/.env"
     mode: "0600"
+
+# Deploy the minimal settings.yml to the container's mount path (/data/searxng/
+# config), not the unused deploy dir. braveapi renders only if its vault key is
+# set (see settings.yml.j2) so the key never lands in the repo.
+- name: Deploy SearXNG settings.yml to the container mount path
+  ansible.builtin.template:
+    src: settings.yml.j2
+    dest: "{{ data_mount }}/searxng/config/settings.yml"
+    mode: "0644"
+  register: searxng_settings_tpl
 
 - name: Deploy SearXNG stack
   community.docker.docker_compose_v2:
@@ -29,3 +51,6 @@
       - searxng.yml
     state: present
     pull: always
+    # Reload the bind-mounted settings.yml when it changed (compose won't
+    # restart on a mounted-file content change by itself).
+    recreate: "{{ 'always' if searxng_settings_tpl.changed else 'auto' }}"

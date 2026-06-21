@@ -1,0 +1,33 @@
+# SearXNG settings — MINIMAL config (managed by Ansible, searxng role).
+# Mirrors containers/searxng/config/settings.yml; see #50 for why we use
+# use_default_settings instead of pinning the full engine catalog (drift).
+# The braveapi engine renders only when vault_searxng_brave_api_key is set in
+# the vault — the key is never stored in the (public) repo.
+use_default_settings:
+  engines:
+    # Onion engines need a Tor proxy we don't run — remove them from the image
+    # defaults entirely (disabling still triggers a load error).
+    remove:
+      - ahmia
+      - torch
+
+general:
+  instance_name: "MutoSearch"
+
+server:
+  # Overwritten at runtime by ${SEARXNG_SECRET} (searxng image entrypoint).
+  secret_key: "ultrasecretkey"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+{% if vault_searxng_brave_api_key is defined and (vault_searxng_brave_api_key | length > 0) %}
+
+engines:
+  - name: braveapi
+    engine: braveapi
+    api_key: "{{ vault_searxng_brave_api_key }}"
+    results_per_page: 50
+{% endif %}
