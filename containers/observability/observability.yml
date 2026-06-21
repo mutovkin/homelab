@@ -238,5 +238,4 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 172.20.0.0/24
-          gateway: 172.20.0.1
+        - subnet: ${OBSERVABILITY_NETWORK_SUBNET:-172.20.0.0/24}

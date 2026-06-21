@@ -56,5 +56,4 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 172.24.0.0/24
-          gateway: 172.24.0.1
+        - subnet: ${VAULTWARDEN_NETWORK_SUBNET:-172.24.0.0/24}

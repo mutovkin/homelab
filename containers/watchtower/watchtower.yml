@@ -35,5 +35,4 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 172.25.0.0/24
-          gateway: 172.25.0.1
+        - subnet: ${WATCHTOWER_NETWORK_SUBNET:-172.25.0.0/24}
