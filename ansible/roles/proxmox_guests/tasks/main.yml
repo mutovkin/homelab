@@ -77,7 +77,7 @@
 # "trusted forever" bug this guards against).
 - name: Ensure TrueNAS ISO is present and matches published checksum
   ansible.builtin.get_url:
-    url: "https://iso.sys.truenas.net/TrueNAS-26-BETA/{{ truenas_iso_version }}/{{ truenas_iso_filename }}"
+    url: "{{ truenas_iso_base_url }}/{{ truenas_iso_version }}/{{ truenas_iso_filename }}"
     dest: "/var/lib/vz/template/iso/{{ truenas_iso_filename }}"
     checksum: "sha256:{{ truenas_iso_sha256 }}"
     mode: "0644"
