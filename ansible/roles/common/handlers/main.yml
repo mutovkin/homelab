@@ -1,0 +1,14 @@
+---
+# Validate the full effective sshd config (including drop-ins) BEFORE reloading,
+# so a syntax error fails loudly and the running sshd keeps its current config
+# rather than reloading a broken one (which would risk lockout on next restart).
+- name: Validate sshd configuration
+  ansible.builtin.command: sshd -t
+  changed_when: false
+  listen: reload-sshd
+
+- name: Reload sshd
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+  listen: reload-sshd

@@ -26,6 +26,25 @@
   with_fileglob:
     - "{{ playbook_dir }}/../files/ssh_keys/*.pub"
 
+# --- SSH hardening: key-only authentication ---
+# Public keys are provisioned above, so disable password auth (stops the
+# credential-stuffing seen against deb-docker) and allow root only via key.
+# Drop-in is picked up via `Include /etc/ssh/sshd_config.d/*.conf`. The handler
+# validates with `sshd -t` before reloading, so an invalid config can never be
+# loaded (running sshd keeps its current config on a failed validate).
+- name: Harden SSH — disable password auth, key-only root (drop-in)
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-hardening.conf
+    content: |
+      # Managed by Ansible (common role). Key-only authentication.
+      PasswordAuthentication no
+      PermitRootLogin prohibit-password
+      KbdInteractiveAuthentication no
+    mode: "0644"
+  notify: reload-sshd
+  tags:
+    - ssh_hardening
+
 # --- Automatic security updates ---
 
 - name: Enable unattended-upgrades periodic settings
