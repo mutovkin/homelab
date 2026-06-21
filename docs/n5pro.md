@@ -109,7 +109,9 @@
 - Pass through 2× WD SN850X 2TB NVMe (IOMMU groups 19 and 22) for mirrored ZFS special vdev
 - Boot disk on ZFS local-zfs
 - net0: vmbr1 (10GbE LAN), net1: vmbr2 (host-only NFS at 10.99.99.2)
-- Boots first (`startup: order=1`)
+- Boots first (`startup: order=1,up=180`) — the `up=180` delay holds the docker
+  LXC until TrueNAS has finished its slow boot (PCIe passthrough + ZFS import +
+  NFS start), so the NFS provider is serving before its consumer starts
 
 ### CT 201: Docker Host
 
@@ -119,7 +121,7 @@
 - ROCm userspace installed by `docker_host` role
 - net0: vmbr1 (10GbE LAN at 192.168.30.15), net1: vmbr2 (host-only NFS at 10.99.99.3)
 - NFS feature enabled for Docker NFS volume driver
-- Boots after TrueNAS (`startup: order=2, up=60`)
+- Boots after TrueNAS (`startup: order=2`)
 - Will share centralized monitoring with EQ12
 
 ### GPU Passthrough VM (TBD)
@@ -283,7 +285,13 @@ Containers that need TrueNAS storage (Lyrion, Frigate, etc.) use Docker NFS volu
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Boot order:** TrueNAS (order=1) boots first. Docker LXC (order=2, up=60) waits 60 seconds before starting, giving TrueNAS time to initialize its network stack and export NFS shares.
+**Boot order:** TrueNAS (`order=1,up=180`) boots first; Proxmox then waits 180s
+before starting the docker LXC (`order=2`), so TrueNAS has time to import ZFS and
+export its NFS shares before the consumer starts. The `up=` delay lives on
+TrueNAS, not the LXC — Proxmox applies a guest's `up=` delay *before starting the
+next guest in order*, so a delay on the LXC would do nothing useful. As a
+backstop for an unusually slow TrueNAS boot, the LXC also runs a
+`lms-nfs-heal.service` oneshot that waits for NFS then re-ups the lms stack (#36).
 
 ## VM/LXC Definitions
 
