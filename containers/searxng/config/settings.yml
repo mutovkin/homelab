@@ -34,8 +34,10 @@ server:
   limiter: false
 
 search:
-  # Search-as-you-type suggestions.
+  # Search-as-you-type suggestions and per-result site favicons (favicons.toml
+  # ships alongside this file; cache lives in the worker-writable /tmp).
   autocomplete: "duckduckgo"
+  favicon_resolver: "duckduckgo"
   # html for the UI, json so the search API can be queried programmatically.
   formats:
     - html
