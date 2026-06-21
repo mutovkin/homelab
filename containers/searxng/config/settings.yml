@@ -12,11 +12,17 @@
 # searxng role. For standalone `docker compose up`, this file is used as-is.
 use_default_settings:
   engines:
-    # Onion engines need a Tor proxy we don't run — remove them from the image
-    # defaults entirely (disabling still triggers a load error).
     remove:
+      # Onion engines need a Tor proxy we don't run — disabling still triggers a
+      # load error, so remove them from the image defaults entirely.
       - ahmia
       - torch
+      # Free Brave engines scrape search.brave.com and are chronically
+      # rate-limited; the paid braveapi engine covers web search, so drop them.
+      - brave
+      - brave.images
+      - brave.videos
+      - brave.news
 
 general:
   instance_name: "MutoSearch"
@@ -28,6 +34,9 @@ server:
   limiter: false
 
 search:
+  # Search-as-you-type suggestions and per-result favicons.
+  autocomplete: "duckduckgo"
+  favicon_resolver: "duckduckgo"
   # html for the UI, json so the search API can be queried programmatically.
   formats:
     - html
