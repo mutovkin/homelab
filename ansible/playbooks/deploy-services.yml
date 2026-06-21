@@ -1,75 +1,30 @@
 ---
 # Deploy Docker Compose services to hosts based on their service assignments
-# Each host's services list is defined in inventory/host_vars/*/vars.yml
+# Each host's `services` list (inventory/host_vars/*/vars.yml) drives BOTH which
+# roles run and the order they run in — keep dependencies earlier in the list
+# (e.g. postgresql before joplin/immich/nextcloud, which share postgres_network).
 # Run: ansible-playbook playbooks/deploy-services.yml
 # Single service: ansible-playbook playbooks/deploy-services.yml --tags postgresql
+# Valid --tags values are the entries of each host's `services` list. Because the
+# per-service tags are applied dynamically in the loop below, `--list-tags` shows
+# only `always` — consult the host_vars `services` list for the tag names.
+# A service name with no matching roles/services/<name> dir fails the play (by
+# design: a typo in the services list should be loud, not silently skipped).
 
 - name: Deploy container services
   hosts: docker_hosts
   become: true
   tasks:
-    - name: Deploy Portainer
-      ansible.builtin.import_role:
-        name: services/portainer
-      when: "'portainer' in services"
-      tags: portainer
-
-    - name: Deploy PostgreSQL
-      ansible.builtin.import_role:
-        name: services/postgresql
-      when: "'postgresql' in services"
-      tags: postgresql
-
-    - name: Deploy Observability stack
-      ansible.builtin.import_role:
-        name: services/observability
-      when: "'observability' in services"
-      tags: observability
-
-    - name: Deploy Vaultwarden
-      ansible.builtin.import_role:
-        name: services/vaultwarden
-      when: "'vaultwarden' in services"
-      tags: vaultwarden
-
-    - name: Deploy SearXNG
-      ansible.builtin.import_role:
-        name: services/searxng
-      when: "'searxng' in services"
-      tags: searxng
-
-    - name: Deploy Joplin
-      ansible.builtin.import_role:
-        name: services/joplin
-      when: "'joplin' in services"
-      tags: joplin
-
-    - name: Deploy Watchtower
-      ansible.builtin.import_role:
-        name: services/watchtower
-      when: "'watchtower' in services"
-      tags: watchtower
-
-    - name: Deploy Immich
-      ansible.builtin.import_role:
-        name: services/immich
-      when: "'immich' in services"
-      tags: immich
-
-    - name: Deploy Frigate
-      ansible.builtin.import_role:
-        name: services/frigate
-      when: "'frigate' in services"
-      tags: frigate
-
-    - name: Deploy NextCloud
-      ansible.builtin.import_role:
-        name: services/nextcloud
-      when: "'nextcloud' in services"
-      tags: nextcloud
-
-    - name: Deploy Lyrion Music Server
-      ansible.builtin.import_role:
-        name: services/lms
-      when: "'lms' in services"
-      tags: lms
+    # One loop over the host's services list replaces the per-service import
+    # blocks. include_role + apply.tags:item keeps `--tags <service>` working
+    # (each role's tasks inherit the service-named tag); tags: always lets the
+    # loop itself run so the tag filter can then select a single iteration.
+    - name: Deploy enabled services in declared order
+      ansible.builtin.include_role:
+        name: "services/{{ service }}"
+        apply:
+          tags: "{{ service }}"
+      loop: "{{ services | default([]) }}"
+      loop_control:
+        loop_var: service
+      tags: always
