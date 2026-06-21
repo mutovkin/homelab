@@ -1,11 +1,14 @@
 # SearXNG favicon config. Required once `search.favicon_resolver` is set — else
 # searxng logs "missing favicon config" and favicons 404.
 #
-# We deliberately do NOT override `db_url`: the default is /tmp/faviconcache.db,
-# which is writable by the (root) searxng worker. Pointing it at the mounted
-# /var/cache/searxng volume fails — that dir is owned 977:977 and the worker
-# runs as root WITHOUT DAC_OVERRIDE (cap_drop: ALL), so it can't write there and
-# every search 500s (see #63/#65). The /tmp cache is ephemeral (re-fetched after
-# a container recreate), which is fine for favicons.
+# db_url points at a dedicated, root-owned, PERSISTENT bind mount
+# (/var/cache/searxng-favicons). It must live OUTSIDE /var/cache/searxng: the
+# entrypoint force-chowns that volume to 977, but the worker runs as root
+# WITHOUT DAC_OVERRIDE (cap_drop: ALL), so it can't write a 977-owned dir —
+# pointing the cache there 500s every search (#63). A sibling root-owned mount
+# is writable by the root worker and survives container recreates (#67).
 [favicons]
 cfg_schema = 1
+
+[favicons.cache]
+db_url = "/var/cache/searxng-favicons/faviconcache.db"
