@@ -46,6 +46,30 @@
     dest: "{{ data_mount }}/lyrion/config/custom-init.sh"
     mode: "0755"
 
+# Self-heal: if the LXC boots before TrueNAS NFS is serving (boot-order race,
+# #36), the NFS-backed /music volume fails to mount and the stack stays down.
+# This oneshot waits for NFS then re-ups the stack, independent of boot order.
+- name: Install lms NFS self-heal script
+  ansible.builtin.template:
+    src: lms-nfs-heal.sh.j2
+    dest: /usr/local/bin/lms-nfs-heal.sh
+    mode: "0755"
+
+- name: Install lms NFS self-heal systemd unit
+  ansible.builtin.template:
+    src: lms-nfs-heal.service.j2
+    dest: /etc/systemd/system/lms-nfs-heal.service
+    mode: "0644"
+  register: lms_heal_unit
+
+- name: Enable lms NFS self-heal unit (runs at every boot)
+  ansible.builtin.systemd_service:
+    name: lms-nfs-heal.service
+    enabled: true
+    daemon_reload: "{{ lms_heal_unit.changed }}"
+
+# If the compose file name/list changes here, update COMPOSE_FILE in
+# lms-nfs-heal.sh.j2 too — the self-heal unit re-ups the stack independently.
 - name: Deploy Lyrion stack
   community.docker.docker_compose_v2:
     project_src: "{{ data_mount }}/deploy/lyrion"

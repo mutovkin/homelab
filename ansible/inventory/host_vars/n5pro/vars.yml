@@ -116,7 +116,11 @@ proxmox_vms:
     net:
       net0: "virtio,bridge=vmbr1"
       net1: "virtio,bridge=vmbr2"
-    startup: "order=1"
+    # order=1 so the NFS provider boots before its consumers; up=180 holds the
+    # next guest (the docker LXC) until TrueNAS has finished its slow boot
+    # (PCIe passthrough + ZFS import + NFS start). The lms-nfs-heal unit in the
+    # LXC is the backstop if 180s is ever still too short — see issue #36.
+    startup: "order=1,up=180"
     onboot: true
     started: true
     tags:
@@ -126,7 +130,8 @@ proxmox_vms:
       TrueNAS SCALE — NAS and storage management.
       JMicron SATA controller passed through for direct access to 5x 26TB HDDs.
       2x WD SN850X 2TB NVMe passed through for mirrored ZFS special vdev.
-      net0: vmbr1 (10GbE LAN), net1: vmbr2 (host-only NFS). Boots first (order=1).
+      net0: vmbr1 (10GbE LAN), net1: vmbr2 (host-only NFS).
+      Boots first (order=1, up=180) so NFS is serving before its consumers.
 
 proxmox_lxcs:
   - vmid: 201
@@ -144,7 +149,10 @@ proxmox_lxcs:
       net1: "name=eth1,bridge=vmbr2,hwaddr=BC:24:11:FC:95:52,ip=10.99.99.3/24,type=veth"
     nesting: true
     nfs_enabled: true
-    startup: "order=2,up=60"
+    # order=2 boots after TrueNAS (order=1). The wait for TrueNAS lives on the
+    # TrueNAS guest's up= delay, not here (Proxmox up= delays the NEXT guest in
+    # order, so a delay on this guest would do nothing useful). See issue #36.
+    startup: "order=2"
     gpu_sharing: true # /dev/dri + /dev/kfd bind-mount for VAAPI and ROCm
     onboot: true
     started: true
@@ -153,4 +161,4 @@ proxmox_lxcs:
     description: >-
       Docker host — Immich, Frigate, NextCloud, PostgreSQL, Lyrion.
       net0: vmbr1 (LAN), net1: vmbr2 (host-only NFS).
-      Boots after TrueNAS (order=2, up=60).
+      Boots after TrueNAS (order=2).

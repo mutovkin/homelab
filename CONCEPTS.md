@@ -33,3 +33,13 @@ Because Docker runs inside a privileged LXC rather than on bare metal, it cannot
 manage host-only kernel facilities: every Compose service must opt out of AppArmor
 (`security_opt: apparmor:unconfined`) and the LXC's own AppArmor service is masked
 before Docker starts.
+
+### Host-only NFS bridge
+A Proxmox bridge (`vmbr2`, `10.99.99.x`) carrying NFS traffic between a Docker host
+and the TrueNAS guest on n5pro, isolated from the LAN so storage traffic never
+touches `192.168.x.x`.
+
+The NFS provider (TrueNAS) must be serving its export before a consumer mounts it,
+and a Docker `local` NFS volume mounts only at container-create and is not retried —
+so consumers must start after the provider (enforced via Proxmox guest boot order)
+or self-heal once the export becomes reachable.
