@@ -72,15 +72,13 @@ services:
         max-file: "3"
 
 networks:
+  # postgres_network is a shared EXTERNAL network, pre-created by the postgresql
+  # Ansible role (community.docker.docker_network, subnet 172.21.0.0/24). It is
+  # decoupled from this compose project's lifecycle so that when watchtower
+  # recreates postgres/pgadmin, they reattach to the still-present network
+  # (the recreate-detach bug, #45). joplin/immich/nextcloud also attach as
+  # external. For standalone use, create it first:
+  #   docker network create --subnet 172.21.0.0/24 postgres_network
   postgres_network:
-    driver: bridge
+    external: true
     name: postgres_network
-    ipam:
-      driver: default
-      config:
-        # NOTE: postgres_network is shared — joplin/immich/nextcloud attach to it
-        # as external. Do NOT parameterize this subnet: changing the definition
-        # forces docker compose to recreate the network, which fails while the
-        # other stacks hold endpoints (and stops postgres). Keep it literal.
-        - subnet: 172.21.0.0/24
-          gateway: 172.21.0.1
