@@ -37,10 +37,10 @@ steps collapse to "n/a" but the review + merge steps still apply.
 7. REVIEW     — aggressive multi-agent review of the branch diff
 8. TRIAGE     — real findings? → fix → GO TO 3 (re-test, re-deploy, re-review)
                 clean? → continue
-9. MERGE      — squash-merge into master, closes the issue, delete branch
-10. SYNC      — checkout master, pull, confirm issue CLOSED
-11. COMPOUND  — if the change taught something non-obvious, capture it via
-                ce-compound so the next iteration doesn't relearn it
+9. COMPOUND   — if the change taught something non-obvious, capture it via
+                ce-compound as the LAST commit ON THE BRANCH (before merge)
+10. MERGE     — squash-merge into master, closes the issue, delete branch
+11. SYNC      — checkout master, pull, confirm issue CLOSED
 ```
 
 The hinge is **step 8**. Review is not a rubber stamp before merge — a real
@@ -128,36 +128,24 @@ Give each agent the issue context, the branch name, and the exact diff command
   been re-verified and re-reviewed.
 - **No real findings → continue to merge.**
 
-### 9. Merge
-```bash
-gh pr create --title "...(#<n>)" --body "...verification evidence..." --base master --head <branch>
-gh pr merge <pr> --squash --delete-branch
-```
-- Squash so each issue maps to one commit on master ending `(#<n>)`.
-- The PR body carries the **live verification evidence** (recap, end-state
-  checks), so the merge record shows it was proven, not assumed.
-- Commit/PR text adds no AI attribution trailer (suppressed via
-  `attribution` in `.claude/settings.json`).
-
-### 10. Sync
-```bash
-git checkout master && git pull
-gh issue view <n> --json state -q .state   # expect CLOSED
-```
-
-### 11. Compound the learning
+### 9. Compound the learning — BEFORE merge, as the last commit on the branch
 If this change taught something non-obvious, **capture it via the
 compound-engineering `ce-compound` skill** so the knowledge lands in
 `docs/solutions/` (searchable YAML frontmatter) and the next trip through the
-loop doesn't relearn it. This is what makes the loop *improve over time* rather
-than just repeat.
+loop doesn't relearn it. This is what makes the loop *improve over time*.
+
+**Do this before merge so the lesson rides in on the same PR.** The PR then tells
+a complete story — "fixed X, and while doing it learned Y, here's the doc" — and
+the squash-merge carries both the fix and its lesson as one coherent unit.
+Compounding after merge fragments that narrative and is easy to skip.
 
 ```
 # autonomous loop pass (no human to answer prompts) — use headless or it blocks:
 Skill("ce-compound", "mode:headless <one-line context>")
 ```
 or `/ce-compound <context>` when a human is driving interactively (it will ask
-Full-vs-Lightweight and consent questions).
+Full-vs-Lightweight and consent questions). Then commit the new
+`docs/solutions/...` doc onto the branch as its final commit.
 
 **Compound when** the change involved any of:
 - a bug the review or a dry-run caught that wasn't obvious up front
@@ -171,9 +159,27 @@ Full-vs-Lightweight and consent questions).
 removal, a doc typo) — no lesson to compound.
 
 Batch is fine: after a run of related issues, one `ce-compound` pass can document
-the shared theme (e.g. "Ansible first-run ordering + check-mode safety") rather
-than one doc per trivial issue. The goal is durable, discoverable lessons, not
-volume. Cross-link the new doc from `CLAUDE.md` Gotchas when it's a recurring trap.
+the shared theme rather than one doc per trivial issue. The goal is durable,
+discoverable lessons, not volume. Cross-link the new doc from `CLAUDE.md` Gotchas
+when it's a recurring trap.
+
+### 10. Merge
+```bash
+gh pr create --title "...(#<n>)" --body "...verification evidence..." --base master --head <branch>
+gh pr merge <pr> --squash --delete-branch
+```
+- Squash so each issue maps to one commit on master ending `(#<n>)` — fix +
+  compounded lesson land together.
+- The PR body carries the **live verification evidence** (recap, end-state
+  checks), so the merge record shows it was proven, not assumed.
+- Commit/PR text adds no AI attribution trailer (suppressed via
+  `attribution` in `.claude/settings.json`).
+
+### 11. Sync
+```bash
+git checkout master && git pull
+gh issue view <n> --json state -q .state   # expect CLOSED
+```
 
 ## Risk gates (stop and get explicit OK)
 
