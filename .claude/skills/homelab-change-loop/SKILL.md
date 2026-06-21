@@ -14,7 +14,9 @@ description: >-
 A disciplined, repeatable loop for landing a change safely in this repo. The
 governing rule of the homelab applies throughout: **all changes go through
 Ansible, never ad-hoc SSH** (SSH is read-only diagnostics). Every change must be
-**proven against the live hosts before it is merged**, not after.
+**proven against the live hosts before it is merged**, not after — and every
+non-obvious lesson must be **compounded into `docs/solutions/`** so the loop gets
+smarter each iteration instead of repeating mistakes.
 
 ## When to use
 
@@ -37,6 +39,8 @@ steps collapse to "n/a" but the review + merge steps still apply.
                 clean? → continue
 9. MERGE      — squash-merge into master, closes the issue, delete branch
 10. SYNC      — checkout master, pull, confirm issue CLOSED
+11. COMPOUND  — if the change taught something non-obvious, capture it via
+                ce-compound so the next iteration doesn't relearn it
 ```
 
 The hinge is **step 8**. Review is not a rubber stamp before merge — a real
@@ -141,6 +145,36 @@ git checkout master && git pull
 gh issue view <n> --json state -q .state   # expect CLOSED
 ```
 
+### 11. Compound the learning
+If this change taught something non-obvious, **capture it via the
+compound-engineering `ce-compound` skill** so the knowledge lands in
+`docs/solutions/` (searchable YAML frontmatter) and the next trip through the
+loop doesn't relearn it. This is what makes the loop *improve over time* rather
+than just repeat.
+
+```
+# autonomous loop pass (no human to answer prompts) — use headless or it blocks:
+Skill("ce-compound", "mode:headless <one-line context>")
+```
+or `/ce-compound <context>` when a human is driving interactively (it will ask
+Full-vs-Lightweight and consent questions).
+
+**Compound when** the change involved any of:
+- a bug the review or a dry-run caught that wasn't obvious up front
+  (e.g. the `stat` gate defeating a checksum; a `--check`-only failure),
+- a discovered issue you filed mid-loop,
+- a non-obvious fix or a gotcha specific to this repo's stack
+  (Proxmox/Ansible/LXC/Compose behavior that surprised you),
+- anything you'd want a future session to find by searching before re-debugging.
+
+**Skip when** the change was trivial/mechanical (a rename, a one-line tag
+removal, a doc typo) — no lesson to compound.
+
+Batch is fine: after a run of related issues, one `ce-compound` pass can document
+the shared theme (e.g. "Ansible first-run ordering + check-mode safety") rather
+than one doc per trivial issue. The goal is durable, discoverable lessons, not
+volume. Cross-link the new doc from `CLAUDE.md` Gotchas when it's a recurring trap.
+
 ## Risk gates (stop and get explicit OK)
 
 Apply-before-merge is the default, but pause for the human on:
@@ -160,3 +194,6 @@ Apply-before-merge is the default, but pause for the human on:
 - Ad-hoc SSH changes to "just fix it on the box" — encode in Ansible, re-run.
 - Trusting `--check`-only success — and trusting `failed=0` without an end-state
   assertion.
+- Landing a non-obvious fix without compounding the lesson — a trap the loop
+  caught once will be rediscovered next time if it isn't written to
+  `docs/solutions/` via `ce-compound`.
