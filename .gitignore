@@ -17,5 +17,8 @@ ansible/.ansible/
 !*.env.example
 !*.env.template
 
+# Local scratch — temporary notes, dumps, and working files (never committed)
+.local-notes/
+
 # OS
 .DS_Store
