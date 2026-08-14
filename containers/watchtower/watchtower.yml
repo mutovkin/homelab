@@ -6,8 +6,9 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
-      # WATCHTOWER_LABEL_ENABLE=true means only labeled containers are scanned —
-      # without this label Watchtower updates everything except itself.
+      # WATCHTOWER_LABEL_ENABLE=true means only containers carrying this label are
+      # scanned at all. Without it here, Watchtower kept the other labeled
+      # containers current but could never update itself.
       - "com.centurylinklabs.watchtower.enable=true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
