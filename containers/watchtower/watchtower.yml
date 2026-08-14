@@ -5,6 +5,11 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+    labels:
+      # WATCHTOWER_LABEL_ENABLE=true means only containers carrying this label are
+      # scanned at all. Without it here, Watchtower kept the other labeled
+      # containers current but could never update itself.
+      - "com.centurylinklabs.watchtower.enable=true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -16,15 +21,11 @@ services:
       WATCHTOWER_INCLUDE_RESTARTING: "true"
       WATCHTOWER_ROLLING_RESTART: "false"
       WATCHTOWER_TIMEOUT: 30s
-      # Notifications
-      WATCHTOWER_NOTIFICATIONS: "email"
-      WATCHTOWER_NOTIFICATION_EMAIL_FROM: ${EMAIL_FROM}
-      WATCHTOWER_NOTIFICATION_EMAIL_TO: ${EMAIL_TO}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER: ${EMAIL_SERVER}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT: ${EMAIL_PORT}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER: ${EMAIL_USER}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD: ${EMAIL_PASSWORD}
-      WATCHTOWER_NOTIFICATION_EMAIL_DELAY: 2
+      # Notifications — Shoutrrr smtp:// URL, assembled in env.j2 from vault vars.
+      # Replaces the legacy WATCHTOWER_NOTIFICATION_EMAIL_* options, which upstream
+      # deprecated and will remove in Watchtower v2.
+      WATCHTOWER_NOTIFICATION_URL: ${NOTIFICATION_URL}
+      WATCHTOWER_NOTIFICATIONS_DELAY: 2
     networks:
       - watchtower_network
 
