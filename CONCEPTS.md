@@ -34,6 +34,17 @@ manage host-only kernel facilities: every Compose service must opt out of AppArm
 (`security_opt: apparmor:unconfined`) and the LXC's own AppArmor service is masked
 before Docker starts.
 
+### Monitor-only container
+A service whose image updates are watched and reported but never applied
+automatically, reserving the upgrade decision for an operator — used for anything
+where an unattended upgrade is riskier than running slightly behind.
+
+Being monitor-only is not the absence of opt-in: it is a second label layered on top
+of the opt-in one. A container that only opts out of updating, without also opting
+into scanning, is not watched at all and reports nothing — the silent failure this
+distinction exists to prevent. Scanning and updating are separate decisions, and a
+container must be in scan scope before any update policy applies to it.
+
 ### Host-only NFS bridge
 A Proxmox bridge (`vmbr2`, `10.99.99.x`) carrying NFS traffic between a Docker host
 and the TrueNAS guest on n5pro, isolated from the LAN so storage traffic never
