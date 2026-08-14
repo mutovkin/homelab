@@ -28,6 +28,69 @@
     state: directory
     mode: "0755"
 
+# --- Pre-upgrade backup -------------------------------------------------------
+# The stack deploys with pull: always, so any deploy can upgrade the vault. Take a
+# consistent snapshot first — but only when the image actually changed, otherwise a
+# routine no-op deploy would stop a healthy container for nothing.
+
+- name: Inspect the running Vaultwarden container
+  community.docker.docker_container_info:
+    name: vaultwarden
+  register: vaultwarden_container
+  check_mode: false
+
+- name: Pull the Vaultwarden image to compare against the running container
+  community.docker.docker_image_pull:
+    name: "{{ vaultwarden_container.container.Config.Image }}"
+    pull: always
+  register: vaultwarden_pulled
+  check_mode: false
+  when: vaultwarden_container.exists
+
+- name: Determine whether this deploy would upgrade Vaultwarden
+  ansible.builtin.set_fact:
+    vaultwarden_upgrade_pending: >-
+      {{ vaultwarden_container.exists
+         and vaultwarden_pulled.image.Id | default('') != vaultwarden_container.container.Image }}
+
+- name: Stop Vaultwarden so its SQLite database is backed up consistently
+  community.docker.docker_container:
+    name: vaultwarden
+    state: stopped
+  when: vaultwarden_upgrade_pending
+
+- name: Create Vaultwarden backup directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/backups"
+    state: directory
+    mode: "0700"
+  when: vaultwarden_upgrade_pending
+
+- name: Archive Vaultwarden data before upgrading
+  community.general.archive:
+    path: "{{ data_mount }}/vaultwarden"
+    dest: "{{ data_mount }}/backups/vaultwarden-{{ ansible_date_time.iso8601_basic_short }}.tgz"
+    format: gz
+    mode: "0600"
+  when: vaultwarden_upgrade_pending
+
+- name: Find existing Vaultwarden backups
+  ansible.builtin.find:
+    paths: "{{ data_mount }}/backups"
+    patterns: "vaultwarden-*.tgz"
+  register: vaultwarden_backups
+  when: vaultwarden_upgrade_pending
+
+- name: Prune Vaultwarden backups beyond the retention limit
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: >-
+    {{ (vaultwarden_backups.files | sort(attribute='mtime', reverse=true))[vaultwarden_backup_retention | int :] }}
+  loop_control:
+    label: "{{ item.path }}"
+  when: vaultwarden_upgrade_pending
+
 - name: Deploy Vaultwarden stack
   community.docker.docker_compose_v2:
     project_src: "{{ data_mount }}/deploy/vaultwarden"

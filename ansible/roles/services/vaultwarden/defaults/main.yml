@@ -1,0 +1,3 @@
+---
+# Number of pre-upgrade Vaultwarden backup archives to retain in {{ data_mount }}/backups.
+vaultwarden_backup_retention: 7
