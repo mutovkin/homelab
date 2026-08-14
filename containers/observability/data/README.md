@@ -27,35 +27,26 @@ data/
 
 ## Deployment to Server
 
-### Option 1: SCP entire data directory
-```bash
-# From your local machine
-cd /Users/surge/dev/homelab/containers/observability
-scp -r data/* user@server:/data/
-```
-
-### Option 2: Rsync (better for updates)
-```bash
-rsync -avz --progress data/* user@server:/data/
-```
-
-### After copying to server
+**Deploy these configs with Ansible, not by hand.** The `observability` role copies
+`vector/vector.yaml`, `telegraf/telegraf.conf` and `grafana/config/grafana.ini` to
+`/data/...`, syncs `grafana/provisioning/`, and restarts only the services whose
+config actually changed:
 
 ```bash
-# SSH to server
-ssh user@server
-
-# Set correct permissions
-sudo chown -R 472:472 /data/grafana       # Grafana runs as UID 472
-sudo chown -R $USER:$USER /data/victoriametrics
-sudo chown -R $USER:$USER /data/victorialogs
-sudo chown -R $USER:$USER /data/vector
-sudo chown -R $USER:$USER /data/telegraf
-
-# Deploy the stack
-cd /path/to/observability
-docker compose -f observability.yml up -d
+task deploy:service -- --tags observability --limit eq12_docker
 ```
+
+Preview first with `--check --diff`. Editing a file here and re-running the deploy is
+the whole workflow — there is no copy step to remember.
+
+Copying by hand (`scp`/`rsync` into `/data`) is out of policy: this repo's Critical
+Rule 1 is that systems change through Ansible, never ad-hoc SSH. Hand-copied config
+also drifts silently from the repo, which is exactly how a broken Vector config went
+unnoticed for a month (issue #73).
+
+The container-facing directories `victoriametrics/`, `victorialogs/` and
+`grafana/data/` are runtime state — the role creates them empty and never overwrites
+them.
 
 ## Notes
 
@@ -64,7 +55,8 @@ docker compose -f observability.yml up -d
   - Don't put files in them before first run
 
 - Configuration files are read-only (`:ro` mount in docker-compose)
-  - To update: modify locally, re-SCP, restart container
+  - To update: edit the file here, then re-run the Ansible deploy — the role copies it
+    and restarts the affected service automatically
 
 - The `observability.yml` and `.env` files should be in the parent directory
   - Not inside the `/data` folder

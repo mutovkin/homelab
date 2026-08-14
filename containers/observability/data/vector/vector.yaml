@@ -88,6 +88,15 @@ sinks:
       password: "${VL_AUTH_PASSWORD}"
     encoding:
       codec: json
+    # Vector 0.57 requires templated fields to carry a literal prefix ("template
+    # confinement"), so that event data cannot resolve outside an intended
+    # namespace — on sinks that template a path or key, that means arbitrary
+    # writes. Here the templated fields are Loki label values, not paths,
+    # and the inputs are the Docker daemon's container_name, a literal set in the
+    # remap, and get_hostname!() — none attacker-controlled. Opting out keeps the
+    # existing label values intact; adding a prefix would rewrite every stored
+    # label and break existing Grafana queries. Scoped to this sink only.
+    dangerously_allow_unconfined_template_resolution: true
     labels:
       container_name: "{{ container_name }}"
       source: "{{ source }}"
