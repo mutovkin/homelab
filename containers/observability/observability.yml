@@ -77,20 +77,10 @@ services:
       resources:
         limits:
           memory: ${VL_MEMORY_LIMIT:-1G} # Prevent OOM crashes
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "--quiet",
-          "--tries=1",
-          "--spider",
-          "http://127.0.0.1:9428/health",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+    # No healthcheck: the victoria-logs image is built from scratch — it has no shell
+    # and no wget/curl, so any exec-based probe fails by construction and reports the
+    # container permanently unhealthy. Liveness is observed externally (/health on
+    # :9428) rather than faked here.
     logging:
       driver: "json-file"
       options:
@@ -122,6 +112,12 @@ services:
       TZ: ${TIMEZONE:-UTC}
       VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}
       VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}
+      # Vector 0.57 disabled ${VAR} interpolation inside config files by default.
+      # vector.yaml is bind-mounted and read by Vector (not by compose), so without
+      # this the sink's auth block is sent literally as "${VL_AUTH_USERNAME}" and
+      # VictoriaLogs rejects every batch with 401 — silently, since Vector still
+      # starts. This is upstream's documented flag for restoring the old behaviour.
+      VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: "true"
     deploy:
       resources:
         limits:
@@ -130,7 +126,10 @@ services:
       - observability
     depends_on:
       victorialogs:
-        condition: service_healthy
+        # service_started, not service_healthy: victorialogs has no healthcheck (scratch
+        # image). Vector's loki sink healthcheck is non-fatal and it has a disk buffer
+        # with retries, so it tolerates victorialogs not yet accepting connections.
+        condition: service_started
     logging:
       driver: "json-file"
       options:
@@ -214,7 +213,8 @@ services:
       victoriametrics:
         condition: service_healthy
       victorialogs:
-        condition: service_healthy
+        # see note on vector: victorialogs has no healthcheck to wait on
+        condition: service_started
       telegraf:
         condition: service_started
     logging:
