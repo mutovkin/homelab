@@ -28,6 +28,101 @@
     state: directory
     mode: "0755"
 
+# --- Pre-upgrade backup -------------------------------------------------------
+# The stack deploys with pull: always, so any deploy can upgrade the vault. Take a
+# consistent snapshot first — but only when the image actually changed, otherwise a
+# routine no-op deploy would stop a healthy container for nothing.
+
+- name: Inspect the running Vaultwarden container
+  community.docker.docker_container_info:
+    name: vaultwarden
+  register: vaultwarden_container
+  check_mode: false
+
+- name: Read the Vaultwarden image reference from the compose file
+  ansible.builtin.set_fact:
+    vaultwarden_image: >-
+      {{ (lookup('file', playbook_dir ~ '/../../containers/vaultwarden/vaultwarden.yml')
+          | from_yaml).services.vaultwarden.image }}
+
+# Deliberately the compose file's image, not the running container's: if the tag is
+# ever changed (e.g. pinned to a version), comparing the running tag against itself
+# would report no change while the deploy upgraded the vault unbacked.
+- name: Pull the Vaultwarden image to compare against the running container
+  community.docker.docker_image_pull:
+    name: "{{ vaultwarden_image }}"
+    pull: always
+  register: vaultwarden_pulled
+  check_mode: false  # a real pull, so --check can honestly report an upgrade
+  when: vaultwarden_container.exists
+
+- name: Determine whether this deploy would upgrade Vaultwarden
+  ansible.builtin.set_fact:
+    vaultwarden_upgrade_pending: >-
+      {{ vaultwarden_container.exists
+         and vaultwarden_pulled.image.Id | default('') != vaultwarden_container.container.Image }}
+
+# Checked before anything is stopped: a retention of 0 would slice [0:] and delete
+# every archive, including the one just taken, right before the upgrade is applied.
+- name: Assert Vaultwarden backup retention keeps at least one archive
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_backup_retention | int >= 1
+    fail_msg: "vaultwarden_backup_retention must be >= 1, got {{ vaultwarden_backup_retention }}"
+    quiet: true
+
+- name: Back up Vaultwarden before the upgrade is applied
+  when: vaultwarden_upgrade_pending
+  block:
+    - name: Stop Vaultwarden so its SQLite database is backed up consistently
+      community.docker.docker_container:
+        name: vaultwarden
+        state: stopped
+
+    - name: Create Vaultwarden backup directory
+      ansible.builtin.file:
+        path: "{{ data_mount }}/backups"
+        state: directory
+        mode: "0700"
+
+    - name: Archive Vaultwarden data before upgrading
+      community.general.archive:
+        path: "{{ data_mount }}/vaultwarden"
+        dest: "{{ data_mount }}/backups/vaultwarden-{{ ansible_date_time.iso8601_basic_short }}.tgz"
+        format: gz
+        mode: "0600"
+
+    - name: Find existing Vaultwarden backups
+      ansible.builtin.find:
+        paths: "{{ data_mount }}/backups"
+        patterns: "vaultwarden-*.tgz"
+      register: vaultwarden_backups
+
+    - name: Prune Vaultwarden backups beyond the retention limit
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: >-
+        {{ (vaultwarden_backups.files | default([]) | sort(attribute='mtime', reverse=true))
+           [vaultwarden_backup_retention | default(7) | int :] }}
+      loop_control:
+        label: "{{ item.path }}"
+
+  rescue:
+    # Never leave the vault down because a backup failed. Restart it on the image
+    # it was already running, then abort so the upgrade is not applied unbacked.
+    - name: Restart Vaultwarden on its existing image after a failed backup
+      community.docker.docker_container:
+        name: vaultwarden
+        state: started
+
+    - name: Fail because the pre-upgrade backup did not complete
+      ansible.builtin.fail:
+        msg: >-
+          Pre-upgrade backup of {{ data_mount }}/vaultwarden failed. Vaultwarden was
+          restarted on its existing image and the upgrade was NOT applied. Resolve the
+          backup failure (disk space, permissions) and re-run to upgrade.
+
 - name: Deploy Vaultwarden stack
   community.docker.docker_compose_v2:
     project_src: "{{ data_mount }}/deploy/vaultwarden"
