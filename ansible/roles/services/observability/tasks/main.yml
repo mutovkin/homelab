@@ -42,6 +42,30 @@
     - "{{ data_mount }}/grafana/dashboards"
     - "{{ data_mount }}/grafana/provisioning"
 
+# The compose file bind-mounts these paths directly (not from the deploy dir), so
+# without these tasks a config edited in the repo never reaches the container and
+# the only way to apply it is an ad-hoc scp — which Critical Rule 1 forbids.
+- name: Deploy observability service configs
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../containers/observability/data/{{ item.src }}"
+    dest: "{{ data_mount }}/{{ item.src }}"
+    mode: "0644"
+  loop:
+    - { src: vector/vector.yaml, service: vector }
+    - { src: telegraf/telegraf.conf, service: telegraf }
+    - { src: grafana/config/grafana.ini, service: grafana }
+  loop_control:
+    label: "{{ item.src }}"
+  register: observability_configs
+
+- name: Deploy Grafana provisioning
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/observability/data/grafana/provisioning/"
+    dest: "{{ data_mount }}/grafana/provisioning/"
+    delete: false
+  register: grafana_provisioning
+
 - name: Deploy observability stack
   community.docker.docker_compose_v2:
     project_src: "{{ data_mount }}/deploy/observability"
@@ -49,3 +73,15 @@
       - observability.yml
     state: present
     pull: always
+
+# Compose does not track the contents of bind-mounted files, so a config change on
+# its own never restarts the container. Restart the affected services explicitly,
+# after the stack exists so this also works on a first deploy.
+- name: Restart observability services whose config changed
+  community.docker.docker_container:
+    name: "{{ item }}"
+    state: started
+    restart: true
+  loop: >-
+    {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
+        + (['grafana'] if grafana_provisioning.changed | default(false) else [])) | unique }}
