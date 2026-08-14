@@ -8,6 +8,10 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # Both labels are required. WATCHTOWER_LABEL_ENABLE=true means "enable" is what
+      # brings a container into scan scope at all; "monitor-only" then reports new
+      # versions without applying them. monitor-only on its own is silently ignored.
+      - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:
       - /data/vaultwarden:/data

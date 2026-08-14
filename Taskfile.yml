@@ -58,6 +58,11 @@ tasks:
   ansible:lint:
     desc: Lint all Ansible playbooks and roles
     dir: '{{.ANSIBLE_DIR}}'
+    env:
+      # ansible-lint is often a separate install (e.g. Homebrew) from the ansible-core
+      # that runs deploys, and does not look in the user collections path by default.
+      # Without this it reports galaxy modules as "unknown-module" false positives.
+      ANSIBLE_COLLECTIONS_PATH: '{{.ANSIBLE_COLLECTIONS_PATH | default "~/.ansible/collections"}}'
     cmds:
       - ansible-lint
 
