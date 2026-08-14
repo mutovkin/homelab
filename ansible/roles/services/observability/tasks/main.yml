@@ -58,13 +58,31 @@
     label: "{{ item.src }}"
   register: observability_configs
 
+# delete: true so a file removed from the repo is removed from the host — otherwise
+# Grafana keeps provisioning a datasource that no longer exists in version control.
+# --checksum because rsync's default mtime comparison reports every file as changed
+# on a fresh clone, which would restart Grafana spuriously on the other operator machine.
 - name: Deploy Grafana provisioning
   become: false
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../../containers/observability/data/grafana/provisioning/"
     dest: "{{ data_mount }}/grafana/provisioning/"
-    delete: false
+    delete: true
+    rsync_opts:
+      - "--checksum"
   register: grafana_provisioning
+
+# Separate from provisioning because Grafana hot-reloads provisioned dashboards —
+# a dashboard change needs no restart. Without this the first dashboard JSON ever
+# committed would silently never reach the container.
+- name: Deploy Grafana dashboards
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../containers/observability/data/grafana/dashboards/"
+    dest: "{{ data_mount }}/grafana/dashboards/"
+    delete: true
+    rsync_opts:
+      - "--checksum"
 
 - name: Deploy observability stack
   community.docker.docker_compose_v2:
@@ -85,3 +103,6 @@
   loop: >-
     {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
         + (['grafana'] if grafana_provisioning.changed | default(false) else [])) | unique }}
+  # Skipped in check mode: on a host that has never been deployed the containers do
+  # not exist yet, and docker_container would fail rather than preview anything.
+  when: not ansible_check_mode

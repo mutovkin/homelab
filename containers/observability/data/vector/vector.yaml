@@ -89,8 +89,9 @@ sinks:
     encoding:
       codec: json
     # Vector 0.57 requires templated fields to carry a literal prefix ("template
-    # confinement"), to stop event data resolving into sensitive paths on sinks
-    # that template a filesystem location. These are Loki label values, not paths,
+    # confinement"), so that event data cannot resolve outside an intended
+    # namespace — on sinks that template a path or key, that means arbitrary
+    # writes. Here the templated fields are Loki label values, not paths,
     # and the inputs are the Docker daemon's container_name, a literal set in the
     # remap, and get_hostname!() — none attacker-controlled. Opting out keeps the
     # existing label values intact; adding a prefix would rewrite every stored
