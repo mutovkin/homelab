@@ -112,6 +112,18 @@ Hard-won lessons — check here before debugging from scratch.
   over SSH as root.
 - **`synchronize` + sudo.** Always `become: false` on `ansible.posix.synchronize` tasks
   (see [Critical Rules](#critical-rules)).
+- **Bind-mounted config must be owned by Ansible.** If a compose file bind-mounts a config
+  path, the role must *deploy the file*, not just `mkdir` the directory — otherwise the repo
+  copy is decorative, the live file is whatever was last hand-copied, and edits silently do
+  nothing. Compose also ignores bind-mount content changes, so pair the copy with an explicit
+  restart of the affected service. Related: never `depends_on: condition: service_healthy` a
+  scratch/distroless image — a healthcheck needs a binary inside the image, so one that can
+  never pass permanently blocks every redeploy of the stack.
+  See [docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md](docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md).
+- **Watchtower scan scope.** With `WATCHTOWER_LABEL_ENABLE=true`, `watchtower.enable=true` is
+  what puts a container in scope; `monitor-only=true` on its own is inert and the container is
+  never scanned or reported. Verify by comparing `scanned=N` against the labelled count.
+  See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md).
 - **ISO/large downloads.** `get_url` can re-validate against the server even when the
   file exists, failing if the upstream version was pulled. Guard downloads with an explicit
   `stat` check and `when: not <stat>.stat.exists`. Pin versions in one place; bump
