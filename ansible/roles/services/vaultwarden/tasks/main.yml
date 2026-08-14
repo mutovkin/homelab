@@ -39,12 +39,21 @@
   register: vaultwarden_container
   check_mode: false
 
+- name: Read the Vaultwarden image reference from the compose file
+  ansible.builtin.set_fact:
+    vaultwarden_image: >-
+      {{ (lookup('file', playbook_dir ~ '/../../containers/vaultwarden/vaultwarden.yml')
+          | from_yaml).services.vaultwarden.image }}
+
+# Deliberately the compose file's image, not the running container's: if the tag is
+# ever changed (e.g. pinned to a version), comparing the running tag against itself
+# would report no change while the deploy upgraded the vault unbacked.
 - name: Pull the Vaultwarden image to compare against the running container
   community.docker.docker_image_pull:
-    name: "{{ vaultwarden_container.container.Config.Image }}"
+    name: "{{ vaultwarden_image }}"
     pull: always
   register: vaultwarden_pulled
-  check_mode: false
+  check_mode: false  # a real pull, so --check can honestly report an upgrade
   when: vaultwarden_container.exists
 
 - name: Determine whether this deploy would upgrade Vaultwarden
@@ -52,6 +61,15 @@
     vaultwarden_upgrade_pending: >-
       {{ vaultwarden_container.exists
          and vaultwarden_pulled.image.Id | default('') != vaultwarden_container.container.Image }}
+
+# Checked before anything is stopped: a retention of 0 would slice [0:] and delete
+# every archive, including the one just taken, right before the upgrade is applied.
+- name: Assert Vaultwarden backup retention keeps at least one archive
+  ansible.builtin.assert:
+    that:
+      - vaultwarden_backup_retention | int >= 1
+    fail_msg: "vaultwarden_backup_retention must be >= 1, got {{ vaultwarden_backup_retention }}"
+    quiet: true
 
 - name: Back up Vaultwarden before the upgrade is applied
   when: vaultwarden_upgrade_pending
@@ -85,7 +103,8 @@
         path: "{{ item.path }}"
         state: absent
       loop: >-
-        {{ (vaultwarden_backups.files | sort(attribute='mtime', reverse=true))[vaultwarden_backup_retention | int :] }}
+        {{ (vaultwarden_backups.files | default([]) | sort(attribute='mtime', reverse=true))
+           [vaultwarden_backup_retention | default(7) | int :] }}
       loop_control:
         label: "{{ item.path }}"
 
