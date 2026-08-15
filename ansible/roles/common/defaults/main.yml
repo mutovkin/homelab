@@ -2,6 +2,11 @@
 # defaults for common role
 timezone: UTC
 apt_dist_upgrade: false
+
+# Operator extras. Overriding this from inventory REPLACES the whole list —
+# Ansible does not merge — so add packages here rather than in group_vars. The
+# role's own dependencies are held separately in vars/main.yml, out of reach of
+# any inventory override.
 common_packages:
   - curl
   - wget
@@ -11,7 +16,3 @@ common_packages:
   - unzip
   - gnupg
   - ca-certificates
-  - rsync
-  - python3-yaml
-  - unattended-upgrades
-  - apt-listchanges
