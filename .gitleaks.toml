@@ -1,0 +1,51 @@
+# gitleaks configuration — see .github/workflows/ci.yml (secret-scan job).
+#
+# The full upstream ruleset is kept; this file only adds narrowly-scoped
+# allowlists for the known false positives in this repo.  Every allowlist uses
+# `condition = "AND"`, so a path alone never exempts anything — the content has
+# to match too.  Adding a path here without a matching content regex would turn
+# that file into a blind spot; don't.
+
+title = "homelab"
+
+[extend]
+useDefault = true
+
+# ansible-vault ciphertext.  Every committed vault.yml is AES256-encrypted: an
+# `$ANSIBLE_VAULT;1.1;AES256` header followed by long hex lines that read as
+# high-entropy strings.  Allowlisted only where BOTH the path is a vault.yml AND
+# the offending line is vault ciphertext, so a *plaintext* secret accidentally
+# pasted into a vault.yml is still caught.
+[[allowlists]]
+description = "ansible-vault encrypted payloads (header + hex ciphertext lines)"
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''ansible/inventory/group_vars/all/vault\.yml$''',
+  '''ansible/inventory/host_vars/eq12/vault\.yml$''',
+  '''ansible/inventory/host_vars/eq12_docker/vault\.yml$''',
+  '''ansible/inventory/host_vars/n5pro/vault\.yml$''',
+  '''ansible/inventory/host_vars/n5pro_docker/vault\.yml$''',
+]
+regexes = [
+  '''^\$ANSIBLE_VAULT;1\.1;AES256$''',
+  '''^\s*[0-9a-f]{40,}$''',
+]
+
+# Grafana's upstream sample.ini, vendored verbatim as reference documentation.
+# The hit is the commented-out `;secret_key = SW2YcwTIb9zpOOhoPsMm` default that
+# ships in every Grafana release — a published constant, not a credential.
+[[allowlists]]
+description = "Grafana upstream sample.ini commented-out default secret_key"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''containers/observability/data/grafana/config/sample\.ini$''']
+regexes = ['''^SW2YcwTIb9zpOOhoPsMm$''']
+
+# Documentation placeholder for a Proxmox API token secret in ONBOARDING.md.
+[[allowlists]]
+description = "ONBOARDING.md fake Proxmox API token placeholder"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''ONBOARDING\.md$''']
+regexes = ['''^aabbccdd-1122-3344-5566-778899aabbcc$''']

@@ -1,5 +1,7 @@
 # Homelab
 
+[![CI](https://github.com/mutovkin/homelab/actions/workflows/ci.yml/badge.svg)](https://github.com/mutovkin/homelab/actions/workflows/ci.yml)
+
 Multi-machine homelab configuration managed with **Ansible** and **Docker Compose**.
 
 ## Machines
@@ -134,3 +136,7 @@ modinfo zfs | grep parm
 - **Scrub Schedule**: Automated scrubbing enabled for data integrity verification
 - **Compression**: LZ4 compression enabled by default
 - **Snapshots**: Available for all datasets
+
+## License
+
+[MIT](LICENSE) © Serguei Moutovkin

@@ -66,6 +66,24 @@ tasks:
     cmds:
       - ansible-lint
 
+  ansible:syntax:
+    desc: Syntax-check the full deployment playbook (no vault password required)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/site.yml --syntax-check {{.CLI_ARGS}}
+
+  compose:validate:
+    desc: Validate every Docker Compose stack (client-side, no Docker daemon needed)
+    cmds:
+      - ./scripts/validate-compose.sh {{.CLI_ARGS}}
+
+  ci:local:
+    desc: 'Run the CI checks that need no extra tooling (lint + syntax + compose; gitleaks runs in CI)'
+    cmds:
+      - task: ansible:lint
+      - task: ansible:syntax
+      - task: compose:validate
+
   ansible:galaxy:
     desc: Install Ansible Galaxy collections
     dir: '{{.ANSIBLE_DIR}}'
