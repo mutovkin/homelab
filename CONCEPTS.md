@@ -41,9 +41,10 @@ where an unattended upgrade is riskier than running slightly behind.
 
 Being monitor-only is not the absence of opt-in: it is a second label layered on top
 of the opt-in one. A container that only opts out of updating, without also opting
-into scanning, is not watched at all and reports nothing — the silent failure this
-distinction exists to prevent. Scanning and updating are separate decisions, and a
-container must be in scan scope before any update policy applies to it.
+into scanning, is not watched at all and reports nothing — a silent-green failure of
+exactly the kind this distinction exists to prevent. Scanning and updating are
+separate decisions, and a container must be in scan scope before any update policy
+applies to it.
 
 ### Host-only NFS bridge
 A Proxmox bridge (`vmbr2`, `10.99.99.x`) carrying NFS traffic between a Docker host
@@ -54,3 +55,18 @@ The NFS provider (TrueNAS) must be serving its export before a consumer mounts i
 and a Docker `local` NFS volume mounts only at container-create and is not retried —
 so consumers must start after the provider (enforced via Proxmox guest boot order)
 or self-heal once the export becomes reachable.
+
+## Operations
+
+### Silent-green failure
+A failure in which a control is absent or does nothing, while every signal the
+project routinely checks keeps reporting success.
+
+This is the failure shape the project treats as most expensive, because the ordinary
+evidence of health — a task reporting no failures, a service reporting active, a
+config file present and correct on disk — is precisely what a silent-green failure
+produces. Catching one means asserting the artifact that does the work rather than
+the configuration that describes it. The hardest variant is a control that never
+functioned at all: it leaves no regression, no failing run, and no drift, so there is
+nothing to notice and the only defence is verifying a control the first time it is
+introduced.
