@@ -12,7 +12,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede stale PR runs, but never cancel a master run — that would leave
+  # gaps in the branch's check history when merges land back to back.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # 1. Secret scanning — the backstop for a public repo whose secrets posture
@@ -20,11 +22,14 @@ jobs:
   secret-scan:
     name: gitleaks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # Don't leave the job token in .git/config while PR-authored content runs.
+          persist-credentials: false
 
       - name: Install gitleaks
         env:
@@ -49,9 +54,12 @@ jobs:
   ansible-lint:
     name: ansible-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -61,8 +69,10 @@ jobs:
       - name: Install ansible-core and ansible-lint
         run: pip install "ansible-core==2.21.3" "ansible-lint==26.8.0"
 
-      # Required for the `args` rule (module argument-spec validation): without the
-      # real collections installed it cannot resolve module schemas.
+      # ansible-lint would self-install these from ansible/requirements.yml, but
+      # --syntax-check resolves against the normal collections path instead of
+      # ansible-lint's cache. Installing them explicitly gives both steps the same
+      # versions — and the `args` rule needs them to resolve module schemas at all.
       - name: Install galaxy collections
         run: ansible-galaxy collection install -r ansible/requirements.yml
 
@@ -80,6 +90,10 @@ jobs:
         working-directory: ansible
         run: ansible-lint
 
+      # Covers the statically imported roles only.  deploy-services.yml pulls in
+      # roles/services/* through `include_role` with a runtime-templated name, which
+      # is a *dynamic* include that --syntax-check cannot resolve — so a broken task
+      # in a service role passes this step. ansible-lint above is what covers those.
       - name: Playbook syntax check
         working-directory: ansible
         run: ansible-playbook playbooks/site.yml --syntax-check
@@ -89,9 +103,12 @@ jobs:
   compose-validate:
     name: compose config
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Show compose version
         run: docker compose version
@@ -104,15 +121,25 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [secret-scan, ansible-lint, compose-validate]
     if: always()
     steps:
       - name: Check job results
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          # Keep in step with the `needs:` list above. Guards the likelier edit:
+          # a job added (or dropped from `needs`) without updating this gate, which
+          # would otherwise pass on a partial set of results.
+          EXPECTED_JOBS: "3"
         run: |
           set -euo pipefail
           echo "job results: ${RESULTS}"
+          count="$(printf '%s\n' ${RESULTS} | grep -c . || true)"
+          if [ "${count}" -ne "${EXPECTED_JOBS}" ]; then
+            echo "::error::expected ${EXPECTED_JOBS} dependency results, got ${count} (${RESULTS})"
+            exit 1
+          fi
           for result in ${RESULTS}; do
             if [ "${result}" != "success" ]; then
               echo "::error::a required CI job did not succeed (${RESULTS})"

@@ -9,13 +9,18 @@ skip_list:
   - var-naming[no-role-prefix]
 
 # `args` (argument-spec validation against the real module schemas) is tagged
-# "experimental", which means ansible-lint only ever reports it as a non-fatal
-# warning.  Since CI installs the galaxy collections from requirements.yml before
-# linting, the module schemas are always available and a violation is a real bug —
-# `strict` promotes every warning to a failure so the check actually gates.
+# "experimental", so it lands in ansible-lint's default warn_list and only ever
+# reports as a non-fatal warning — removing it from skip_list above would other-
+# wise be decorative.  The collections it needs are always present: ansible-lint
+# self-installs this directory's requirements.yml, and CI installs them again
+# explicitly.  Note `strict` is global, not args-scoped: it also promotes
+# jinja[spacing], fqcn[deep], and any rule a future ansible-lint tags experimental,
+# so a version bump can surface new failures with no change to this repo.
 strict: true
 
-# Vault-encrypted files can't be parsed without the vault password.
+# Vault-encrypted files can't be decrypted while linting (CI deliberately supplies
+# only a placeholder password).  ansible-lint tolerates that, but logs a
+# "Decryption failed" warning per file; excluding them keeps the log clean.
 exclude_paths:
   - inventory/group_vars/all/vault.yml
   - inventory/host_vars/eq12/vault.yml

@@ -67,7 +67,7 @@ tasks:
       - ansible-lint
 
   ansible:syntax:
-    desc: Syntax-check the full deployment playbook (no vault password required)
+    desc: 'Syntax-check the full deployment playbook (needs .vault_password to exist, never decrypts it)'
     dir: '{{.ANSIBLE_DIR}}'
     cmds:
       - ansible-playbook playbooks/site.yml --syntax-check {{.CLI_ARGS}}

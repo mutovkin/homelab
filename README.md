@@ -1,6 +1,6 @@
 # Homelab
 
-[![CI](https://github.com/mutovkin/homelab/actions/workflows/ci.yml/badge.svg)](https://github.com/mutovkin/homelab/actions/workflows/ci.yml)
+[![CI](https://github.com/mutovkin/homelab/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/mutovkin/homelab/actions/workflows/ci.yml)
 
 Multi-machine homelab configuration managed with **Ansible** and **Docker Compose**.
 
