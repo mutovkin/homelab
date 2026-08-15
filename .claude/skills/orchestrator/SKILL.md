@@ -21,7 +21,7 @@ itself.
 | Role | Who | Does | Never does |
 | ---- | --- | ---- | ---------- |
 | Orchestrator | invoking session | wave scheduling, spawning forks, merge tracking, risk-gate pauses, close-out report | file edits, deploys |
-| Coordinator (per issue) | Fable fork (`subagent_type: "fork"`, `isolation: "worktree"`) | drives the loop, adversarial review + re-review, escalates gates | file edits — ALL edits delegated to its Opus worker |
+| Coordinator (per issue) | Fable fork (`subagent_type: "fork"`, `isolation: "worktree"`) | authors the per-issue PLAN, drives the loop, adversarial review + re-review, escalates gates | repo file edits — ALL implementation delegated to its Opus worker (its only writes are its own plan/notes under `.local-notes/`) |
 | Implementer | Opus agent (`model: "opus"`), spawned by coordinator | branch, code, lint, dry-run, backup, apply, verify, docs, commits, PR | merging without a clean coordinator re-review |
 
 Fix rounds continue the SAME Opus agent via SendMessage (it keeps context).
@@ -32,7 +32,26 @@ reviews, demands fixes, and re-reviews the deployed revision.
 
 1. Re-validate the issue against the CURRENT tree (issue text may predate
    restructures). Re-map file paths before implementing.
-2. Opus implements on branch `fix/<issue>-<slug>` off fresh master.
+2. **PLAN (Fable, before any worker exists).** The coordinator writes a
+   detailed spec to `.local-notes/issue-<n>-plan.md` (gitignored):
+   - problem restated against the current tree, with corrected file paths
+   - exact files to change and the approach per file
+   - ordered implementation steps
+   - verification commands WITH expected outputs (static, dry-run, live
+     end-state, idempotency)
+   - acceptance criteria and explicit OUT-OF-SCOPE list
+   - risk gates and backup requirements for this specific change
+   Format: follow `superpowers:writing-plans` (chosen over ce-plan: it is
+   built for a zero-context executor and has no interactive handoff
+   contract), adapted to this stack — the per-task verify cycle is
+   lint → `--check --diff` → apply → end-state assert instead of TDD, and
+   its execution-handoff menu is skipped (this pipeline defines execution).
+   Honor its No Placeholders rule literally.
+   The worker EXECUTES this plan; any deviation needs coordinator sign-off
+   via SendMessage before it lands. Reviewers later check the diff for
+   conformance to the plan, and the plan for having been right.
+3. Opus implements on branch `fix/<issue>-<slug>` off fresh master,
+   following the plan.
 3. `homelab-change-loop` steps 3–6: ansible-lint + syntax-check → `--check
    --diff --limit <host>` → **backup** → apply (locked) → end-state verify +
    second-run idempotency.
