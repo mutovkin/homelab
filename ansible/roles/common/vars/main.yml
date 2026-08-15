@@ -8,7 +8,16 @@
 # while the role kept deploying its config. Operator extras belong in
 # `common_packages` (defaults/main.yml), which stays overridable.
 common_role_required_packages:
-  - rsync # ansible.posix.synchronize — every service deploy
-  - python3-yaml # YAML parsing for modules running on the target
-  - unattended-upgrades # provides /usr/bin/unattended-upgrade, driven by apt-daily-upgrade.timer
-  - apt-listchanges # unattended-upgrades change summaries
+  # Required by ansible.posix.synchronize, used by all 11 service roles.
+  - rsync
+  # Provides /usr/bin/unattended-upgrade, the binary apt-daily-upgrade.timer runs.
+  - unattended-upgrades
+  # Renders the change summaries unattended-upgrades puts in its mail reports.
+  # Currently inert: this role sets no Unattended-Upgrade::Mail, so nothing is
+  # sent. Kept here so enabling mail is a one-line config change, not a
+  # rediscovery that the package was missing.
+  - apt-listchanges
+  # Only a hard requirement for community.docker's `definition:` mode, which
+  # this repo does not use (all 11 docker_compose_v2 calls pass `project_src:`).
+  # Kept as insurance so switching to inline definitions cannot break a deploy.
+  - python3-yaml

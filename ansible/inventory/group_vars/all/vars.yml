@@ -14,10 +14,10 @@ ntp_servers:
   - 0.pool.ntp.org
   - 1.pool.ntp.org
 
-# Base packages live in roles/common/defaults/main.yml (`common_packages`).
-# Setting it here REPLACES that list rather than extending it — doing so is what
-# caused #77 — so prefer editing the role default. Packages the role itself
-# needs are in roles/common/vars/main.yml and cannot be overridden from here.
+# `common_packages` lives in roles/common/defaults/main.yml. Setting it here
+# REPLACES the whole list (this is how #77 happened) — edit the role default
+# instead. Role-required packages are in roles/common/vars/main.yml and cannot
+# be overridden from inventory.
 
 # Docker network defaults
 docker_network_base: "172.20.0.0" # All Docker networks use 172.x.x.x

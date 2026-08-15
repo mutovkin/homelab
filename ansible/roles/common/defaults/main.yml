@@ -3,9 +3,10 @@
 timezone: UTC
 apt_dist_upgrade: false
 
-# Operator extras — safe to override or extend from inventory. Note that
-# overriding this REPLACES the list; the role's own dependencies are held
-# separately in vars/main.yml so they survive any override.
+# Operator extras. Overriding this from inventory REPLACES the whole list —
+# Ansible does not merge — so add packages here rather than in group_vars. The
+# role's own dependencies are held separately in vars/main.yml, out of reach of
+# any inventory override.
 common_packages:
   - curl
   - wget

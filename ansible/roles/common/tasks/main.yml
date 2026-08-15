@@ -18,6 +18,52 @@
     name: "{{ (common_role_required_packages + common_packages) | unique }}"
     state: present
 
+# --- Role dependency guard ---
+# These packages are load-bearing for this role and for every service deploy,
+# and their absence used to be invisible: #77 shipped the unattended-upgrades
+# config to all four hosts, with apt-daily-upgrade.timer enabled and active,
+# while /usr/bin/unattended-upgrade did not exist — silent, fleet-wide, green.
+#
+# Inventory can no longer override the list away (see vars/main.yml), so this
+# guard is belt-and-braces: it still catches a renamed package, a distro where
+# the name differs, an apt that reported success without installing, and any
+# future refactor that reintroduces an override path.
+
+- name: Gather installed package facts
+  ansible.builtin.package_facts:
+    manager: apt
+  check_mode: false
+
+- name: Determine which role-required packages are missing
+  ansible.builtin.set_fact:
+    common_missing_required: "{{ common_role_required_packages | difference(ansible_facts.packages.keys() | list) }}"
+
+- name: Assert role-required packages are installed
+  ansible.builtin.assert:
+    that:
+      # Non-empty guard: `-e common_role_required_packages=[]` outranks even
+      # role vars, and would make the emptiness check below vacuously true.
+      - common_role_required_packages | length > 0
+      - common_missing_required | length == 0
+    fail_msg: >-
+      Missing role-required package(s): {{ common_missing_required | join(', ') }}.
+      The unattended-upgrades config and every synchronize-based service deploy
+      are inert without them (#77).
+  # Skipped under --check because the install above is a no-op there: a host that
+  # legitimately does not have them yet should see them reported as pending, not
+  # abort the dry-run. The check-mode task below reports instead of failing.
+  when: not ansible_check_mode
+
+- name: Report missing role-required packages (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      CHECK MODE — missing role-required package(s):
+      {{ common_missing_required | join(', ') }}. A live run installs them; on an
+      already-converged host a non-empty list here means #77 has regressed.
+  when:
+    - ansible_check_mode
+    - common_missing_required | length > 0
+
 - name: Configure SSH authorized keys from key files
   ansible.posix.authorized_key:
     user: root
@@ -46,23 +92,23 @@
     - ssh_hardening
 
 # --- Automatic security updates ---
-# Guard: the config files below are inert without their packages — that was #77,
-# where every host carried the config, the timer was enabled and active, and
-# /usr/bin/unattended-upgrade did not exist. Fail loudly instead of green-lying.
+# Three things must all hold, and each has failed silently before: the binary
+# must exist, the config must match a real origin, and the timer must run.
 
-- name: Gather installed package facts
-  ansible.builtin.package_facts:
-    manager: apt
+- name: Stat the unattended-upgrade binary
+  ansible.builtin.stat:
+    path: /usr/bin/unattended-upgrade
+  register: unattended_upgrade_bin
   check_mode: false
 
-- name: Assert role-required packages are installed
+- name: Assert the unattended-upgrade binary is present
   ansible.builtin.assert:
-    that: item in ansible_facts.packages
+    that: unattended_upgrade_bin.stat.exists
     fail_msg: >-
-      Required package '{{ item }}' is not installed. The common role depends on
-      it (see common_role_required_packages); do not override it away.
-  loop: "{{ common_role_required_packages }}"
-  # In check mode nothing was actually installed, so this state cannot hold yet.
+      /usr/bin/unattended-upgrade is missing — this is the binary
+      apt-daily-upgrade.timer actually executes, and the config below is inert
+      without it. Package state alone is not proof: a half-configured (iU/iF)
+      package still registers as installed.
   when: not ansible_check_mode
 
 - name: Enable unattended-upgrades periodic settings
@@ -75,15 +121,29 @@
       APT::Periodic::AutocleanInterval "7";
     mode: "0644"
 
+# Origins-Pattern is matched against the archive's own Release metadata, so the
+# codenames below are not cosmetic. Verified live against /var/lib/apt/lists:
+#
+#   eq12, n5pro   (trixie)   Origin=Debian Label=Debian-Security Codename=trixie-security
+#   eq12_docker   (bookworm) Origin=Debian Label=Debian-Security Codename=bookworm-security
+#   n5pro_docker  (noble)    Origin=Ubuntu Label=Ubuntu          Codename=noble
+#
+# Debian's security archive has published Codename=<release>-security since
+# bullseye, so a bare ${distro_codename} matches nothing there — which is why
+# the -security form is listed first. The bare form is kept for pre-bullseye
+# releases, and Debian's own shipped config carries both spellings for the same
+# reason. Ubuntu keeps the bare codename and labels its security pocket "Ubuntu",
+# which is what the noble host matches on.
 - name: Configure unattended-upgrades policy (security + stable updates, no auto-reboot)
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/50unattended-upgrades
     content: |
       // Managed by Ansible — security + stable automatic upgrades
       Unattended-Upgrade::Origins-Pattern {
+          "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
           "origin=Debian,codename=${distro_codename},label=Debian-Security";
           "origin=Ubuntu,codename=${distro_codename},label=Ubuntu";
-          "origin=Ubuntu,codename=${distro_codename},label=Ubuntu-Security";
+          "origin=Ubuntu,codename=${distro_codename}-security,label=Ubuntu";
       };
       Unattended-Upgrade::Package-Blacklist {};
       Unattended-Upgrade::AutoFixInterruptedDpkg "true";
@@ -91,6 +151,20 @@
       Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
       Unattended-Upgrade::Automatic-Reboot "false";
     mode: "0644"
+
+# The config above is only ever acted on by this timer; #77 had it enabled and
+# active while the binary was absent, so the role now owns both halves rather
+# than trusting the distro preset.
+- name: Ensure the apt daily timers are enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ apt_timer }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+  loop_control:
+    loop_var: apt_timer
 
 - name: Apply pending security upgrades
   ansible.builtin.apt:
