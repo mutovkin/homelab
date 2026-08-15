@@ -1,0 +1,14 @@
+---
+# Packages the common role's own tasks depend on.
+#
+# These live in vars/ rather than defaults/ deliberately: role vars outrank
+# inventory group_vars and host_vars, so no inventory file can drop them. That
+# is the whole point — #77 was caused by group_vars/all silently overriding the
+# role's defaults-level package list, leaving unattended-upgrades uninstalled
+# while the role kept deploying its config. Operator extras belong in
+# `common_packages` (defaults/main.yml), which stays overridable.
+common_role_required_packages:
+  - rsync # ansible.posix.synchronize — every service deploy
+  - python3-yaml # YAML parsing for modules running on the target
+  - unattended-upgrades # provides /usr/bin/unattended-upgrade, driven by apt-daily-upgrade.timer
+  - apt-listchanges # unattended-upgrades change summaries

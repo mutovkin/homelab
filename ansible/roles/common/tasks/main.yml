@@ -46,9 +46,9 @@
     - ssh_hardening
 
 # --- Automatic security updates ---
-# Guard: the config files below are inert without their packages. An inventory
-# override of `common_packages` once silently dropped them fleet-wide while
-# every play stayed green (#77) — fail loudly instead.
+# Guard: the config files below are inert without their packages — that was #77,
+# where every host carried the config, the timer was enabled and active, and
+# /usr/bin/unattended-upgrade did not exist. Fail loudly instead of green-lying.
 
 - name: Gather installed package facts
   ansible.builtin.package_facts:
