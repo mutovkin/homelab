@@ -1,0 +1,58 @@
+# gitleaks configuration — see .github/workflows/ci.yml (secret-scan job).
+#
+# The full upstream ruleset is kept; this file only adds narrowly-scoped
+# allowlists for the known false positives in this repo.
+#
+# CAREFUL — `paths` is not a filter you can safely `AND` with content.  In a
+# *global* allowlist (one without `targetRules`) gitleaks evaluates `paths` as a
+# whole-file skip before any rule runs, so `condition = "AND"` and `regexes` are
+# never consulted and the whole file becomes invisible.  (Observable with
+# `gitleaks dir`; `gitleaks git`, which CI runs, happens not to take that path —
+# relying on that difference would be a trap.)  So:
+#   * an allowlist that must cover a *class* of content is content-only, no paths;
+#   * an allowlist that names a `paths` entry also carries `targetRules`, which
+#     forces per-finding evaluation and keeps every other rule live on that file.
+
+title = "homelab"
+
+[extend]
+useDefault = true
+
+# ansible-vault ciphertext: an `$ANSIBLE_VAULT;1.1;AES256` header followed by
+# 80-character hex lines.  PRE-EMPTIVE, not a fix for an observed failure — the
+# pinned ruleset reports zero findings in the five committed vault.yml files, so
+# deleting this block does not turn CI red today.  It is here so a future entropy
+# rule (or a `useDefault` ruleset change) can't turn five encrypted files into five
+# CI failures at once.  Deliberately content-only, not path-scoped — see above.
+# Both regexes anchor the *whole* line, so `some_key: <secret>` never matches and a
+# plaintext secret pasted into a vault.yml is still reported.
+[[allowlists]]
+description = "ansible-vault encrypted payloads (header + hex ciphertext lines)"
+regexTarget = "line"
+# Exactly 80 — the width ansible-vault wraps ciphertext to.  Not `{64,}`, which
+# would also exempt a bare `openssl rand -hex 32` line, i.e. exactly how a real
+# ADMIN_TOKEN or SECRET_KEY gets generated.  If the vault format ever changes width
+# this stops matching, which fails safe: CI goes red rather than quiet.
+regexes = [
+  '''^\$ANSIBLE_VAULT;1\.1;AES256$''',
+  '''^[0-9a-f]{80}$''',
+]
+
+# Grafana's upstream sample.ini, vendored verbatim as reference documentation.
+# Two hits (lines 360 and 2118), both the commented-out
+# `;secret_key = SW2YcwTIb9zpOOhoPsMm` default that ships in every Grafana
+# release — a published constant, not a credential.
+[[allowlists]]
+description = "Grafana upstream sample.ini commented-out default secret_key"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''containers/observability/data/grafana/config/sample\.ini$''']
+regexes = ['''^SW2YcwTIb9zpOOhoPsMm$''']
+
+# Documentation placeholder for a Proxmox API token secret in ONBOARDING.md.
+[[allowlists]]
+description = "ONBOARDING.md fake Proxmox API token placeholder"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''ONBOARDING\.md$''']
+regexes = ['''^aabbccdd-1122-3344-5566-778899aabbcc$''']

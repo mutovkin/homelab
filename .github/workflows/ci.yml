@@ -1,0 +1,148 @@
+---
+name: CI
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+
+# Read-only by default; no job here needs to write to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Supersede stale PR runs, but never cancel a master run — that would leave
+  # gaps in the branch's check history when merges land back to back.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # 1. Secret scanning — the backstop for a public repo whose secrets posture
+  #    otherwise rests entirely on .gitignore discipline plus ansible-vault.
+  secret-scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Don't leave the job token in .git/config while PR-authored content runs.
+          persist-credentials: false
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks gitleaks.tar.gz
+
+      # --log-opts=--all scans every commit reachable from any ref, not just the
+      # diff, so a secret that was committed and later "removed" still fails.
+      # --redact keeps any hit out of this public repo's build logs.
+      - name: Scan full git history
+        run: gitleaks git --log-opts=--all --config .gitleaks.toml --redact --verbose
+
+  # 2. Ansible static analysis.  Nothing here decrypts a vault or touches a host.
+  ansible-lint:
+    name: ansible-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install ansible-core and ansible-lint
+        run: pip install "ansible-core==2.21.3" "ansible-lint==26.8.0"
+
+      # ansible-lint would self-install these from ansible/requirements.yml, but
+      # --syntax-check resolves against the normal collections path instead of
+      # ansible-lint's cache. Installing them explicitly gives both steps the same
+      # versions — and the `args` rule needs them to resolve module schemas at all.
+      - name: Install galaxy collections
+        run: ansible-galaxy collection install -r ansible/requirements.yml
+
+      # ansible.cfg points at ../.vault_password, which is gitignored and must never
+      # reach CI.  Neither ansible-lint nor --syntax-check decrypts anything, but
+      # ansible refuses to start when the configured password file is missing, so
+      # hand it a throwaway placeholder.
+      - name: Provide a placeholder vault password file
+        run: |
+          set -euo pipefail
+          printf 'ci-placeholder-never-decrypts-anything\n' > "${RUNNER_TEMP}/vault-password"
+          echo "ANSIBLE_VAULT_PASSWORD_FILE=${RUNNER_TEMP}/vault-password" >> "${GITHUB_ENV}"
+
+      - name: ansible-lint
+        working-directory: ansible
+        run: ansible-lint
+
+      # Covers the statically imported roles only.  deploy-services.yml pulls in
+      # roles/services/* through `include_role` with a runtime-templated name, which
+      # is a *dynamic* include that --syntax-check cannot resolve — so a broken task
+      # in a service role passes this step. ansible-lint above is what covers those.
+      - name: Playbook syntax check
+        working-directory: ansible
+        run: ansible-playbook playbooks/site.yml --syntax-check
+
+  # 3. Compose stacks parse, interpolate and schema-validate.  Client-side only —
+  #    `config -q` never contacts a Docker daemon.
+  compose-validate:
+    name: compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show compose version
+        run: docker compose version
+
+      - name: Validate every compose stack
+        run: ./scripts/validate-compose.sh
+
+  # Single required-status target for branch protection: green only when all three
+  # jobs above are green (a skipped or failed dependency fails this job).
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [secret-scan, ansible-lint, compose-validate]
+    if: always()
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+          # Keep in step with the `needs:` list above. Guards the likelier edit:
+          # a job added (or dropped from `needs`) without updating this gate, which
+          # would otherwise pass on a partial set of results.
+          EXPECTED_JOBS: "3"
+        run: |
+          set -euo pipefail
+          echo "job results: ${RESULTS}"
+          count="$(printf '%s\n' ${RESULTS} | grep -c . || true)"
+          if [ "${count}" -ne "${EXPECTED_JOBS}" ]; then
+            echo "::error::expected ${EXPECTED_JOBS} dependency results, got ${count} (${RESULTS})"
+            exit 1
+          fi
+          for result in ${RESULTS}; do
+            if [ "${result}" != "success" ]; then
+              echo "::error::a required CI job did not succeed (${RESULTS})"
+              exit 1
+            fi
+          done
