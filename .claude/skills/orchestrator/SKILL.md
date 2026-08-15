@@ -56,7 +56,10 @@ reviews, demands fixes, and re-reviews the deployed revision.
 
 - **Worktree bootstrap** (gitignored files are absent in worktrees):
   `export ANSIBLE_VAULT_PASSWORD_FILE=<main-checkout>/.vault_password`
-  `export ANSIBLE_COLLECTIONS_PATH=<main-checkout>/ansible/.ansible/collections`
+  Do NOT export `ANSIBLE_COLLECTIONS_PATH` to `<main-checkout>/ansible/.ansible/collections`
+  — that directory holds ansible-lint's auto-generated MOCK module stubs (empty
+  argument_spec) and breaks real playbook runs. Real collections resolve from
+  `~/.ansible/collections` by default; leave the path untouched.
 - **Per-host apply lock** — every live apply is wrapped:
   `flock /tmp/homelab-deploy-<host>.lock ansible-playbook … --limit <host>`
 - **Backups before every live apply:** ZFS snapshot of the target CT's /data
