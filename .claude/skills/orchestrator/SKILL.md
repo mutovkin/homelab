@@ -21,7 +21,7 @@ itself.
 | Role | Who | Does | Never does |
 | ---- | --- | ---- | ---------- |
 | Orchestrator | invoking session | wave scheduling, spawning forks, merge tracking, risk-gate pauses, close-out report | file edits, deploys |
-| Coordinator (per issue) | Fable fork (`subagent_type: "fork"`, `isolation: "worktree"`) | authors the per-issue PLAN, drives the loop, adversarial review + re-review, escalates gates | repo file edits — ALL implementation delegated to its Opus worker (its only writes are its own plan/notes under `.local-notes/`) |
+| Coordinator (per issue) | FRESH Fable agent (`model: "fable"`, `isolation: "worktree"`) — briefed with the issue, the skill, and pointers to CLAUDE.md gotchas + `docs/solutions/`. Fork (`subagent_type: "fork"`) only when decisive knowledge exists solely in the invoking session's conversation; the PLAN step + detailed issues + compounded docs normally make forking unnecessary and it drags the whole session prefix through every request | authors the per-issue PLAN, drives the loop, adversarial review + re-review, escalates gates | repo file edits — ALL implementation delegated to its Opus worker (its only writes are its own plan/notes under `.local-notes/`) |
 | Implementer | Opus agent (`model: "opus"`), spawned by coordinator | branch, code, lint, dry-run, backup, apply, verify, docs, commits, PR | merging without a clean coordinator re-review |
 
 Fix rounds continue the SAME Opus agent via SendMessage (it keeps context).
