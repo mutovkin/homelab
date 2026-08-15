@@ -14,16 +14,9 @@ ntp_servers:
   - 0.pool.ntp.org
   - 1.pool.ntp.org
 
-# Base packages to install on all hosts
-common_packages:
-  - curl
-  - wget
-  - htop
-  - vim
-  - jq
-  - unzip
-  - gnupg
-  - ca-certificates
+# Base packages: see `common_packages` in roles/common/defaults/main.yml.
+# Override here only to ADD extras — role-required packages live in
+# `common_role_required_packages` and are always installed (#77).
 
 # Docker network defaults
 docker_network_base: "172.20.0.0" # All Docker networks use 172.x.x.x

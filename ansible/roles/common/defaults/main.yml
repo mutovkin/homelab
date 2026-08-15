@@ -2,6 +2,16 @@
 # defaults for common role
 timezone: UTC
 apt_dist_upgrade: false
+
+# Packages this role's own tasks depend on. Deliberately NOT part of
+# `common_packages` so an inventory-level override cannot drop them.
+common_role_required_packages:
+  - rsync # ansible.posix.synchronize (every service deploy)
+  - python3-yaml # community.general / docker modules
+  - unattended-upgrades # the automatic security updates configured below
+  - apt-listchanges
+
+# Operator extras — safe to override/extend in inventory group_vars.
 common_packages:
   - curl
   - wget
@@ -11,7 +21,3 @@ common_packages:
   - unzip
   - gnupg
   - ca-certificates
-  - rsync
-  - python3-yaml
-  - unattended-upgrades
-  - apt-listchanges

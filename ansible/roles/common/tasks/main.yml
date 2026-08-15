@@ -15,7 +15,7 @@
 
 - name: Install common packages
   ansible.builtin.apt:
-    name: "{{ common_packages }}"
+    name: "{{ (common_role_required_packages + common_packages) | unique }}"
     state: present
 
 - name: Configure SSH authorized keys from key files
@@ -46,6 +46,24 @@
     - ssh_hardening
 
 # --- Automatic security updates ---
+# Guard: the config files below are inert without their packages. An inventory
+# override of `common_packages` once silently dropped them fleet-wide while
+# every play stayed green (#77) — fail loudly instead.
+
+- name: Gather installed package facts
+  ansible.builtin.package_facts:
+    manager: apt
+  check_mode: false
+
+- name: Assert role-required packages are installed
+  ansible.builtin.assert:
+    that: item in ansible_facts.packages
+    fail_msg: >-
+      Required package '{{ item }}' is not installed. The common role depends on
+      it (see common_role_required_packages); do not override it away.
+  loop: "{{ common_role_required_packages }}"
+  # In check mode nothing was actually installed, so this state cannot hold yet.
+  when: not ansible_check_mode
 
 - name: Enable unattended-upgrades periodic settings
   ansible.builtin.copy:
