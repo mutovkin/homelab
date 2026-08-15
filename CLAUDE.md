@@ -124,6 +124,9 @@ Hard-won lessons — check here before debugging from scratch.
   what puts a container in scope; `monitor-only=true` on its own is inert and the container is
   never scanned or reported. Verify by comparing `scanned=N` against the labelled count.
   See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md).
+- **Ansible variable precedence.** Inventory `group_vars` REPLACE role defaults (lists never
+  merge). Role-critical packages go in `roles/<role>/vars/main.yml`, which outranks inventory.
+  See [docs/solutions/security-issues/unattended-upgrades-silently-inert-fleet-wide.md](docs/solutions/security-issues/unattended-upgrades-silently-inert-fleet-wide.md).
 - **ISO/large downloads.** `get_url` can re-validate against the server even when the
   file exists, failing if the upstream version was pulled. Guard downloads with an explicit
   `stat` check and `when: not <stat>.stat.exists`. Pin versions in one place; bump
