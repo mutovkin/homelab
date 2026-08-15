@@ -60,8 +60,16 @@ reviews, demands fixes, and re-reviews the deployed revision.
   — that directory holds ansible-lint's auto-generated MOCK module stubs (empty
   argument_spec) and breaks real playbook runs. Real collections resolve from
   `~/.ansible/collections` by default; leave the path untouched.
-- **Per-host apply lock** — every live apply is wrapped:
-  `flock /tmp/homelab-deploy-<host>.lock ansible-playbook … --limit <host>`
+- **Per-host apply lock** — `flock` does NOT exist on macOS (the control
+  machine); use a portable mkdir spinlock around every live apply:
+  ```sh
+  L=/tmp/homelab-deploy-<host>.lock.d
+  until mkdir "$L" 2>/dev/null; do sleep 5; done
+  trap 'rmdir "$L"' EXIT
+  ansible-playbook … --limit <host>
+  ```
+  Never pipe the apply through `tail`/`grep` — pipes mask the exit code; write
+  to a log file and check `$?` explicitly.
 - **Backups before every live apply:** ZFS snapshot of the target CT's /data
   subvol on its Proxmox host (`zfs snapshot <dataset>@pre-issue<NN>-<ts>`;
   discover dataset via `pct config <vmid>`); plus `pg_dumpall` to
