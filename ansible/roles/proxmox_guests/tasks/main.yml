@@ -336,11 +336,17 @@
 # went unnoticed in the first place. `qm set` on a running VM would also create
 # pending changes that make `qm config` disagree with the running guest and
 # poison this very comparison.
+# `failed_when: false`: a guest listed in host_vars but not yet created has no
+# config to read. That is the normal state during a dry run of a NEW guest —
+# provisioning is skipped in --check, so `qm config <new-vmid>` exits non-zero.
+# The documented "dry-run first" workflow must not blow up on it; the drift
+# compute below skips those entries and lets provisioning own creation.
 - name: Read current VM configuration
   become: true
   ansible.builtin.command: "qm config {{ item.vmid }}"
   register: vm_config_raw
   changed_when: false
+  failed_when: false
   check_mode: false  # read-only; must run in --check so drift is reported, not skipped
   loop: "{{ proxmox_vms }}"
   loop_control:
@@ -351,6 +357,7 @@
   ansible.builtin.command: "qm status {{ item.vmid }}"
   register: vm_status_raw
   changed_when: false
+  failed_when: false
   check_mode: false  # read-only; gates whether drift may be applied at all
   loop: "{{ proxmox_vms }}"
   loop_control:
@@ -369,13 +376,21 @@
     drift_fields: >-
       {{ ([] if live_cores | int == want_cores | int else ['cores'])
          + ([] if live_memory | int == want_memory | int else ['memory']) }}
-    live_status: "{{ vm_status_raw.results | selectattr('item.vmid', 'equalto', item.item.vmid) | map(attribute='stdout') | join }}"
+    status_result: "{{ vm_status_raw.results | selectattr('item.vmid', 'equalto', item.item.vmid) | list }}"
+    status_rc: "{{ status_result | map(attribute='rc') | join }}"
+    status_out: "{{ status_result | map(attribute='stdout') | join }}"
     drift_entry:
       vmid: "{{ item.item.vmid }}"
       name: "{{ item.item.name }}"
       # 'yes'/'no' rather than a bool: set_fact round-trips values through
       # templating, and a plain string compares unambiguously downstream.
-      running: "{{ 'yes' if live_status is search('running') else 'no' }}"
+      #
+      # Fails CLOSED. 'no' (safe to mutate) requires positive proof: the status
+      # read succeeded AND reported exactly `status: stopped`. Everything else —
+      # paused, suspended, io-error, prelaunch, a failed read, an empty string —
+      # is 'yes' and gets refused. Asking "is it running?" would have inverted
+      # that and handed a paused VM straight to `qm set`.
+      running: "{{ 'no' if (status_rc == '0' and status_out is search('(?m)^status: stopped')) else 'yes' }}"
       args: >-
         {{ ((['-cores ' ~ want_cores] if 'cores' in drift_fields else [])
             + (['-memory ' ~ want_memory] if 'memory' in drift_fields else [])) | join(' ') }}
@@ -385,7 +400,11 @@
   loop: "{{ vm_config_raw.results | default([]) }}"
   loop_control:
     label: "VM {{ item.item.vmid }} ({{ item.item.name }})"
-  when: drift_fields | length > 0
+  when:
+    # rc first: a non-existent guest has no config to parse, and drift_fields
+    # must never be evaluated against a stderr blob.
+    - item.rc == 0
+    - drift_fields | length > 0
 
 - name: Report VM cores/memory drift
   ansible.builtin.debug:
@@ -396,10 +415,10 @@
 
 # Runs in check mode too, so `task infra:hosts:check` reports the conflict
 # instead of a silently green play.
-- name: Refuse to change cores/memory on a running VM
+- name: Refuse to change cores/memory on a VM that is not confirmed stopped
   ansible.builtin.fail:
     msg: >-
-      Refusing to change a running production VM.
+      Refusing to change a VM that is not confirmed stopped.
       {% for e in vm_resource_drift | default([]) | selectattr('running', 'equalto', 'yes') | list %}
       VM {{ e.vmid }} ({{ e.name }}): {{ e.human }}.
       {% endfor %}
@@ -549,11 +568,15 @@
 # with no restart. Note the sharp edge — lowering memory below what the
 # container is currently using takes effect immediately and can OOM its
 # workload. That is a deliberate operator action; the role does not guard it.
+# `failed_when: false` for the same reason as the VM config read above: a CT
+# added to host_vars but not yet created has nothing to read, and a dry run of
+# that addition must report the pending create rather than fail the play.
 - name: Read current LXC configuration
   become: true
   ansible.builtin.command: "pct config {{ item.vmid }}"
   register: lxc_config_raw
   changed_when: false
+  failed_when: false
   check_mode: false  # read-only; must run in --check so drift is reported, not skipped
   loop: "{{ proxmox_lxcs }}"
   loop_control:
@@ -584,7 +607,11 @@
   loop: "{{ lxc_config_raw.results | default([]) }}"
   loop_control:
     label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
-  when: drift_fields | length > 0
+  when:
+    # rc first: a non-existent CT has no config to parse, and drift_fields must
+    # never be evaluated against a stderr blob.
+    - item.rc == 0
+    - drift_fields | length > 0
 
 - name: Report LXC cores/memory drift
   ansible.builtin.debug:
