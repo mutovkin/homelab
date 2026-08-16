@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (roles/services/postgresql) — restricts the published
+# PostgreSQL/pgAdmin ports to approved sources (#79).
+#
+# Docker DNATs published ports in PREROUTING (dstnat, priority -100) and the
+# traffic is answered on the FORWARD path (or by docker-proxy on INPUT) — an
+# input-hook chain never sees the DNAT'd flows, and post-DNAT the pgadmin port
+# is 80, not 10080. This table therefore hooks PREROUTING at priority -150
+# (before dstnat), where the ORIGINAL dports are still visible and both the
+# DNAT/forward and proxy/input paths are covered.
+#
+# Fail-open by construction
+# (docs/solutions/conventions/scoped-nftables-on-live-host.md): single-purpose
+# table, policy accept, every non-target packet exits on the first rule, only
+# the target dports are ever dropped, and unloading the table (ExecStop, stray
+# flush) leaves the ports OPEN — never the host unreachable.
+#
+# The allowlist is IPv4-only. Docker also publishes these ports on [::] and the
+# host has a global ULA IPv6, so IPv6 traffic to these ports is dropped
+# wholesale below; add `ip6 saddr` accepts above that rule if an IPv6 client is
+# ever needed.
+add table inet postgres_fw
+delete table inet postgres_fw
+table inet postgres_fw {
+  chain prerouting {
+    type filter hook prerouting priority -150; policy accept;
+    # FIRST + terminal: everything not aimed at the published ports exits here.
+    tcp dport != { {{ postgres_firewall.ports | join(', ') }} } accept
+    iif "lo" accept
+    # br_netfilter is enabled (docker), so bridged container<->container frames
+    # traverse this hook too — anything not addressed to the host's LAN address
+    # (e.g. joplin -> postgres on 172.21.0.0/24) is out of scope.
+    ip daddr != {{ postgres_firewall.host_addr }} accept
+    ip saddr 127.0.0.1 accept
+    # Containers reaching a published port via the host address (hairpin).
+    ip saddr 172.16.0.0/12 accept
+{% for src in postgres_firewall.allowed_sources %}
+    ip saddr {{ src }} accept
+{% endfor %}
+    # No IPv6 allowlist: drop the published ports over IPv6 entirely.
+    meta nfproto ipv6 tcp dport { {{ postgres_firewall.ports | join(', ') }} } drop
+    # Any other source reaching the published ports is dropped.
+    ip daddr {{ postgres_firewall.host_addr }} tcp dport { {{ postgres_firewall.ports | join(', ') }} } drop
+  }
+}

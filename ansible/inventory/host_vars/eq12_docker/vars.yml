@@ -22,3 +22,14 @@ docker_networks:
   portainer: "172.23.0.0/24"
   vaultwarden: "172.24.0.0/24"
   watchtower: "172.25.0.0/24"
+
+# Scoped fail-open nftables allowlist for the postgresql role's published
+# ports (#79). Sources NOT listed are dropped for these ports only; loopback
+# and the docker bridges (172.16.0.0/12) are always allowed. Keep in parity
+# with the LAN entries in roles/services/postgresql/files/config/pg_hba.conf.
+postgres_firewall:
+  host_addr: 192.168.25.15
+  ports: [5432, 10080]
+  allowed_sources:
+    - 192.168.25.20/32  # NPM LXC (CT 104)
+    - 192.168.48.0/24   # operator workstation subnet

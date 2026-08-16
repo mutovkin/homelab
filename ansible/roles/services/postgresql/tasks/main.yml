@@ -1,4 +1,57 @@
 ---
+# --- Firewall: restrict the published ports (5432/10080) to approved sources ---
+# Unlike the nut convention's input hook, docker-published ports must be
+# filtered in PREROUTING before Docker's dstnat — see the header comment in
+# templates/postgres-firewall.nft.j2 (#79). Same fail-open shape otherwise.
+# postgres_firewall (host_addr/ports/allowed_sources) comes from host_vars;
+# deliberately NO defaults — a host that deploys this role without defining it
+# must fail loudly, not silently deploy unprotected.
+- name: Assert postgres firewall allowlist is defined and has no wildcards
+  ansible.builtin.assert:
+    that:
+      - postgres_firewall.allowed_sources | length > 0
+      - postgres_firewall.allowed_sources | intersect(['0.0.0.0/0', '::/0', '0.0.0.0', '::', '*']) | length == 0
+    fail_msg: >-
+      postgres_firewall.allowed_sources must list specific sources — a wildcard
+      or empty list would re-open the exposure #79 closes.
+    success_msg: "postgres firewall allowlist is scoped."
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+
+- name: Ensure nftables include dir exists
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy postgres firewall ruleset
+  ansible.builtin.template:
+    src: postgres-firewall.nft.j2
+    dest: /etc/nftables.d/postgres-firewall.nft
+    mode: "0644"
+    validate: "/usr/sbin/nft -c -f %s"
+  notify: reload-postgres-firewall
+
+- name: Deploy postgres firewall systemd unit
+  ansible.builtin.template:
+    src: postgres-firewall.service.j2
+    dest: /etc/systemd/system/postgres-firewall.service
+    mode: "0644"
+  notify: reload-postgres-firewall
+
+- name: Enable and start postgres firewall
+  ansible.builtin.systemd:
+    name: postgres-firewall.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  # In --check the unit file isn't actually written, so enable/start can't
+  # find it. Skip this one task in check mode; a real run writes it first.
+  when: not ansible_check_mode
+
 # Pre-create the shared network as EXTERNAL so it persists independent of this
 # compose project — when watchtower recreates postgres/pgadmin they reattach to
 # the still-present network instead of coming up detached (#45). Idempotent: a

@@ -1,0 +1,16 @@
+[Unit]
+Description=PostgreSQL/pgAdmin published-port firewall (Ansible-managed nftables table inet postgres_fw)
+After=nftables.service network-pre.target
+Wants=network-pre.target
+# Ordering only, not a dependency (fail-open): if this unit fails, docker
+# still starts and the ports are open — never the host unreachable.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/postgres-firewall.nft
+ExecStop=/usr/sbin/nft delete table inet postgres_fw
+
+[Install]
+WantedBy=multi-user.target
