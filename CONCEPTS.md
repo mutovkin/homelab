@@ -99,7 +99,19 @@ The dangerous property is that the inert copy is usually the more discoverable o
 sits beside the file it appears to configure — so edits land on it and change nothing
 while looking correct. A mirror pair is the most common cause of a silent-green failure
 here. Collocation is the structural fix: when a service's definition has exactly one
-home, there is no second copy to drift.
+home, there is no second copy to drift. Collocation does not, however, make a config
+authoritative — the surviving copy can still be an inert mount.
+
+### Inert mount
+A config file correctly mounted into a container at the path it appears to configure,
+which the application nonetheless never reads because nothing points the process at it.
+
+Unlike a mirror pair there is no second copy to blame: the file is present, correct, and
+in the right place, so every filesystem- and container-level check passes. Whether a
+mount is live is an application decision rather than a filesystem fact, and a service can
+honour one mounted config while ignoring its sibling in the same container. The only test
+is asking the running process which file it opened — deploying a config and wiring it are
+separate acts, and only the second one changes behaviour.
 
 ### Container lineage
 Which tool most recently created a running container — the project's primary predictor
