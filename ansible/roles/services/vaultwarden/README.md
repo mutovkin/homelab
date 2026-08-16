@@ -45,13 +45,18 @@ These are the controls the role actually enforces, not aspirations:
 
 - **`ADMIN_TOKEN` is an Argon2id PHC hash, never the raw token (#81).** The container
   only ever holds `vault_vaultwarden_admin_token_hash` (Argon2id, t=3, m=65540 KiB, p=4 —
-  vaultwarden's own `vaultwarden hash` ADMIN preset), so `docker inspect`, `printenv`, the
-  on-disk `.env`, and any backup of them expose a value that verifies a login but cannot
-  produce one. You still log in to `/admin` with the *plain* token, which lives only in
-  `vault_vaultwarden_admin_token_plain` in the encrypted vault and is templated nowhere.
-  To rotate: change the plain var, re-hash it, and update the hash var in the same vault
-  edit. The hash is single-quoted in `templates/env.j2` because compose's dotenv parser
-  would otherwise interpolate the `$`-delimited PHC segments and silently truncate it.
+  vaultwarden's own `vaultwarden hash` default `bitwarden` preset), so `docker inspect`,
+  `printenv`, the on-disk `.env`, and any backup of them expose a value that verifies a
+  login but cannot produce one. You still log in to `/admin` with the *plain* token, which
+  lives only in `vault_vaultwarden_admin_token_plain` in the encrypted vault and is
+  templated nowhere. To rotate: change the plain var, re-hash it
+  (`docker run --rm -it vaultwarden/server:latest /vaultwarden hash`, storing the
+  `$argon2id$...` value without the `ADMIN_TOKEN='...'` wrapper it prints), and update the
+  hash var in the same vault edit. `tasks/main.yml` asserts the value is a PHC string
+  before deploying, because vaultwarden accepts a non-PHC value as a *plaintext* token
+  rather than rejecting it. Every value in `templates/env.j2` is single-quoted: compose's
+  dotenv parser interpolates `$VAR` in unquoted values, which would silently truncate the
+  `$`-delimited PHC segments.
 - **tcp/8086 is restricted to the reverse proxy and operator workstations (#81).** The
   port stays published — NPM runs in a separate LXC and reaches it over the LAN — but the
   role ships a fail-open nftables table `inet vaultwarden_fw` that drops that one port for
@@ -59,16 +64,20 @@ These are the controls the role actually enforces, not aspirations:
   hooks `prerouting` at priority -150, before Docker's DNAT at -100, because an input-hook
   rule is *invisible* to docker-published ports; see
   [docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md](../../../../docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md).
-  Port and allowlist come from `defaults/main.yml`. Every deploy probes the kernel for the
-  table, heals a missing one via handler, and hard-asserts — a `RemainAfterExit` oneshot
-  reports "active" even after an external `flush ruleset`, so unit state proves nothing.
+  Port and allowlist come from `defaults/main.yml`. Every real (non-check) deploy probes
+  the kernel for the table, heals a missing one via handler, and hard-asserts — a
+  `RemainAfterExit` oneshot reports "active" even after an external `flush ruleset`, so
+  unit state proves nothing.
 - **Pre-upgrade backups are gated on the vault data, not the container (#107).** Whenever
   `/data/vaultwarden` holds data and the deploy would hand it to a different image —
   including a container-absent start after a `docker rm` — the role stops the container
   (if any), archives the data to `{{ data_mount }}/backups/vaultwarden-<ts>.tgz`, and
   prunes to `vaultwarden_backup_retention` (default 7, asserted >= 1). A failed backup
-  restarts the vault on its existing image and aborts rather than upgrading unbacked.
-  A routine no-op deploy stops nothing and archives nothing.
+  discards a partial archive, restarts the vault (if any) on its existing image, and
+  aborts with the underlying error rather than upgrading unbacked. A routine no-op deploy
+  stops nothing and archives nothing. The probe distinguishes "no data directory" from
+  "directory unreadable" and fails on the latter — silently reading an unmountable vault
+  as "empty" is how an upgrade goes unbacked.
 - Traffic from clients arrives over TLS via the NPM reverse proxy; 8086 itself is plain
   HTTP and must never be exposed beyond the allowlist above.
 - Monitor `/data/vaultwarden/vaultwarden.log` for `Invalid admin token` and other

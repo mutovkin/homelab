@@ -353,7 +353,8 @@ vault_watchtower_email_password: "your-app-password"
 > docker run --rm -it vaultwarden/server:latest /vaultwarden hash
 > ```
 >
-> Paste the full `$argon2id$...` line it prints as the `_hash` value. See
+> Paste the `$argon2id$...` value as the `_hash` variable — without the
+> `ADMIN_TOKEN='...'` wrapper the helper prints around it. See
 > `ansible/roles/services/vaultwarden/README.md` for the parameters and rotation notes.
 
 > **Where do these values come from?** They are the same passwords currently in the

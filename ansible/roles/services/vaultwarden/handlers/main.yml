@@ -4,6 +4,6 @@
     name: vaultwarden-firewall.service
     state: restarted
     daemon_reload: true
-  # In --check the unit file isn't written, so a restart can't find it.
+  # In --check the unit file may not have been written yet, so a restart can't find it.
   when: not ansible_check_mode
   listen: reload-vaultwarden-firewall
