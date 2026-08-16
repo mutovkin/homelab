@@ -164,6 +164,26 @@ Hard-won lessons — check here before debugging from scratch.
 - **`compose up` recreates any container Watchtower last created**, even with a byte-identical compose file — so the first deploy after a Watchtower update bounces that service, and a recreate in a deploy is not proof your change caused it. See [docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md](docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md).
 - **A service running without its templated `.env` is a config change waiting to happen.** Portainer on n5pro had no `.env` on disk, so its docker network was created from the compose file's *default* subnet, not host_vars. The first deploy that templates `.env` therefore changes the subnet and recreates the network + container. Before letting a first-ever `.env` land, check what the running container/network was actually created from (`docker network inspect`), and pin host_vars to observed reality — renumbering is a separate, deliberate change.
 
+- **`community.proxmox` LXC module updates by default — pin `update: false`.** Since
+  community.proxmox 1.0.0, `community.proxmox.proxmox` defaults `update: true`: `state: present`
+  on an *existing* CT diffs task params against stored config and, on ANY mismatch, PUTs the
+  **full kwargs set** (netif/rootfs/mp included), reporting `changed` unconditionally. Several
+  params can never converge (`tags` compared as Python list-repr, URL-encoded `description`,
+  allocation-form `disk` vs the real allocated subvol), so every run becomes a blind config PUT —
+  against a running CT it lands in a `[pve:pending]` section. `proxmox_kvm` still defaults false;
+  both provisioning calls in `proxmox_guests` pin `update: false` (creation only — all updates are
+  explicit reconcile tasks; do not remove the pins). Guest resource changes: `pct set`
+  cores/memory is hot for CTs; VM cores/memory apply only to a confirmed-stopped VM (no
+  memory/cpu hotplug enabled) — the role fails loudly otherwise.
+  See [docs/solutions/integration-issues/community-proxmox-update-default-blind-config-put.md](docs/solutions/integration-issues/community-proxmox-update-default-blind-config-put.md).
+- **LXC `features` has no `nfs` key, and shell tasks need `set -e`.** Valid feature keys are
+  exactly `mount, nesting, keyctl, fuse, mknod, force_rw_sys` (PVE `$features_desc`); "may mount
+  NFS" is spelled `mount=nfs`. The features task asked for `nfs=1` for the deployment's whole
+  life — `pct set` rejected it every run, and the script (no `set -e`) swallowed the error and
+  echoed "changed": a silent-green no-op. Also compare against `pct config` (live view), never the
+  raw `/etc/pve/lxc/<id>.conf` — snapshot sections carry their own `features:` lines and
+  false-match greps.
+  See [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md).
 - **Compose dotenv interpolates `$` in unquoted `.env` values — and secret-shaped traps
   compound.** A templated `.env` value containing `$` (Argon2 PHC hashes, rotated
   passwords) is silently truncated unless single-quoted (`ADMIN_TOKEN='...'`); the
