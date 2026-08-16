@@ -71,8 +71,33 @@ nut_server:
     ignorelb: true
     override_battery_charge_low: "30"
 
-# SATA controller passthrough (for TrueNAS VM)
-sata_controller_pci: "c1:00.0" # JMicron JMB58x, IOMMU group 17 — 5× 26TB HDDs
+# Cluster PCI resource mappings, consumed by the proxmox_guests role and
+# referenced by the TrueNAS VM's hostpci entries below (mapping=<id>).
+# Values are PINNED TO OBSERVED HARDWARE (pvesh get /cluster/mapping/pci,
+# 2026-08-16), so the first reconcile after adding them is a no-op.
+# If hardware is re-seated and addresses / IOMMU groups change, update them here
+# and re-run `task infra:hosts -- --limit n5pro` — the role converges the
+# mapping. Mappings are resolved at VM start, so updating one never touches the
+# running VM.
+proxmox_pci_mappings:
+  - id: truenas_sata # JMicron JMB58x SATA controller — 5× 26TB HDDs
+    device_id: "197b:0585"
+    subsystem_id: "197b:0000"
+    iommugroup: 17
+    path: "0000:c1:00.0"
+    description: "For pass-through to TrueNAS VM"
+  - id: truenas_nvme0
+    device_id: "15b7:5030"
+    subsystem_id: "15b7:5030"
+    iommugroup: 22
+    path: "0000:c6:00.0"
+    description: "WD SN850X 2TB NVMe for TrueNAS special vdev"
+  - id: truenas_nvme1
+    device_id: "15b7:5030"
+    subsystem_id: "15b7:5030"
+    iommugroup: 19
+    path: "0000:c3:00.0"
+    description: "WD SN850X 2TB NVMe for TrueNAS special vdev"
 
 # Storage
 zfs_pool: rpool # 4TB NVMe boot disk
@@ -155,6 +180,11 @@ proxmox_lxcs:
       net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:FC:95:51,ip=192.168.30.15/18,type=veth"
       net1: "name=eth1,bridge=vmbr2,hwaddr=BC:24:11:FC:95:52,ip=10.99.99.3/24,type=veth"
     nesting: true
+    # Maps to the LXC `mount=nfs` feature (applies at the CT's next start).
+    # NFS works today regardless, because this CT runs with
+    # `lxc.apparmor.profile: unconfined` — the feature is belt-and-braces.
+    # It was previously emitted as `nfs=1`, which is not a valid feature key,
+    # so it failed schema validation and never persisted (#86).
     nfs_enabled: true
     # order=2 boots after TrueNAS (order=1). The wait for TrueNAS lives on the
     # TrueNAS guest's up= delay, not here (Proxmox up= delays the NEXT guest in

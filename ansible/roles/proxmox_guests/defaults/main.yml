@@ -2,6 +2,9 @@
 # defaults for proxmox_guests role
 proxmox_vms: []
 proxmox_lxcs: []
+# Cluster PCI resource mappings to reconcile on this node — see host_vars for
+# the populated form. Empty means the role manages no mappings on this host.
+proxmox_pci_mappings: []
 
 # TrueNAS ISO version — single source of truth. Bump this one value to upgrade;
 # the download URL/dest and the existence-check path all derive from it so they

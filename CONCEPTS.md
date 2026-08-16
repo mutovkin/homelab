@@ -25,6 +25,10 @@ are `eq12` (node `pve`) and `n5pro` (node `n5pro`).
 A VM or LXC container provisioned on a Proxmox host by the `proxmox_guests` role.
 Guests are the unit the host layer creates and the service layer then configures.
 
+Creation and convergence are separate concerns for a guest: it is created once from its
+inventory declaration, after which only the attributes covered by a Reconcile task track
+that declaration. The rest are Create-time-only fields.
+
 ### Docker host
 A guest (always a privileged LXC here — `deb-docker` on eq12, `n5pro-docker` on
 n5pro) that runs Docker and the project's Compose service stacks.
@@ -181,6 +185,49 @@ and a change-notification chain only fires when a file differs, not when the liv
 state does. Check-and-heal is the repair counterpart to a Silent-green failure: the
 probe asks the artifact that does the work, never the configuration or service that
 describes it.
+
+### Reconcile task
+An explicit task that converges one named attribute of an already-existing Guest,
+written and owned by the role rather than delegated to a provisioning module.
+
+The project reaches for these because asking a provisioning tool to ensure an object
+exists says nothing reliable about what it does when the object already does: depending
+on the tool and its defaults it may ignore the object entirely, or rewrite its whole
+configuration. Both extremes have bitten this repo. So provisioning modules are pinned
+to create-only, and every attribute that must track the inventory gets its own task
+that reads live state, compares, and writes only the difference. A reconcile task is
+expected to report no change once converged; one that reports a change on every run is
+read as a defect rather than as noise. Attributes deliberately left out of this
+treatment are Create-time-only fields.
+
+Two traps recur. A task that mutates and then emits its own change marker reports the marker
+whether or not the mutation succeeded, unless the shell aborts on error — so the marker must
+be made to mean outcome rather than intent. And "converged" here means the declared value is
+stored, which for a running guest may mean only a Pending guest config.
+
+### Pending guest config
+Configuration successfully written to a running Guest that the hypervisor cannot apply in
+place, so it is staged and takes effect at the guest's next stop and start.
+
+This splits convergence into two events that are easy to conflate: the write succeeded and
+the declared state is stored, but the running guest is still on the old value. The
+distinction matters to any Reconcile task, because the hypervisor's default config view
+merges pending values in — so a task that compares against it correctly reports itself
+converged and stays idempotent, while the guest has not actually received the change. Asking
+specifically for the *effective* configuration, or for the pending set, is the only way to
+tell the two apart. The project accepts the gap rather than restarting guests to close it,
+so a staged value can remain queued indefinitely.
+
+### Create-time-only field
+A Guest attribute the role sets when it creates the guest and then never reconciles,
+because converging it on a live guest would be destructive, guest-visible, or both.
+
+The category is a deliberate boundary, not an omission: disks, mount points, network
+interface definitions, firmware and machine type are declared in inventory so a guest
+can be rebuilt from scratch, while the running guest is left alone. The cost is that
+inventory and live state may legitimately disagree for these fields — so a declared
+value is not evidence of the live value, and rebuild fidelity is a separate concern
+from convergence.
 
 ### Silent-green failure
 A failure in which a control is absent or does nothing, while every signal the
