@@ -56,7 +56,50 @@ and a Docker `local` NFS volume mounts only at container-create and is not retri
 so consumers must start after the provider (enforced via Proxmox guest boot order)
 or self-heal once the export becomes reachable.
 
+## Service deployment
+
+### Service role
+The single Ansible role that owns everything about one service: the Compose stack it
+deploys, any configs that ship with it, and the template that renders its environment
+file. One service, one role — there is no second place where a service's definition
+lives.
+
+The role is the unit of placement as well as definition: which Docker host runs a
+service is decided by naming its role in that host's inventory, not by anything inside
+the role.
+
+### Deploy directory
+The Ansible-owned directory on a Docker host that a service's payload is shipped to and
+that Compose is then run from.
+
+Its basename is the Compose project name, which makes the directory an identity, not
+just a location: renaming it makes Compose treat the running stack as a foreign project
+and recreate its containers. A repo-side rename of a service is therefore cheap, while
+renaming its deploy directory is a migration — the two can and do deliberately disagree.
+Because Ansible owns the directory outright, a file removed from the repo is removed
+from the host, so anything living there that the repo does not know about is at risk.
+
+### Deploy payload
+The set of files shipped from a service role to its deploy directory — the Compose file
+and any configs it reads from alongside it.
+
+Distinct from a service's *data*, which lives elsewhere on the host and outlives any
+deploy. The payload is disposable and reproducible; the data is neither. A relocation
+that preserves the payload byte-for-byte can still disturb a service, because Compose
+also derives identity from the deploy directory and behaviour from the rendered
+environment file.
+
 ## Operations
+
+### Mirror pair
+Two copies of the same configuration kept in separate places by hand, where only one is
+actually deployed and nothing enforces that they agree.
+
+The dangerous property is that the inert copy is usually the more discoverable one — it
+sits beside the file it appears to configure — so edits land on it and change nothing
+while looking correct. A mirror pair is the most common cause of a silent-green failure
+here. Collocation is the structural fix: when a service's definition has exactly one
+home, there is no second copy to drift.
 
 ### Silent-green failure
 A failure in which a control is absent or does nothing, while every signal the

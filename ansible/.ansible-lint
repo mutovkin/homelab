@@ -27,3 +27,7 @@ exclude_paths:
   - inventory/host_vars/eq12_docker/vault.yml
   - inventory/host_vars/n5pro/vault.yml
   - inventory/host_vars/n5pro_docker/vault.yml
+  # Service deploy payload (compose files + shipped configs) is Docker content,
+  # not Ansible content — ansible-lint's bundled yamllint must not gate it.
+  # Validated instead by scripts/validate-compose.sh (CI compose-validate job).
+  - roles/services/*/files/

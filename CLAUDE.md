@@ -42,11 +42,10 @@ homelab/
 ├── Taskfile.yml            # task runner — see Key Commands
 ├── docs/                   # architecture.md, eq12.md, n5pro.md, ups.md
 │   └── solutions/          # documented fixes to past problems, by category, with YAML frontmatter (module, tags, problem_type)
-├── ansible/
-│   ├── inventory/          # hosts.yml, group_vars/, host_vars/ (+ vault.yml)
-│   ├── playbooks/          # site.yml, proxmox-hosts.yml, configure-guests.yml, deploy-services.yml
-│   └── roles/              # common, proxmox_host, proxmox_guests, docker_host, nut, services/*
-└── containers/             # Docker Compose stacks (one dir per service, standalone-usable)
+└── ansible/
+    ├── inventory/          # hosts.yml, group_vars/, host_vars/ (+ vault.yml)
+    ├── playbooks/          # site.yml, proxmox-hosts.yml, configure-guests.yml, deploy-services.yml
+    └── roles/              # common, proxmox_host, proxmox_guests, docker_host, nut, services/* (per-service files/compose.yaml + templates/env.j2)
 ```
 
 ## Key Commands
@@ -67,7 +66,7 @@ Scope any command to one host with `-- --limit <host>` (e.g. `task infra:hosts -
 
 ## Making a Change
 
-1. Edit the relevant role (`ansible/roles/…`) or compose file (`containers/…`).
+1. Edit the relevant role (`ansible/roles/…`). Compose stacks live at `ansible/roles/services/<svc>/files/compose.yaml`; per-service deploy logic is the shared `services/_deploy` role.
 2. Dry-run: `task <cmd> -- --check --diff --limit <host>`.
 3. Apply, scoped: `task <cmd> -- --limit <host>`.
 4. Verify (read-only SSH is fine): `ssh root@<host> 'docker ps'` or hit the service.
@@ -135,6 +134,9 @@ Hard-won lessons — check here before debugging from scratch.
   runs (e.g. the `uv`-managed `ansible-core`) needs Local Network permission to reach
   `192.168.x.x` Proxmox APIs — symptom is `[Errno 65] No route to host` from Ansible while
   `curl`/`ping` work. Grant it in System Settings → Privacy & Security → Local Network.
+- **Compose project identity = deploy-dir basename.** Renaming a deploy dir (or a service) recreates its containers under a new project. lms still deploys to `/data/deploy/lyrion` for exactly this reason — see the comment in `roles/services/lms/tasks/main.yml`.
+- **`compose up` recreates any container Watchtower last created**, even with a byte-identical compose file — so the first deploy after a Watchtower update bounces that service, and a recreate in a deploy is not proof your change caused it. See [docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md](docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md).
+- **A service running without its templated `.env` is a config change waiting to happen.** Portainer on n5pro had no `.env` on disk, so its docker network was created from the compose file's *default* subnet, not host_vars. The first deploy that templates `.env` therefore changes the subnet and recreates the network + container. Before letting a first-ever `.env` land, check what the running container/network was actually created from (`docker network inspect`), and pin host_vars to observed reality — renumbering is a separate, deliberate change.
 
 ## Conventions
 

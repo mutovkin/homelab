@@ -38,10 +38,11 @@ regexes = [
   '''^[0-9a-f]{80}$''',
 ]
 
-# Grafana's upstream sample.ini, vendored verbatim as reference documentation.
-# Two hits (lines 360 and 2118), both the commented-out
+# Grafana's upstream sample.ini — DELETED from HEAD in #85, but CI scans the FULL
+# history (`gitleaks git --log-opts=--all`), so its historical blobs still need
+# this allowlist. Two hits (old lines 360 and 2118), both the commented-out
 # `;secret_key = SW2YcwTIb9zpOOhoPsMm` default that ships in every Grafana
-# release — a published constant, not a credential.
+# release — a published constant, not a credential. Do not remove this rule.
 [[allowlists]]
 description = "Grafana upstream sample.ini commented-out default secret_key"
 condition = "AND"

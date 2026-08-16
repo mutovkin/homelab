@@ -37,7 +37,12 @@ docker_networks:
   immich: "172.31.0.0/24"
   frigate: "172.32.0.0/24"
   nextcloud: "172.33.0.0/24"
-  portainer: "172.34.0.0/24"
+  # Pinned to the LIVE network: portainer ran without a templated .env until #85, so
+  # its network was created from the compose default (172.23.0.0/24). Templating any
+  # other value would force a network+container recreate (see docs/solutions/
+  # integration-issues/docker-compose-shared-network-subnet-recreate.md). A deliberate
+  # renumber belongs to #84.
+  portainer: "172.23.0.0/24"
   watchtower: "172.35.0.0/24"
   lms: "172.36.0.0/24"
 

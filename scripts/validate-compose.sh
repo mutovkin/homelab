@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 #
-# Validate every Docker Compose stack under containers/ without a Docker daemon.
+# Validate every Docker Compose stack under ansible/roles/services/*/files/ without a Docker daemon.
 #
 # Two checks per stack:
 #
 #   1. `docker compose config -q` — parses, interpolates, merges and
-#      schema-validates the file.  The real `.env` files are templated onto the
-#      hosts at deploy time from ansible-vault and are never committed.  Without
-#      one, compose does not error: it warns and interpolates every variable to a
-#      blank string, and 7 of the 11 stacks still exit 0 — so the run would be
-#      testing the missing environment rather than the file.  We therefore
-#      synthesise a throwaway `.env` covering every `${VAR}` the file names.
+#      schema-validates the file.  The stacks live at
+#      roles/services/<svc>/files/compose.yaml.  The real `.env` files are
+#      templated onto the hosts at deploy time from ansible-vault and are never
+#      committed.  Without one, compose does not error: it warns and interpolates
+#      every variable to a blank string, and 7 of the 11 stacks still exit 0 — so
+#      the run would be testing the missing environment rather than the file.  We
+#      therefore synthesise a throwaway `.env` covering every `${VAR}` the file
+#      names.
 #
 #   2. env-template cross-check — every `${VAR}` referenced *without* a
 #      `:-default` must actually be emitted by the Ansible role that deploys the
-#      stack (roles/services/<role>/templates/env.j2, which becomes the stack's
-#      `.env`).  Check 1 alone cannot catch a misspelled variable, because the
-#      dummy env is derived from the compose file itself and so agrees with any
+#      stack (the sibling templates/env.j2 in the same role, which becomes the
+#      stack's .env).  Check 1 alone cannot catch a misspelled variable, because
+#      the dummy env is derived from the compose file itself and so agrees with any
 #      typo; this check compares it against the only real source of values.
 #
 # Scope limit worth knowing before you trust a green run: this validates the
@@ -26,7 +28,7 @@
 # Ansible").  A green check here is not evidence the stack will start.
 #
 # Usage: scripts/validate-compose.sh [compose-file ...]
-#        (no arguments = every stack under containers/)
+#        (no arguments = every roles/services/<svc>/files/compose.yaml)
 
 set -euo pipefail
 
@@ -54,18 +56,18 @@ files=()
 if [[ $# -gt 0 ]]; then
   files=("$@")
 else
-  # One compose file per service directory, named after the directory (the repo
-  # convention, see containers/README.md).  A service directory without one is a
-  # hard error rather than a silent skip — under-covering is the failure mode
-  # that matters for a validation gate.
-  for dir in "${repo_root}"/containers/*/; do
+  # One stack per service role: roles/services/<svc>/files/compose.yaml (#85).
+  # Roles starting with `_` are shared helpers (services/_deploy) and ship no
+  # stack. Any OTHER role missing its compose file is a hard error rather than a
+  # silent skip — under-covering is the failure mode that matters for a
+  # validation gate.
+  for dir in "${repo_root}"/ansible/roles/services/*/; do
     svc="$(basename "${dir}")"
-    if [[ -f "${dir}${svc}.yml" ]]; then
-      files+=("${dir}${svc}.yml")
-    elif [[ -f "${dir}${svc}.yaml" ]]; then
-      files+=("${dir}${svc}.yaml")
+    case "${svc}" in _*) continue ;; esac
+    if [[ -f "${dir}files/compose.yaml" ]]; then
+      files+=("${dir}files/compose.yaml")
     else
-      echo "error: ${dir} has no ${svc}.yml/${svc}.yaml compose file" >&2
+      echo "error: ${dir} has no files/compose.yaml compose file" >&2
       exit 1
     fi
   done
@@ -98,26 +100,10 @@ dummy_value() {
   esac
 }
 
-# Path to the env.j2 that becomes this stack's .env, found by asking which
-# services role copies the stack's container directory (the role name is not
-# always the directory name — containers/lyrion is deployed by roles/services/lms).
-env_template_for() {
-  local svc="$1" candidate
-  for candidate in "${repo_root}"/ansible/roles/services/*/; do
-    # Anchored on the closing quote of the role's `src:` path so that, say,
-    # `containers/immich/data/` in some other role cannot claim the immich stack.
-    if grep -rqF "containers/${svc}/\"" "${candidate}tasks/" 2>/dev/null; then
-      echo "${candidate}templates/env.j2"
-      return 0
-    fi
-  done
-  return 1
-}
-
 failures=0
 for file in "${files[@]}"; do
   rel="${file#"${repo_root}/"}"
-  svc="$(basename "$(dirname "${file}")")"
+  svc="$(basename "$(dirname "$(dirname "${file}")")")"   # …/services/<svc>/files/compose.yaml
   env_file="${tmpdir}/${svc}.env"
   : >"${env_file}"
 
@@ -158,8 +144,10 @@ for file in "${files[@]}"; do
   # Cross-check against the env template.  Only bare `${NAME}` references are
   # checked — `${NAME:-default}` is self-sufficient by construction.  Comment
   # lines are stripped so a `${VAR}` mentioned in prose doesn't count.
-  template="$(env_template_for "${svc}" || true)"
-  if [[ -z "${template}" || ! -f "${template}" ]]; then
+  # The env template is the sibling templates/env.j2 of the role that owns this
+  # compose file — the layout guarantees the pairing (#85).
+  template="${repo_root}/ansible/roles/services/${svc}/templates/env.j2"
+  if [[ ! -f "${template}" ]]; then
     echo "FAILED   ${rel} (no env.j2 found for service '${svc}')" >&2
     failures=$((failures + 1))
     continue
