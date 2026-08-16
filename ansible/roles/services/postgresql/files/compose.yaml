@@ -19,12 +19,20 @@ services:
       - /data/postgresql/init-scripts:/docker-entrypoint-initdb.d:ro
       - /data/postgresql/config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro  # Network access control
     ports:
+      # Published on the host; LAN access is restricted to the postgres_fw
+      # nftables allowlist (#79). Do NOT bind to 127.0.0.1 — NPM lives in a
+      # separate LXC and needs LAN reach.
       - "5432:5432"
     networks:
       - postgres_network
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # Must run as the postgres OS user: pg_hba uses `local ... peer`, so a
+      # probe as root logs a FATAL peer-authentication line every interval
+      # (pg_isready still exits 0 — PQping ignores the auth outcome — so the
+      # only symptom is ~2900 FATALs/day in the server log). gosu ships in the
+      # official postgres image.
+      test: ["CMD-SHELL", "gosu postgres pg_isready"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -46,13 +54,14 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
-      PGLADMIN_CONFIG_SERVER_MODE: 'False'
       TZ: ${TIMEZONE:-UTC}
     volumes:
       - /data/postgresql/pgadmin:/var/lib/pgadmin
       - /data/postgresql/config/pgadmin/servers.json:/pgadmin4/servers.json:ro  # Pre-configured servers
       #- /data/postgresql/config/pgadmin/pgpass:/tmp/pgpassfile:ro                # Password file
     ports:
+      # Published on the host; LAN access is restricted to the postgres_fw
+      # nftables allowlist (#79). Plaintext HTTP — TLS fronting deferred.
       - "10080:80"
     networks:
       - postgres_network
