@@ -1,4 +1,25 @@
 ---
+# #88: VictoriaMetrics/VictoriaLogs gate HTTP auth on these vars — an empty value
+# used to deploy green with auth silently DISABLED on 0.0.0.0:8428/9428. Fail
+# loudly instead, before any state is touched. Runs under --check, so a dry run
+# with a missing/renamed vault var reports the var BY NAME instead of a Jinja
+# stack trace. The loop item is the var name; quiet:true keeps values out of
+# output on success AND failure. No opt-out var by design: auth is mandatory.
+- name: Assert VM/VL HTTP auth vault vars are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined — VictoriaMetrics/VictoriaLogs would deploy
+      with HTTP Basic Auth silently disabled on 0.0.0.0:8428/9428. Set it in the
+      target host's vault (task vault:edit -- ansible/inventory/host_vars/<host>/vault.yml).
+    quiet: true
+  loop:
+    - vault_vm_auth_username
+    - vault_vm_auth_password
+    - vault_vl_auth_username
+    - vault_vl_auth_password
+
 - name: Stat Docker socket
   ansible.builtin.stat:
     path: /var/run/docker.sock

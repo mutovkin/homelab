@@ -22,8 +22,8 @@ services:
       - "--search.maxQueryDuration=30s" # Query timeout (prevents long-running queries)
       - "--search.maxConcurrentRequests=12" # Max parallel queries (prevents overload)
       - "--memory.allowedPercent=40" # Use 40% of available RAM (leaves room for OS page cache)
-      - "--httpAuth.username=${VM_AUTH_USERNAME:-}" # Optional: HTTP Basic Auth username (empty = disabled)
-      - "--httpAuth.password=${VM_AUTH_PASSWORD:-}" # Optional: HTTP Basic Auth password (empty = disabled)
+      - "--httpAuth.username=${VM_AUTH_USERNAME:?required - VM must never run unauthenticated, see #88}"
+      - "--httpAuth.password=${VM_AUTH_PASSWORD:?required - VM must never run unauthenticated, see #88}"
     environment:
       TZ: ${TIMEZONE:-UTC}
     deploy:
@@ -75,8 +75,8 @@ services:
       - "--storageDataPath=/victoria-logs-data" # Path to store log data
       - "--httpListenAddr=:9428" # HTTP API and Web UI (select/vmui) port
       - "--retentionPeriod=90d" # Keep logs for 90 days (use time-based retention)
-      - "--httpAuth.username=${VL_AUTH_USERNAME:-}" # Optional: HTTP Basic Auth username (empty = disabled)
-      - "--httpAuth.password=${VL_AUTH_PASSWORD:-}" # Optional: HTTP Basic Auth password (empty = disabled)
+      - "--httpAuth.username=${VL_AUTH_USERNAME:?required - VL must never run unauthenticated, see #88}"
+      - "--httpAuth.password=${VL_AUTH_PASSWORD:?required - VL must never run unauthenticated, see #88}"
     environment:
       TZ: ${TIMEZONE:-UTC}
     deploy:
