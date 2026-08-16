@@ -39,8 +39,15 @@ proxmox_vm_defaults:
   disk_size: 32
   storage: local-zfs
   bios: seabios
-  machine: q35
-  net_bridge: vmbr0
+  # PVE's own default machine type (i440fx) unless a guest asks for q35 — the
+  # old q35 default here misdescribed VM 100, which runs i440fx (#87). null is
+  # omitted from the module call, so PVE picks.
+  machine: null
+  # Default bridge for guests that don't set net/netif/net_bridge explicitly.
+  # Wired to the host's declared primary bridge (eq12: vmbr0; n5pro: vmbr1 — on
+  # n5pro vmbr0 is the secondary 5GbE DHCP bridge, so the old hardcoded vmbr0
+  # default put a new guest on the wrong network, #87).
+  net_bridge: "{{ proxmox_bridge | default('vmbr0') }}"
   net_model: virtio
   onboot: true
   started: true
@@ -53,7 +60,8 @@ proxmox_lxc_defaults:
   root_disk_size: 8
   storage: local-zfs
   ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
-  net_bridge: vmbr0
+  # Same host-primary-bridge wiring as proxmox_vm_defaults above (#87).
+  net_bridge: "{{ proxmox_bridge | default('vmbr0') }}"
   onboot: true
   started: true
   nesting: false

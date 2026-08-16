@@ -249,11 +249,21 @@
     sockets: "{{ item.sockets | default(proxmox_vm_defaults.sockets) }}"
     memory: "{{ item.memory | default(proxmox_vm_defaults.memory) }}"
     bios: "{{ item.bios | default(proxmox_vm_defaults.bios) }}"
-    machine: "{{ item.machine | default(proxmox_vm_defaults.machine) }}"
+    # null default → omitted → PVE's own default machine type (i440fx), which is
+    # what VM 100 actually runs; a guest that needs q35 says so in host_vars.
+    machine: "{{ item.machine | default(proxmox_vm_defaults.machine) | default(omit, true) }}"
     onboot: "{{ item.onboot | default(proxmox_vm_defaults.onboot) }}"
-    scsihw: virtio-scsi-single
+    scsihw: "{{ item.scsihw | default('virtio-scsi-single') }}"
     vga: "{{ item.vga | default(omit) }}"
     scsi: "{{ item.scsi | default({}) }}"
+    # Rebuild fidelity (#87) — modelled from the live guests so a from-scratch
+    # create matches them. Omitted when a guest does not declare them.
+    agent: "{{ item.agent | default(omit) }}"
+    balloon: "{{ item.balloon | default(omit) }}"
+    cpu: "{{ item.cpu | default(omit) }}"
+    usb: "{{ item.usb | default(omit) }}"
+    localtime: "{{ item.localtime | default(omit) }}"
+    tablet: "{{ item.tablet | default(omit) }}"
     net: "{{ item.net | default({'net0': 'virtio,bridge=' + (item.net_bridge | default(proxmox_vm_defaults.net_bridge))}) }}"
     hostpci: "{{ item.hostpci | default({}) }}"
     efidisk0: "{{ item.efidisk0 | default(omit) }}"
@@ -375,11 +385,13 @@
 # RECONCILED BY THEIR OWN TASKS ABOVE: net (MAC-preserving NIC task),
 # startup/onboot.
 # CREATE-TIME ONLY (deliberate — changing them on a live guest is destructive,
-# guest-visible, or both): sockets, bios, machine, vga, scsi, efidisk0, ide,
-# hostpci. `ide2` in particular must NOT be reconciled — the TrueNAS installer
-# ISO is deliberately ejected post-install, so live reads `none,media=cdrom`
-# while host_vars still names the ISO for a from-scratch rebuild. Rebuild
-# fidelity of those fields is #87.
+# guest-visible, or both): sockets, bios, machine, vga, scsi, scsihw, efidisk0,
+# ide, hostpci, agent, balloon, cpu, usb, localtime, tablet. Those fields were
+# modelled from the live guests in #87 so a from-scratch rebuild matches them;
+# `ide2` in particular must NOT be reconciled — the TrueNAS installer ISO is
+# deliberately ejected post-install, so live reads `none,media=cdrom` while
+# host_vars still names the ISO. That mismatch is the documented DR flow; see
+# the comment on ide2 in n5pro host_vars.
 #
 # Neither VM has memory/cpu hotplug enabled, so applying cores/memory to a
 # RUNNING VM cannot take effect without a guest stop. We therefore fail loudly
