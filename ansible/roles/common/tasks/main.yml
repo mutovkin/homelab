@@ -72,6 +72,27 @@
 # is asserted explicitly rather than inferred from a green play. The whole chain
 # shares the ssh_hardening tag so `--tags ssh_hardening` cannot write the
 # drop-in without having deployed keys first.
+
+# Counting files is not the same as counting keys: authorized_key strips blank
+# and #-comment lines before parsing, so an empty or comment-only .pub (a
+# truncated copy, a `touch`ed placeholder) deploys ZERO keys and still reports
+# ok — sailing straight through the file-count assert below. A genuinely
+# malformed key fails loudly inside authorized_key itself; this catches only
+# the silent case. Matched per line, not against the whole file, so a key file
+# carrying a leading comment line still passes.
+- name: Assert each SSH public key file contains a real key
+  ansible.builtin.assert:
+    that:
+      - lookup('file', item) | regex_search('(?m)^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-|sk-)') is not none
+    fail_msg: >-
+      {{ item }} does not contain a valid SSH public key. Empty or comment-only
+      files deploy ZERO keys while authorized_key reports ok, which would let
+      the hardening drop-in below lock this host out (#87).
+  with_fileglob:
+    - "{{ playbook_dir }}/../files/ssh_keys/*.pub"
+  tags:
+    - ssh_hardening
+
 - name: Configure SSH authorized keys from key files
   ansible.posix.authorized_key:
     user: root
@@ -94,6 +115,9 @@
     that:
       - common_ssh_pubkey_files | length > 0
       - common_ssh_keys_deployed.results | default([]) | length > 0
+      # Unreachable today — a failed loop item aborts the key task itself and
+      # the play never gets here; this clause only goes live if ignore_errors
+      # is ever added to that task.
       - common_ssh_keys_deployed.results | selectattr('failed', 'defined')
         | selectattr('failed') | list | length == 0
     fail_msg: >-
