@@ -1,0 +1,58 @@
+---
+# Shared deploy pipeline for every services/* role (#85). The calling role
+# provides `svc` (its own directory name) and ships its payload from
+# roles/services/<svc>/files/ (compose.yaml + any configs) and its .env from
+# roles/services/<svc>/templates/env.j2. Per-service extras (config copies,
+# backups, systemd units, external networks) live in the calling role, before
+# or after this include.
+
+- name: Create deploy directory for {{ svc }}
+  ansible.builtin.file:
+    path: "{{ svc_deploy_dir }}"
+    state: directory
+    mode: "0755"
+
+# delete: true — the deploy dir is fully Ansible-owned: a file removed from the
+# role's files/ is removed from the host (this is what retires portainer.sh,
+# sample.ini and the old <svc>.yml compose filenames). Excluded files (.env,
+# repo-only README/docs) are protected from deletion by rsync's exclude rules.
+- name: Synchronize deploy payload for {{ svc }}
+  become: false
+  ansible.posix.synchronize:
+    src: "{{ role_path | dirname }}/{{ svc }}/files/"
+    dest: "{{ svc_deploy_dir }}/"
+    delete: true
+    rsync_opts: "{{ ['--exclude=.env', '--exclude=README.md'] + svc_rsync_extra }}"
+
+- name: Template .env for {{ svc }}
+  ansible.builtin.template:
+    src: "{{ role_path | dirname }}/{{ svc }}/templates/env.j2"
+    dest: "{{ svc_deploy_dir }}/.env"
+    mode: "0600"
+
+- name: Create data directories for {{ svc }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ svc_data_dirs }}"
+
+# In check mode the payload may not exist on the host yet (first --check of a
+# renamed compose file runs before the rsync has really shipped it); compose
+# cannot preview against a missing file, so skip rather than fail the documented
+# dry-run-before-apply workflow. Real runs always have the file (task above).
+- name: Stat deployed compose file for {{ svc }}
+  ansible.builtin.stat:
+    path: "{{ svc_deploy_dir }}/compose.yaml"
+  check_mode: false
+  register: svc_compose_stat
+
+- name: Deploy compose stack for {{ svc }}
+  community.docker.docker_compose_v2:
+    project_src: "{{ svc_deploy_dir }}"
+    files:
+      - compose.yaml
+    state: present
+    pull: always
+    recreate: "{{ svc_recreate }}"
+  when: not ansible_check_mode or svc_compose_stat.stat.exists
