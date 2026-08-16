@@ -8,7 +8,7 @@ component: tooling
 symptoms:
   - "Repo-tracked bind-mounted configs (postgresql.conf, pg_hba.conf, init scripts, pgadmin servers.json) are never deployed by the role — editing them in git changes nothing on the live host"
   - "SHOW hba_file returns the $PGDATA image-initdb default, proving the mounted pg_hba.conf was never read even though the mount is present and correct"
-  - "Live pg_hba.conf has drifted to hand-edited entries — one subnet that misses the clients' network, one CIDR the server would reject outright — yet auth keeps working"
+  - "Live pg_hba.conf has drifted to hand-edited subnets that no longer match the repo copy, and auth behaviour cannot tell you whether the file is even in use"
   - "Restarting pgadmin after a servers.json change does nothing — the image imports it only on first launch or with PGADMIN_REPLACE_SERVERS_ON_STARTUP=True"
   - "On a fresh host every config task reports changed, so a naive changed-to-restart pairing bounces postgres seconds after compose up and races the entrypoint initdb"
 root_cause: incomplete_setup
@@ -50,10 +50,13 @@ because nothing told the server to look at it.
 
 - Live `pg_hba.conf` on eq12_docker had drifted to two hand-edited entries: `172.22.0.0/16`,
   which does not cover `postgres_network`'s actual subnet (`172.21.0.0/24`), and
-  `172.22.0.0/12`, which is not a valid pg_hba CIDR at all — host bits are set below the
-  mask, so Postgres would have rejected the file outright had it ever read it. Postgres was
-  nonetheless accepting connections from that network, which is the tell.
-- App-level introspection on the running server:
+  `172.22.0.0/12`, whose set host bits below the `/12` mask make it just a
+  differently-spelled `172.16.0.0/12` — pg_hba masks both the rule address and the client
+  address before comparing, and (unlike the SQL `cidr` type) never rejects host bits. Auth
+  kept working throughout, but that proved nothing either way: the hand-edited file retained
+  its own `0.0.0.0/0` scram catch-all.
+- The only evidence that distinguishes "read" from "mounted but unread" is the server's own
+  answer:
 
   ```
   SHOW config_file;  -> /etc/postgresql/postgresql.conf            # the mount, honoured
