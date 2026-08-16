@@ -34,7 +34,7 @@
 ```ascii
 ┌──────────────────────────────────────────────────────────────┐
 │  Layer 2: Docker Compose                                     │
-│  Service definitions in containers/                          │
+│  Stacks in ansible/roles/services/<svc>/files/compose.yaml   │
 │  Deployed by Ansible service roles                           │
 ├──────────────────────────────────────────────────────────────┤
 │  Layer 1: Ansible                                            │
