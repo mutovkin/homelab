@@ -1,0 +1,23 @@
+[Unit]
+Description=PostgreSQL/pgAdmin published-port firewall (Ansible-managed nftables table inet postgres_fw)
+After=nftables.service network-pre.target
+Wants=network-pre.target
+# /etc/nftables.conf opens with `flush ruleset`, so every restart of the
+# (enabled) nftables.service silently deletes inet postgres_fw. PartOf makes
+# that restart propagate here, and the After= above orders us afterwards, so
+# the table is re-applied rather than quietly lost.
+PartOf=nftables.service
+# Ordering only, not a dependency (fail-open): if this unit fails, docker
+# still starts and the ports are open — never the host unreachable.
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/postgres-firewall.nft
+# Best-effort (leading `-`): an already-absent table must not fail the stop
+# half of a restart — e.g. when nftables.service just flushed the ruleset.
+ExecStop=-/usr/sbin/nft delete table inet postgres_fw
+
+[Install]
+WantedBy=multi-user.target
