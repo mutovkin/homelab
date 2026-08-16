@@ -17,39 +17,47 @@ Key features:
 
 ## Data Folder Permissions
 
-Portainer uses a Docker named volume (`portainer_data`) rather than a host directory mount. However, if you need to access the data directly, the volume is typically stored in Docker's volume directory.
-
-To check volume location:
-
-```bash
-# Find the volume location
-docker volume inspect portainer_data
-
-# If you need to backup or access the data
-sudo ls -la /var/lib/docker/volumes/portainer_data/_data/
-```
-
-No special permissions setup is required as Docker manages the volume automatically. The container runs with appropriate permissions to access its data volume.
-
-If you prefer using a host directory instead of a named volume, you can modify the compose file and set permissions:
+Portainer stores its state in a host bind mount, not a named volume:
+`/data/portainer:/data`. The Ansible role creates the directory (via the shared
+`services/_deploy` pipeline's `svc_data_dirs`), and Portainer runs as root inside
+the container, so no extra ownership or permission setup is required.
 
 ```bash
-# Create the data directory
-sudo mkdir -p /data/portainer
-
-# Set ownership to the Portainer user (UID 1000)
-sudo chown -R 1000:1000 /data/portainer
-
-# Set appropriate permissions
-sudo chmod -R 755 /data/portainer
+# Inspect or back up the data on the docker host
+ls -la /data/portainer
 ```
 
 ## Configuration
 
 The service provides:
 
-- Web interface on port 9000 (HTTPS)
-- Edge agent communication on port 8000
-- Direct Docker socket access for container management
+- Web interface on tcp/9000 — **plaintext HTTP**, not HTTPS
+- Direct Docker socket access (read-write `/var/run/docker.sock`) for container
+  management
 
-Access Portainer at `https://localhost:9000` after first startup to complete the initial setup and create an admin user.
+Because a read-write docker socket is root-equivalent on the host, access to the
+UI port is restricted by an Ansible-managed **fail-open nftables table**
+(`inet portainer_fw`, see `templates/portainer-firewall.nft.j2` and
+`defaults/main.yml`). Only these sources may reach tcp/9000:
+
+- `192.168.25.20` — NPM LXC (CT 104), reverse-proxy upstream reach
+- `192.168.48.0/24` — operator workstation subnet
+- loopback
+
+Everything else is dropped, including all external IPv6. The table hooks
+`prerouting` at priority `-150` (before Docker's DNAT) because docker-published
+ports never traverse the `input` hook. It is fail-open by design: stopping
+`portainer-firewall.service` or flushing the ruleset leaves the port open rather
+than the host unreachable.
+
+The edge-agent port **8000 is not published** — no edge agents are in use.
+
+Watchtower labels are `com.centurylinklabs.watchtower.enable=true` **and**
+`com.centurylinklabs.watchtower.monitor-only=true`: Portainer is scanned and
+update notifications are sent, but it is never auto-updated, since an unattended
+image swap on a container holding a read-write docker socket is not acceptable.
+Both labels are required — `monitor-only` alone is inert under
+`WATCHTOWER_LABEL_ENABLE=true`.
+
+Access Portainer at `http://<docker-host>:9000` from an allowlisted source after
+first startup to complete the initial setup and create an admin user.

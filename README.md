@@ -98,7 +98,7 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 | [Vaultwarden](ansible/roles/services/vaultwarden/)     | 8086             | Bitwarden-compatible password manager    |
 | [SearXNG](ansible/roles/services/searxng/)             | 18080            | Privacy-respecting search engine         |
 | [Joplin](ansible/roles/services/joplin/)               | 22300            | Note-taking server                       |
-| [Portainer](ansible/roles/services/portainer/)         | 9000             | Container management UI                  |
+| [Portainer](ansible/roles/services/portainer/)         | 9000 (allowlisted) | Container management UI                |
 | [Watchtower](ansible/roles/services/watchtower/)       | —                | Automatic container updates              |
 
 ### N5 Pro (CT 201 — n5pro-docker)
@@ -110,7 +110,7 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 | [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
 | [NextCloud](ansible/roles/services/nextcloud/)   | 8080             | File sync and collaboration                          |
 | [LMS](ansible/roles/services/lms/)               | 9001, 9090, 3483 | Music server (Lyrion/Squeezebox) — NFS from TrueNAS   |
-| [Portainer](ansible/roles/services/portainer/)   | 9000             | Container management UI                              |
+| [Portainer](ansible/roles/services/portainer/)   | 9000 (allowlisted) | Container management UI                            |
 | [Watchtower](ansible/roles/services/watchtower/) | —                | Automatic container updates                          |
 
 ## Documentation

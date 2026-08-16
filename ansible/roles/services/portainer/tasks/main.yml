@@ -1,4 +1,44 @@
 ---
+# --- Firewall: restrict the Portainer UI port to approved sources (#80) ---
+# Fail-open nftables table (see docs/solutions/conventions/scoped-nftables-on-live-host.md);
+# hooks prerouting, not input, because docker-published ports are DNAT'd and
+# forwarded — input-hook filters never see them.
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+
+- name: Ensure nftables include dir exists
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy Portainer firewall ruleset
+  ansible.builtin.template:
+    src: portainer-firewall.nft.j2
+    dest: /etc/nftables.d/portainer-firewall.nft
+    mode: "0644"
+    validate: "/usr/sbin/nft -c -f %s"
+  notify: reload-portainer-firewall
+
+- name: Deploy Portainer firewall systemd unit
+  ansible.builtin.template:
+    src: portainer-firewall.service.j2
+    dest: /etc/systemd/system/portainer-firewall.service
+    mode: "0644"
+  notify: reload-portainer-firewall
+
+- name: Enable and start Portainer firewall
+  ansible.builtin.systemd:
+    name: portainer-firewall.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  # In --check the unit file isn't actually written, so enable/start can't
+  # find it. Skip this one task in check mode; a real run writes it first.
+  when: not ansible_check_mode
+
 - name: Deploy Portainer via the shared service pipeline
   ansible.builtin.include_role:
     name: services/_deploy
