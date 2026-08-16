@@ -127,6 +127,11 @@ services:
     command: --config /etc/vector/vector.yaml
     environment:
       TZ: ${TIMEZONE:-UTC}
+      # The `:-` on these auth passthroughs (here, telegraf and grafana) is safe
+      # ONLY because the `:?` on victoriametrics'/victorialogs' --httpAuth flag
+      # lines aborts the whole-file parse first, so they can never actually
+      # resolve empty (#88). Do not copy this `:-` onto a new auth-bearing line
+      # that has no `:?` guard upstream of it.
       VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}
       VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}
       # Vector 0.57 disabled ${VAR} interpolation inside config files by default.
@@ -182,7 +187,8 @@ services:
       HOST_SYS: /host/sys
       HOST_ETC: /host/etc
       TZ: ${TIMEZONE:-UTC}
-      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-} # VictoriaMetrics auth (if enabled)
+      # VictoriaMetrics auth — always on since #88; see the `:-` note on vector.
+      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}
       VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
     deploy:
       resources:
@@ -224,10 +230,11 @@ services:
       GF_SERVER_SERVE_FROM_SUB_PATH: false
       GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN}
       GF_SECURITY_COOKIE_SECURE: true
-      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-} # VictoriaMetrics auth credentials for datasource
-      VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-} # VictoriaMetrics auth credentials for datasource
-      VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-} # VictoriaLogs auth credentials for datasource
-      VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-} # VictoriaLogs auth credentials for datasource
+      # Datasource credentials, always set since #88; see the `:-` note on vector.
+      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}
+      VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
+      VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}
+      VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}
     deploy:
       resources:
         limits:
