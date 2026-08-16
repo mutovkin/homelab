@@ -84,58 +84,114 @@
   when: >
     proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
 
-- name: Check if truenas_sata PCI mapping exists
-  ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_sata
-  register: pci_mapping_check
+# --- Cluster PCI resource mappings ---
+#
+# The mappings are DATA (`proxmox_pci_mappings` in host_vars), not hardcoded
+# pvesh invocations, and they are RECONCILED rather than created-once. Values
+# are pinned to observed hardware — if a card is re-seated and its path or
+# IOMMU group changes, update host_vars and re-run; the role converges the
+# cluster mapping. A guest's hostpci line references the mapping by id
+# (`mapping=truenas_sata`), so the hardware pointer only ever lives here.
+#
+# Safe on a running guest: mappings are resolved by QEMU at VM *start*, so
+# `pvesh set` edits cluster config only and never touches a running VM.
+#
+# The read task is `check_mode: false` on purpose. Skipping it in --check would
+# leave `.rc` undefined for the create/update `when:` expressions (the old
+# create-only tasks had exactly that latent landmine), and it is what makes
+# `--check` a real drift report instead of a wall of "skipping".
+- name: Read current cluster PCI mappings
+  ansible.builtin.command: "pvesh get /cluster/mapping/pci/{{ item.id }} --output-format json"
+  register: pci_mapping_current
   failed_when: false
   changed_when: false
-  when: >
-    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
+  check_mode: false
+  loop: "{{ proxmox_pci_mappings }}"
+  loop_control:
+    label: "PCI mapping {{ item.id }}"
 
-- name: Create truenas_sata PCI mapping
-  ansible.builtin.command: pvesh create /cluster/mapping/pci -id truenas_sata -map node=n5pro,path=0000:c1:00.0
+# Desired map string, built once, in pvesh's own (alphabetical) field order so a
+# converged mapping compares byte-equal against the live JSON.
+- name: Build desired PCI mapping state
+  ansible.builtin.set_fact:
+    pci_mapping_desired: >-
+      {{ pci_mapping_desired | default({}) | combine({item.id: {
+        'map': 'id=' ~ item.device_id
+               ~ ',iommugroup=' ~ item.iommugroup
+               ~ ',node=' ~ proxmox_node
+               ~ ',path=' ~ item.path
+               ~ ',subsystem-id=' ~ item.subsystem_id,
+        'description': item.description | default(''),
+      }}) }}
+  loop: "{{ proxmox_pci_mappings }}"
+  loop_control:
+    label: "PCI mapping {{ item.id }}"
+
+# Drift report. Runs in check mode (debug always does), so `--check` surfaces
+# exactly what a real run would create or rewrite.
+- name: Report absent PCI mappings
+  ansible.builtin.debug:
+    msg: "PCI mapping {{ item.item.id }}: absent — will create map={{ pci_mapping_desired[item.item.id].map }}"
+  loop: "{{ pci_mapping_current.results | default([]) }}"
+  loop_control:
+    label: "PCI mapping {{ item.item.id }}"
+  when: item.rc != 0
+
+- name: Report PCI mapping drift
+  ansible.builtin.debug:
+    msg: >-
+      PCI mapping {{ item.item.id }} drift:
+      current={{ (item.stdout | from_json).map | default([]) | join(',') }}
+      | {{ (item.stdout | from_json).description | default('') }}
+      desired={{ pci_mapping_desired[item.item.id].map }}
+      | {{ pci_mapping_desired[item.item.id].description }}
+  loop: "{{ pci_mapping_current.results | default([]) }}"
+  loop_control:
+    label: "PCI mapping {{ item.item.id }}"
+  when:
+    - item.rc == 0
+    - >-
+      (item.stdout | from_json).map | default([]) != [pci_mapping_desired[item.item.id].map]
+      or (item.stdout | from_json).description | default('') != pci_mapping_desired[item.item.id].description
+
+# argv form: the description contains spaces and must not go through a shell.
+- name: Create missing cluster PCI mappings
+  ansible.builtin.command:
+    argv:
+      - pvesh
+      - create
+      - /cluster/mapping/pci
+      - "-id"
+      - "{{ item.item.id }}"
+      - "-map"
+      - "{{ pci_mapping_desired[item.item.id].map }}"
+      - "-description"
+      - "{{ pci_mapping_desired[item.item.id].description }}"
   changed_when: true
-  when: >
-    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
-    and pci_mapping_check.rc != 0
+  loop: "{{ pci_mapping_current.results | default([]) }}"
+  loop_control:
+    label: "PCI mapping {{ item.item.id }} — create"
+  when: item.rc != 0
 
-- name: Check if truenas_nvme0 PCI mapping exists
-  ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_nvme0
-  register: pci_nvme0_mapping_check
-  failed_when: false
-  changed_when: false
-  when: >
-    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
-
-- name: Create truenas_nvme0 PCI mapping
-  ansible.builtin.command: >-
-    pvesh create /cluster/mapping/pci
-    -id truenas_nvme0
-    -map id=15b7:5030,iommugroup=22,node=n5pro,path=0000:c6:00.0,subsystem-id=15b7:5030
-    -description "WD SN850X 2TB NVMe for TrueNAS special vdev"
+- name: Converge drifted cluster PCI mappings
+  ansible.builtin.command:
+    argv:
+      - pvesh
+      - set
+      - "/cluster/mapping/pci/{{ item.item.id }}"
+      - "-map"
+      - "{{ pci_mapping_desired[item.item.id].map }}"
+      - "-description"
+      - "{{ pci_mapping_desired[item.item.id].description }}"
   changed_when: true
-  when: >
-    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
-    and pci_nvme0_mapping_check.rc != 0
-
-- name: Check if truenas_nvme1 PCI mapping exists
-  ansible.builtin.command: pvesh get /cluster/mapping/pci/truenas_nvme1
-  register: pci_nvme1_mapping_check
-  failed_when: false
-  changed_when: false
-  when: >
-    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
-
-- name: Create truenas_nvme1 PCI mapping
-  ansible.builtin.command: >-
-    pvesh create /cluster/mapping/pci
-    -id truenas_nvme1
-    -map id=15b7:5030,iommugroup=19,node=n5pro,path=0000:c3:00.0,subsystem-id=15b7:5030
-    -description "WD SN850X 2TB NVMe for TrueNAS special vdev"
-  changed_when: true
-  when: >
-    proxmox_vms | selectattr('name', 'equalto', 'truenas') | list | length > 0
-    and pci_nvme1_mapping_check.rc != 0
+  loop: "{{ pci_mapping_current.results | default([]) }}"
+  loop_control:
+    label: "PCI mapping {{ item.item.id }} — update"
+  when:
+    - item.rc == 0
+    - >-
+      (item.stdout | from_json).map | default([]) != [pci_mapping_desired[item.item.id].map]
+      or (item.stdout | from_json).description | default('') != pci_mapping_desired[item.item.id].description
 
 # --- VM provisioning ---
 

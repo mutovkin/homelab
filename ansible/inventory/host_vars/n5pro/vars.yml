@@ -71,8 +71,33 @@ nut_server:
     ignorelb: true
     override_battery_charge_low: "30"
 
-# SATA controller passthrough (for TrueNAS VM)
-sata_controller_pci: "c1:00.0" # JMicron JMB58x, IOMMU group 17 — 5× 26TB HDDs
+# Cluster PCI resource mappings, consumed by the proxmox_guests role and
+# referenced by the TrueNAS VM's hostpci entries below (mapping=<id>).
+# Values are PINNED TO OBSERVED HARDWARE (pvesh get /cluster/mapping/pci,
+# 2026-08-16), so the first reconcile after adding them is a no-op.
+# If hardware is re-seated and addresses / IOMMU groups change, update them here
+# and re-run `task infra:hosts -- --limit n5pro` — the role converges the
+# mapping. Mappings are resolved at VM start, so updating one never touches the
+# running VM.
+proxmox_pci_mappings:
+  - id: truenas_sata # JMicron JMB58x SATA controller — 5× 26TB HDDs
+    device_id: "197b:0585"
+    subsystem_id: "197b:0000"
+    iommugroup: 17
+    path: "0000:c1:00.0"
+    description: "For pass-through to TrueNAS VM"
+  - id: truenas_nvme0
+    device_id: "15b7:5030"
+    subsystem_id: "15b7:5030"
+    iommugroup: 22
+    path: "0000:c6:00.0"
+    description: "WD SN850X 2TB NVMe for TrueNAS special vdev"
+  - id: truenas_nvme1
+    device_id: "15b7:5030"
+    subsystem_id: "15b7:5030"
+    iommugroup: 19
+    path: "0000:c3:00.0"
+    description: "WD SN850X 2TB NVMe for TrueNAS special vdev"
 
 # Storage
 zfs_pool: rpool # 4TB NVMe boot disk
