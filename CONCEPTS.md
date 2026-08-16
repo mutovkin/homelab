@@ -137,6 +137,34 @@ distinguishable from a real non-idempotency bug by the next run coming back clea
 container identities unchanged. Either order the work so no such action precedes the
 proof, or budget the settle run and say so before applying.
 
+### Fail-open firewall
+A dedicated, single-purpose packet-filter table that restricts exactly one service
+port to approved sources and accepts everything else, so its worst failure mode is
+the protection being absent rather than the host being unreachable.
+
+The shape is deliberate: the table's only drop is gated on the guarded port, every
+other flow exits through a terminal accept before any drop can apply, and unloading
+or flushing the table reopens the port without ever blocking the host. The filter
+must sit where the guarded traffic actually flows, and that differs by socket kind:
+traffic to a daemon listening on the host itself is seen at input, while traffic to
+a container-published port is rewritten before routing and must be filtered before
+that rewrite — and then explicitly scoped to flows addressed to the host, or it
+silently catches unrelated forwarded traffic. Because the pattern fails open, it
+pairs with a Check-and-heal so its absence is detected rather than survived.
+
+### Check-and-heal
+A deploy-time discipline for controls whose managing service can report healthy
+while the control's effect is gone: probe the real artifact on every run, treat its
+absence as a change that immediately re-applies it, and finish with a hard assertion
+so a still-missing control fails the run loudly.
+
+It exists because service and task state describe past issuance, not present effect —
+a unit that ran once can stay "active" long after what it created has been destroyed,
+and a change-notification chain only fires when a file differs, not when the live
+state does. Check-and-heal is the repair counterpart to a Silent-green failure: the
+probe asks the artifact that does the work, never the configuration or service that
+describes it.
+
 ### Silent-green failure
 A failure in which a control is absent or does nothing, while every signal the
 project routinely checks keeps reporting success.
