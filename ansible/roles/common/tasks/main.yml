@@ -64,17 +64,55 @@
     - ansible_check_mode
     - common_missing_required | length > 0
 
+# --- SSH authorized keys + hardening lockout guard ---
+# Keys MUST land before hardening: the drop-in below disables password auth, so
+# a run that writes it without any deployed key locks everyone out of a fresh
+# host (#87). with_fileglob silently iterates zero times on an empty glob — a
+# fresh clone with no keys committed, or a renamed key directory — so emptiness
+# is asserted explicitly rather than inferred from a green play. The whole chain
+# shares the ssh_hardening tag so `--tags ssh_hardening` cannot write the
+# drop-in without having deployed keys first.
 - name: Configure SSH authorized keys from key files
   ansible.posix.authorized_key:
     user: root
     key: "{{ lookup('file', item) }}"
     state: present
+  register: common_ssh_keys_deployed
   with_fileglob:
     - "{{ playbook_dir }}/../files/ssh_keys/*.pub"
+  tags:
+    - ssh_hardening
+
+# On an already-hardened host a failing assert does not UN-harden anything: the
+# copy below simply never runs, the existing drop-in and the previously deployed
+# keys both persist. The guard exists to prevent the FIRST write on a keyless
+# host, which is the only path that actually locks anyone out.
+# authorized_key supports check mode, so `results` is populated and this assert
+# behaves identically under --check.
+- name: Assert SSH keys were found and deployed before hardening
+  ansible.builtin.assert:
+    that:
+      - common_ssh_pubkey_files | length > 0
+      - common_ssh_keys_deployed.results | default([]) | length > 0
+      - common_ssh_keys_deployed.results | selectattr('failed', 'defined')
+        | selectattr('failed') | list | length == 0
+    fail_msg: >-
+      Refusing to write SSH hardening: no public keys were deployed.
+      {{ common_ssh_pubkey_files | length }} key file(s) matched
+      ansible/files/ssh_keys/*.pub. Hardening with zero keys would disable
+      password auth and lock this host out (#87). Add at least one
+      <user>@<host>.pub key file and re-run.
+  vars:
+    common_ssh_pubkey_files: >-
+      {{ lookup('ansible.builtin.fileglob',
+                playbook_dir + '/../files/ssh_keys/*.pub', wantlist=True) }}
+  tags:
+    - ssh_hardening
 
 # --- SSH hardening: key-only authentication ---
-# Public keys are provisioned above, so disable password auth (stops the
-# credential-stuffing seen against deb-docker) and allow root only via key.
+# Public keys are provisioned above and the assert proves at least one landed,
+# so disable password auth (stops the credential-stuffing seen against
+# deb-docker) and allow root only via key.
 # Drop-in is picked up via `Include /etc/ssh/sshd_config.d/*.conf`. The handler
 # validates with `sshd -t` before reloading, so an invalid config can never be
 # loaded (running sshd keeps its current config on a failed validate).
