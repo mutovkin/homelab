@@ -92,7 +92,10 @@ reviews, demands fixes, and re-reviews the deployed revision.
 - **Backups before every live apply:** ZFS snapshot of the target CT's /data
   subvol on its Proxmox host (`zfs snapshot <dataset>@pre-issue<NN>-<ts>`;
   discover dataset via `pct config <vmid>`); plus `pg_dumpall` to
-  `/data/backups/` for any postgres-adjacent change. Snapshots persist until
+  `/data/backups/` for any postgres-adjacent change — as
+  `docker exec -u postgres postgres pg_dumpall` (socket auth is `peer` since
+  #79: a root invocation fails and a redirected one silently yields an empty
+  file; always verify the dump ends with "cluster dump complete"). Snapshots persist until
   the run's close-out and are pruned only after the human confirms.
 - **Wave planning:** pair issues only when their file sets are disjoint;
   fleet-wide sweeps (all-compose edits, tree restructures) run solo; dependent
