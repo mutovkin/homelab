@@ -12,12 +12,141 @@
         gateway: 172.21.0.1
     state: present
 
+- name: Create PostgreSQL directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ data_mount }}/postgresql/data"
+    - "{{ data_mount }}/postgresql/config"
+    - "{{ data_mount }}/postgresql/config/pgadmin"
+    - "{{ data_mount }}/postgresql/init-scripts"
+
+# pgadmin runs as uid 5050 and writes to /var/lib/pgadmin (bind-mounted here).
+# On a fresh host Docker would auto-create the path root:root and pgadmin
+# crash-loops (#78); the live dir was hand-fixed to 5050 — this task owns it.
+- name: Create pgadmin data directory (uid 5050)
+  ansible.builtin.file:
+    path: "{{ data_mount }}/postgresql/pgadmin"
+    state: directory
+    owner: "5050"
+    group: "5050"
+    mode: "0755"
+
+# Captured BEFORE the deploy — the restart below must only bounce a container
+# that already existed. On a fresh host `compose up` creates postgres FROM the
+# configs deployed above, and restarting it seconds later would race the
+# entrypoint's initdb (PG_VERSION lands early; interrupting leaves a cluster
+# that skips /docker-entrypoint-initdb.d forever — no joplin DB).
+- name: Check whether the postgres container pre-exists
+  community.docker.docker_container_info:
+    name: postgres
+  register: postgres_container_info
+
+# The compose file bind-mounts these from {{ data_mount }}/postgresql/..., not
+# the deploy dir — without these tasks a repo edit never reaches the container
+# (the Vector gotcha; #73, #78). postgresql.conf pins hba_file to the mounted
+# pg_hba.conf, so both files are really read by the server; changes are paired
+# with the explicit restart below (compose ignores bind-mount content changes).
+- name: Deploy PostgreSQL server configs
+  ansible.builtin.copy:
+    src: "config/{{ item }}"
+    dest: "{{ data_mount }}/postgresql/config/{{ item }}"
+    mode: "0644"
+  loop:
+    - postgresql.conf
+    - pg_hba.conf
+  register: postgres_configs
+
+# servers.json is imported by the image only on first pgAdmin launch (a fresh
+# /var/lib/pgadmin) or with PGADMIN_REPLACE_SERVERS_ON_STARTUP=True (we do not
+# set it) — verified against the image entrypoint — so no restart pairs with
+# this task: on an initialized install a bounce would be inert. Deploying it
+# still matters for fresh hosts, where it is what pre-configures the server.
+- name: Deploy pgadmin servers.json
+  ansible.builtin.copy:
+    src: config/pgadmin/servers.json
+    dest: "{{ data_mount }}/postgresql/config/pgadmin/servers.json"
+    mode: "0644"
+
+# Rendered from vault (real credential): owner 999 (the entrypoint reads init
+# scripts after dropping to the postgres uid) and 0600 so the password is not
+# world-readable on the host. diff: false — a --diff would print the rendered
+# password (same leak class as the watchtower Gmail incident). No restart pairs
+# with this task: init scripts run only on a fresh initdb (empty data dir) and
+# a change here never affects a live cluster.
+- name: Deploy database init script (renders vault credentials)
+  ansible.builtin.template:
+    src: 01-init-databases.sql.j2
+    dest: "{{ data_mount }}/postgresql/init-scripts/01-init-databases.sql"
+    owner: "999"
+    group: "999"
+    mode: "0600"
+  diff: false
+
+# Single source of truth for the restart decision, shared by the check-mode
+# preview, the restart itself and the readiness gate. Deliberately NO default()
+# filters: if a register above is renamed this must fail loudly rather than
+# silently skip the restart — the do-nothing failure mode that #78 is about.
+# The names must match container_name in files/compose.yaml.
+- name: Determine containers to restart for changed config
+  ansible.builtin.set_fact:
+    postgres_restart_targets: >-
+      {{ ['postgres'] if (postgres_configs.results | selectattr('changed') | list | length > 0
+          and postgres_container_info.exists) else [] }}
+
+# --check must surface the outage the restart NOTE below warns about; the
+# restart task itself is necessarily skipped in check mode.
+- name: Preview config-change restart (check mode)
+  ansible.builtin.debug:
+    msg: "Config change WILL RESTART on real apply: {{ postgres_restart_targets }} (client-visible outage for DB clients)"
+  when:
+    - ansible_check_mode
+    - postgres_restart_targets | length > 0
+
+# config/ is excluded from the deploy payload: the configs are deployed to the
+# container mount paths above, so a copy in the deploy dir would be unused —
+# exactly the decorative-copy drift this issue removes (stale pre-#78 copies at
+# the deploy-dir root are deleted by the sync's delete: true). Note the exclude
+# cuts both ways: a config/ created out-of-band inside the deploy dir would be
+# shielded from delete: true — none exists today, do not create one.
 - name: Deploy PostgreSQL via the shared service pipeline
   ansible.builtin.include_role:
     name: services/_deploy
   vars:
     svc: postgresql
-    svc_data_dirs:
-      - "{{ data_mount }}/postgresql/data"
-      - "{{ data_mount }}/postgresql/config"
-      - "{{ data_mount }}/postgresql/config/pgadmin"
+    svc_rsync_extra:
+      - "--exclude=config/"
+
+# Compose does not track bind-mounted file contents, and hba_file is read only
+# at server start — so restart the affected container explicitly when its config
+# changed. Only ever bounces a container that pre-existed this run (see the
+# probe above); a first deploy deliberately restarts nothing.
+# NOTE: restarting postgres is a client-visible outage (joplin) — deploys that
+# change postgresql.conf/pg_hba.conf need the operator's OK.
+- name: Restart PostgreSQL services whose config changed
+  community.docker.docker_container:
+    name: "{{ item }}"
+    state: started
+    restart: true
+  loop: "{{ postgres_restart_targets }}"
+  # Skipped in check mode: on a never-deployed host the containers do not exist
+  # yet, and docker_container would fail rather than preview anything.
+  when: not ansible_check_mode
+
+# With hba_file now really read, a bad config would crash-loop postgres while
+# the play still reported green — prove the server came back before declaring
+# success.
+- name: Wait for postgres to accept connections after restart
+  community.docker.docker_container_exec:
+    container: postgres
+    command: pg_isready -U postgres
+  register: postgres_ready
+  until: postgres_ready.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - "'postgres' in postgres_restart_targets"

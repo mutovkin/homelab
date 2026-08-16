@@ -111,14 +111,20 @@ Hard-won lessons — check here before debugging from scratch.
   over SSH as root.
 - **`synchronize` + sudo.** Always `become: false` on `ansible.posix.synchronize` tasks
   (see [Critical Rules](#critical-rules)).
-- **Bind-mounted config must be owned by Ansible.** If a compose file bind-mounts a config
-  path, the role must *deploy the file*, not just `mkdir` the directory — otherwise the repo
-  copy is decorative, the live file is whatever was last hand-copied, and edits silently do
-  nothing. Compose also ignores bind-mount content changes, so pair the copy with an explicit
-  restart of the affected service. Related: never `depends_on: condition: service_healthy` a
-  scratch/distroless image — a healthcheck needs a binary inside the image, so one that can
-  never pass permanently blocks every redeploy of the stack.
-  See [docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md](docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md).
+- **Bind-mounted config must be owned by Ansible — and actually wired.** If a compose file
+  bind-mounts a config path, the role must *deploy the file*, not just `mkdir` the directory —
+  otherwise the repo copy is decorative and edits silently do nothing. Deploying is still not
+  wiring: postgres ignored its correctly-mounted `pg_hba.conf` for the deployment's whole life
+  because nothing set `hba_file` (the default is `$PGDATA/pg_hba.conf`). Verify with the app's
+  own introspection (`SHOW hba_file;`, `nginx -T`), never `docker inspect`. Compose ignores
+  bind-mount content changes, so pair the copy with an explicit restart — but never restart a
+  container the same run created (it races first-boot init; postgres then skips
+  `/docker-entrypoint-initdb.d` forever), and follow the restart with a readiness gate
+  (`pg_isready`): modules return on issuance, not on service. Related: never
+  `depends_on: condition: service_healthy` a scratch/distroless image — a healthcheck needs a
+  binary inside the image, so one that can never pass permanently blocks every redeploy.
+  See [docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md](docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)
+  and [docs/solutions/integration-issues/postgresql-mounted-configs-never-deployed-or-read.md](docs/solutions/integration-issues/postgresql-mounted-configs-never-deployed-or-read.md).
 - **Watchtower scan scope.** With `WATCHTOWER_LABEL_ENABLE=true`, `watchtower.enable=true` is
   what puts a container in scope; `monitor-only=true` on its own is inert and the container is
   never scanned or reported. Verify by comparing `scanned=N` against the labelled count.
