@@ -224,6 +224,11 @@
     description: "{{ item.description | default('') }}"
     startup: "{{ item.startup | default(omit) }}"
     state: present
+    # CREATION ONLY. proxmox_kvm's `update` still defaults to false, but pin it
+    # explicitly so a future collection bump cannot silently flip this task into
+    # the same blind config PUT that bit the LXC task below. Every update in this
+    # role is an explicit reconcile task, never a module side effect.
+    update: false
   delegate_to: localhost
   loop: "{{ proxmox_vms }}"
   loop_control:
@@ -500,6 +505,28 @@
     description: "{{ item.description | default('') }}"
     startup: "{{ item.startup | default(omit) }}"
     state: present
+    # CREATION ONLY — do not remove.
+    #
+    # community.proxmox 1.0.0 flipped this module's `update` default from false
+    # to true (1.6.0 argspec: update=dict(type="bool", default=True)). With it
+    # true, `state: present` on an EXISTING container runs update_lxc_instance()
+    # every single run, and that path:
+    #   (a) never converges — it diffs task params against the stored config,
+    #       and several can never match. `tags` is compared as a Python list
+    #       ("['docker']") against the API's string ("docker"); `description`
+    #       comes back URL-encoded with a trailing %0A; `disk` becomes a
+    #       synthesized rootfs that cannot equal the real `subvol-…` volume.
+    #   (b) on ANY non-empty diff PUTs the FULL kwargs set, not the diff
+    #       (config.put(vmid=…, **kwargs)), then reports changed=True
+    #       unconditionally.
+    # So it rewrote netif/rootfs/mp on every run — the exact unguarded-mutation
+    # class #86 exists to prevent. On n5pro it would PUT CT 201's mp0 in
+    # allocation syntax ("local-zfs:200,mp=/data") over a live named subvol.
+    #
+    # This role uses the module for CREATION ONLY; every update is an explicit
+    # reconcile task. `state: started` below is unaffected — that dispatch
+    # branch never reads `update`.
+    update: false
   delegate_to: localhost
   loop: "{{ proxmox_lxcs }}"
   loop_control:
