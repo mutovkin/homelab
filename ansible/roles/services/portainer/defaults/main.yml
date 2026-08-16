@@ -1,0 +1,8 @@
+---
+# Firewall scoping for the Portainer UI port (see templates/portainer-firewall.nft.j2).
+# The UI is plaintext HTTP in front of a read-write docker.sock — LAN exposure is
+# root-equivalent exposure, so only these sources may reach it.
+portainer_fw_port: 9000
+portainer_fw_allowed_sources:
+  - 192.168.25.20 # NPM LXC (CT 104) — reverse-proxy upstream reach
+  - 192.168.48.0/24 # operator workstation subnet
