@@ -55,8 +55,10 @@ These are the controls the role actually enforces, not aspirations:
   hash var in the same vault edit. `tasks/main.yml` asserts the value is a PHC string
   before deploying, because vaultwarden accepts a non-PHC value as a *plaintext* token
   rather than rejecting it. Every value in `templates/env.j2` is single-quoted: compose's
-  dotenv parser interpolates `$VAR` in unquoted values, which would silently truncate the
-  `$`-delimited PHC segments.
+  dotenv parser interpolates `$VAR` in unquoted values, which would truncate the
+  `$`-delimited PHC segments — emitting only an ungated stderr warning, then exiting 0.
+  Full write-up:
+  [docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md](../../../../docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md).
 - **tcp/8086 is restricted to the reverse proxy and operator workstations (#81).** The
   port stays published — NPM runs in a separate LXC and reaches it over the LAN — but the
   role ships a fail-open nftables table `inet vaultwarden_fw` that drops that one port for
