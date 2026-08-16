@@ -78,14 +78,21 @@ All Docker networks use 172.x.x.x subnets to avoid conflicts with the LAN (192.1
 
 | Service Stack  | Network Name                | Subnet        | Gateway    |
 | -------------- | --------------------------- | ------------- | ---------- |
-| PostgreSQL     | `postgres_network`          | 172.30.0.0/24 | 172.30.0.1 |
+| PostgreSQL     | `postgres_network`          | 172.21.0.0/24 | 172.21.0.1 |
+| Portainer      | `portainer_network`         | 172.26.0.0/24 | 172.26.0.1 |
+| Watchtower     | `watchtower_network`        | 172.27.0.0/24 | 172.27.0.1 |
+| Frigate        | `frigate_network`           | 172.28.0.0/24 | 172.28.0.1 |
+| NextCloud      | `nextcloud_network`         | 172.29.0.0/24 | 172.29.0.1 |
 | Immich         | `immich_network`            | 172.31.0.0/24 | 172.31.0.1 |
-| Frigate        | `frigate_network`           | 172.32.0.0/24 | 172.32.0.1 |
-| NextCloud      | `nextcloud_network`         | 172.33.0.0/24 | 172.33.0.1 |
-| Portainer      | `portainer_network`         | 172.34.0.0/24 | 172.34.0.1 |
-| Watchtower     | `watchtower_network`        | 172.35.0.0/24 | 172.35.0.1 |
-| Immich → PG    | `postgres_network` (shared) | 172.30.0.0/24 | 172.30.0.1 |
-| NextCloud → PG | `postgres_network` (shared) | 172.30.0.0/24 | 172.30.0.1 |
+| Immich → PG    | `postgres_network` (shared) | 172.21.0.0/24 | 172.21.0.1 |
+| NextCloud → PG | `postgres_network` (shared) | 172.21.0.0/24 | 172.21.0.1 |
+
+Only Portainer, Watchtower, and LMS are deployed today (#91 tracks the rest).
+LMS has no docker network (`network_mode: host`). `postgres_network`'s subnet is
+hardcoded in the postgresql role — the same literal value on either host
+(separate NAT'd bridges). 172.30.0.0/24 is unassigned — the next free n5pro pin.
+Auto-allocation pool on this host: `172.18.0.0/15` (#84; docker0 draws from it).
+eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 
 ## Cross-Host Communication
 

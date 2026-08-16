@@ -48,6 +48,24 @@
     enabled: true
     daemon_reload: "{{ lms_heal_unit.changed }}"
 
+# lms uses network_mode: host (UDP broadcast discovery) and defines no compose
+# network — it never has: the first committed lyrion compose (5b1cb48) already
+# set network_mode: host, and `git log --all -S lms_network -- '*compose*'` is
+# empty. The live lms_network (172.36.0.0/24 — public Internet space, zero
+# endpoints) was therefore created OUTSIDE Ansible during early bring-up;
+# nothing in this repo ever defined it, so neither compose nor Ansible would
+# ever remove it. Hence this explicit retirement (#84). No-op once gone.
+#
+# Deliberately no force: true — docker_network hard-fails if the network ever
+# has active endpoints, and that is the point: an unexpected attachment means
+# something we do not model is using it, and it must be looked at, not evicted.
+# If lms ever gains a REAL bridge network named lms_network, DELETE this task
+# first — otherwise it removes the network on every deploy and bounces the stack.
+- name: Remove orphaned lms_network (#84 — public-space subnet, no attached containers)
+  community.docker.docker_network:
+    name: lms_network
+    state: absent
+
 - name: Deploy LMS via the shared service pipeline
   ansible.builtin.include_role:
     name: services/_deploy
