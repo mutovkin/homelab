@@ -36,18 +36,36 @@ proxmox_vms:
     name: ha
     cores: 2
     memory: 4096
+    # Everything below is pinned to the LIVE VM (qm config 100, 2026-08-16) so a
+    # from-scratch rebuild matches the running guest (#87). All of it is
+    # create-time-only (provisioning is update:false, #86), so the live VM is
+    # untouched by adding it here.
+    balloon: 2048
+    cpu: host
+    agent: "1" # qemu-guest-agent runs inside HAOS
+    scsihw: virtio-scsi-pci # live VM predates the role's virtio-scsi-single default
     scsi:
-      scsi0: "local-zfs:32,format=raw"
+      scsi0: "local-zfs:32,discard=on,ssd=1,format=raw"
     # Pinned to live: HAOS boots UEFI, so recreating this VM with seabios would
     # not boot. The vars said seabios purely because nothing ever compared them
-    # against the running guest (#86).
+    # against the running guest (#86). No pre-enrolled secure-boot keys.
     bios: ovmf
-    # NOTE (rebuild fidelity, tracked in #87): the live VM predates Ansible and
-    # carries an efidisk0, a usb device, and the qemu guest agent that are not
-    # modelled here; it also has no `machine:` line at all (i440fx default)
-    # despite the q35 below. bios/machine are create-time-only, so this does not
-    # affect the running guest — but a from-scratch rebuild would not match yet.
-    machine: q35
+    efidisk0:
+      storage: local-zfs
+      format: raw
+      efitype: 4m
+      pre_enrolled_keys: false
+    # NO `machine:` — the live VM has no machine line at all (i440fx default).
+    # The `machine: q35` that used to sit here never matched reality, and a q35
+    # rebuild is an untested boot config for this HAOS install.
+    usb:
+      usb0: "host=1a86:55d4" # USB serial radio stick (CH9102)
+      usb1: "host=10c4:ea60" # USB serial radio stick (CP2102)
+    localtime: true
+    tablet: false
+    # Not modelled (benign / non-reproducible): boot order (live order=scsi0,
+    # which is also PVE's create default), smbios1 uuid, vmgenid, meta,
+    # snapshot parent, tteck description text.
     onboot: true
     started: true
     tags:
@@ -64,7 +82,14 @@ proxmox_lxcs:
     root_disk_size: 24
     storage: local-zfs
     mounts:
-      mp0: "local-zfs:subvol-101-disk-1,size=110G,mp=/data,backup=1"
+      # Allocation form (like CT 201): `mounts` is consumed at CREATE only
+      # (provisioning is pinned update:false, #86), so this line's only job is
+      # to tell a from-scratch rebuild what to allocate — naming a subvol here
+      # fails creation on a rebuilt host because the volume does not exist yet
+      # (#87). Live volume today: local-zfs:subvol-101-disk-1 (110G, backup=1).
+      # DR: a rebuild allocates a FRESH EMPTY /data — restore it from the vzdump
+      # backup (backup=1 includes mp0) before deploying services.
+      mp0: "local-zfs:110,mp=/data,backup=1"
     netif:
       net0: "name=eth0,bridge=vmbr0,gw=192.168.23.1,hwaddr=AE:E1:F1:EE:F5:9A,ip=192.168.25.15/18,type=veth"
     nesting: true
