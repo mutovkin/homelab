@@ -20,7 +20,7 @@ This container uses **host networking** (`network_mode: host`). This is required
 
 LMS uses UDP broadcast on port **3483** for player discovery. When a Squeezelite-compatible player (e.g., WiiM) scans for servers, it broadcasts to the LAN subnet asking "Are there any LMS servers here?".
 
-Docker bridge networking (even with port mapping) does **not** forward UDP broadcast packets between subnets. A custom bridge network (e.g., `172.36.0.0/24`) isolates the container — the player's broadcast on `192.168.x.255` is silently dropped by Docker's NAT.
+Docker bridge networking (even with port mapping) does **not** forward UDP broadcast packets between subnets. A custom bridge network (e.g., `172.27.0.0/24`) isolates the container — the player's broadcast on `192.168.x.255` is silently dropped by Docker's NAT.
 
 Host networking places the container directly on the host's network interface, so discovery broadcasts reach LMS without any NAT layer in between.
 

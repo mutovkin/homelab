@@ -90,7 +90,7 @@ All Docker networks use 172.x.x.x subnets to avoid conflicts with the LAN (192.1
 Only Portainer, Watchtower, and LMS are deployed today (#91 tracks the rest).
 LMS has no docker network (`network_mode: host`). `postgres_network`'s subnet is
 hardcoded in the postgresql role — the same literal value on either host
-(separate NAT'd bridges). 172.30.0.0/24 is reserved for a future n5pro service.
+(separate NAT'd bridges). 172.30.0.0/24 is unassigned — the next free n5pro pin.
 Auto-allocation pool on this host: `172.18.0.0/15` (#84; docker0 draws from it).
 eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 

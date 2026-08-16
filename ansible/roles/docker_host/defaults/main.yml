@@ -3,6 +3,13 @@
 docker_log_driver: "json-file"
 docker_log_max_size: "10m"
 docker_log_max_file: "3"
+# Fleet default pool. This MUST stay in defaults/ — do NOT "promote" it to
+# roles/docker_host/vars/main.yml on the strength of the CLAUDE.md precedence
+# gotcha: vars/main.yml outranks inventory, so it would silently override
+# n5pro's host_vars pool (172.18.0.0/15, #84) and revert that host to a pool
+# that overlaps its own pinned subnets. The precedence gotcha applies to
+# role-critical values nothing should override; this one is override-BY-DESIGN.
+# Moving the fleet default itself (and dropping n5pro's override) is #126.
 docker_default_address_pools:
   - base: "172.20.0.0/14"
     size: 24
