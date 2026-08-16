@@ -89,6 +89,23 @@ that preserves the payload byte-for-byte can still disturb a service, because Co
 also derives identity from the deploy directory and behaviour from the rendered
 environment file.
 
+### Rendered environment file
+The per-service environment file written into the deploy directory at deploy time from
+encrypted vault values, and read by Compose to resolve the stack's variable references.
+It is generated on the host and never committed, so it is the one part of a service's
+definition that exists nowhere in the repository.
+
+It is a transport, and transports can corrupt. Compose's parser treats an unquoted value
+as interpolatable, so a secret carrying the interpolation sigil is rewritten in passage
+rather than rejected — which is why every rendered value is quoted, regardless of whether
+today's secret happens to need it. A service's behaviour therefore depends on this file
+being both present and faithful. Absent, only variables written with an inline fallback
+take the Compose file's default; the rest resolve to empty strings, which is how a stack
+comes up with an unset credential. Present but mangled, the stack starts normally on the
+wrong values. Neither state fails anything — the only signal is a Compose warning on
+stderr that no deploy step is gated on — so the check that matters is what the running
+container actually received.
+
 ## Operations
 
 ### Mirror pair
