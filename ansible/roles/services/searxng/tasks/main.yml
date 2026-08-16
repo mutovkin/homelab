@@ -19,6 +19,11 @@
     src: settings.yml.j2
     dest: "{{ data_mount }}/searxng/config/settings.yml"
     mode: "0644"
+  # Renders vault_searxng_brave_api_key: --diff would print it in plaintext, on
+  # both sides on a rotation (#88). This task bypasses _deploy (it writes to the
+  # container mount path, not the deploy dir), so it needs its own diff:false.
+  # Not no_log — that would censor failure output too; see _deploy/tasks/main.yml.
+  diff: false
   register: searxng_settings_tpl
 
 # Required once search.favicon_resolver is set, else favicons 404 with
