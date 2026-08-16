@@ -66,6 +66,15 @@ Load it via a systemd oneshot (`enabled`, `RemainAfterExit=yes`,
 reboot. Template the ruleset with `validate: "/usr/sbin/nft -c -f %s"` so a
 malformed rule is caught before it's written.
 
+**Scope warning — docker-published ports.** This recipe's `hook input` chain only sees
+traffic delivered to the host's own stack. A **docker-published** port is DNAT'd in
+prerouting (`dstnat`/-100) and takes the FORWARD path, so an input-hook filter is
+silently inert for it. For those ports, hook `prerouting` at a priority before -100 and
+scope with `fib daddr type != local accept` — see
+[nftables-input-hook-inert-for-docker-published-ports](../integration-issues/nftables-input-hook-inert-for-docker-published-ports.md),
+which also hardens this doc's oneshot loader against externally flushed tables
+(check-and-heal + `PartOf=nftables.service`).
+
 ## Why This Matters
 
 The instinct (a default-drop chain with explicit allows) is exactly what locks
@@ -93,3 +102,4 @@ unless you have console/IPMI fallback and a deliberate full-firewall design.
 
 - Issue #28; builds on #9 (bind upsd to specific addresses, not 0.0.0.0).
 - [[ansible-change-loop-pitfalls]] — check-mode safety.
+- [nftables-input-hook-inert-for-docker-published-ports](../integration-issues/nftables-input-hook-inert-for-docker-published-ports.md) — docker-published-port variant; self-healing loader hardening (#80, #112).
