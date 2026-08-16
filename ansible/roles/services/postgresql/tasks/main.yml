@@ -6,14 +6,27 @@
 # postgres_firewall (host_addr/ports/allowed_sources) comes from host_vars;
 # deliberately NO defaults — a host that deploys this role without defining it
 # must fail loudly, not silently deploy unprotected.
-- name: Assert postgres firewall allowlist is defined and has no wildcards
+- name: Assert postgres firewall allowlist is defined and scoped
   ansible.builtin.assert:
     that:
       - postgres_firewall.allowed_sources | length > 0
-      - postgres_firewall.allowed_sources | intersect(['0.0.0.0/0', '::/0', '0.0.0.0', '::', '*']) | length == 0
+      # Structural, not a spelling blocklist: a list of forbidden strings would
+      # wave through 192.168.0.0/0, 0/0 and 0.0.0.00/0. Every entry must be an
+      # IPv4 CIDR with a /1../32 prefix, which rejects /0, malformed and
+      # non-IPv4 entries. An out-of-range octet is caught downstream by the
+      # nft -c -f validate on the ruleset template.
+      - >-
+        postgres_firewall.allowed_sources
+        | reject('match', '^\d{1,3}(\.\d{1,3}){3}/([1-9]|[12]\d|3[0-2])$')
+        | list | length == 0
+      # A drifted host_addr silently no-ops the entire filter: every packet
+      # would exit early at the ruleset's `ip daddr != host_addr accept`.
+      - postgres_firewall.host_addr in ansible_all_ipv4_addresses
     fail_msg: >-
-      postgres_firewall.allowed_sources must list specific sources — a wildcard
-      or empty list would re-open the exposure #79 closes.
+      postgres_firewall must be scoped: allowed_sources non-empty with every
+      entry an IPv4 CIDR of prefix /1../32 (a wildcard or empty list would
+      re-open the exposure #79 closes), and host_addr must be one of this
+      host's real IPv4 addresses — a drifted value makes the filter inert.
     success_msg: "postgres firewall allowlist is scoped."
 
 - name: Install nftables
@@ -33,14 +46,14 @@
     dest: /etc/nftables.d/postgres-firewall.nft
     mode: "0644"
     validate: "/usr/sbin/nft -c -f %s"
-  notify: reload-postgres-firewall
+  register: postgres_fw_ruleset
 
 - name: Deploy postgres firewall systemd unit
   ansible.builtin.template:
     src: postgres-firewall.service.j2
     dest: /etc/systemd/system/postgres-firewall.service
     mode: "0644"
-  notify: reload-postgres-firewall
+  register: postgres_fw_unit
 
 - name: Enable and start postgres firewall
   ansible.builtin.systemd:
@@ -50,6 +63,43 @@
     daemon_reload: true
   # In --check the unit file isn't actually written, so enable/start can't
   # find it. Skip this one task in check mode; a real run writes it first.
+  when: not ansible_check_mode
+
+# `state: started` above is a no-op once the unit is active, and RemainAfterExit
+# keeps it "active" even after something else wiped the table — /etc/nftables.conf
+# opens with `flush ruleset`, so any restart of the enabled nftables.service (an
+# unattended-upgrades package upgrade, say) silently deletes inet postgres_fw.
+# The unit's PartOf=nftables.service re-applies it in that case; this probe is
+# the belt-and-braces check that a converged play means a LOADED table.
+# check_mode: false — a read-only probe is safe and its result drives the
+# decisions below, which would otherwise be undefined in --check.
+- name: Probe whether the postgres firewall table is loaded
+  ansible.builtin.command: nft list table inet postgres_fw
+  register: postgres_fw_probe
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+# Reloads on a template change AND self-heals an externally flushed table.
+# Deliberately NO default() filters: a renamed register must fail loudly
+# rather than silently skip the reload (the do-nothing failure mode of #78).
+- name: Reload postgres firewall
+  ansible.builtin.systemd:
+    name: postgres-firewall.service
+    state: restarted
+    daemon_reload: true
+  when:
+    - not ansible_check_mode
+    - postgres_fw_ruleset is changed or postgres_fw_unit is changed
+      or 'drop' not in postgres_fw_probe.stdout
+
+# A green play must mean a loaded firewall. Asserting on the drop verdict
+# rather than mere table existence catches a half-loaded/truncated table.
+- name: Verify postgres firewall table is loaded
+  ansible.builtin.command: nft list table inet postgres_fw
+  register: postgres_fw_loaded
+  changed_when: false
+  failed_when: "'drop' not in postgres_fw_loaded.stdout"
   when: not ansible_check_mode
 
 # Pre-create the shared network as EXTERNAL so it persists independent of this
@@ -190,11 +240,14 @@
 
 # With hba_file now really read, a bad config would crash-loop postgres while
 # the play still reported green — prove the server came back before declaring
-# success.
+# success. Runs as the postgres OS user: pg_isready's PQping ignores the auth
+# outcome (so it exits 0 either way), but under `local ... peer` a probe as
+# root logs a FATAL peer-authentication line every time (#79).
 - name: Wait for postgres to accept connections after restart
   community.docker.docker_container_exec:
     container: postgres
-    command: pg_isready -U postgres
+    user: postgres
+    command: pg_isready
   register: postgres_ready
   until: postgres_ready.rc == 0
   retries: 12

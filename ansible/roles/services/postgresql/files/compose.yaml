@@ -27,7 +27,12 @@ services:
       - postgres_network
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # Must run as the postgres OS user: pg_hba uses `local ... peer`, so a
+      # probe as root logs a FATAL peer-authentication line every interval
+      # (pg_isready still exits 0 — PQping ignores the auth outcome — so the
+      # only symptom is ~2900 FATALs/day in the server log). gosu ships in the
+      # official postgres image.
+      test: ["CMD-SHELL", "gosu postgres pg_isready"]
       interval: 30s
       timeout: 10s
       retries: 3

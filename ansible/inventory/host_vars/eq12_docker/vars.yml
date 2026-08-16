@@ -29,6 +29,7 @@ docker_networks:
 # with the LAN entries in roles/services/postgresql/files/config/pg_hba.conf.
 postgres_firewall:
   host_addr: 192.168.25.15
+  lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
   ports: [5432, 10080]
   allowed_sources:
     - 192.168.25.20/32  # NPM LXC (CT 104)
