@@ -38,7 +38,7 @@
     enabled: true
     state: started
     daemon_reload: true
-  # In --check the unit file isn't actually written, so enable/start can't
+  # In --check the unit file may not have been written yet, so enable/start can't
   # find it. Skip this one task in check mode; a real run writes it first.
   when: not ansible_check_mode
 
@@ -63,6 +63,24 @@
   changed_when: false
   when: not ansible_check_mode
 
+# --- Admin token shape --------------------------------------------------------
+# Vaultwarden accepts a non-PHC ADMIN_TOKEN as a LITERAL plaintext token — it does not
+# reject it, warn, or fail a healthcheck. So a mangled, truncated, or hand-edited hash
+# does not break the deploy; it silently restores exactly the plaintext-credential
+# exposure #81 removed, with every run green. Check the shape before we get anywhere
+# near the vault data. Pure variable check, so it runs in check mode too.
+- name: Assert the Vaultwarden admin token is an Argon2id PHC hash
+  ansible.builtin.assert:
+    that:
+      - vault_vaultwarden_admin_token_hash is match('^\$argon2id\$')
+      - vault_vaultwarden_admin_token_hash is match('^[A-Za-z0-9+/$,=.]+$')
+    fail_msg: >-
+      vault_vaultwarden_admin_token_hash is not an Argon2id PHC string, so Vaultwarden
+      would treat it as a PLAINTEXT admin token and undo #81. Regenerate it with
+      `docker run --rm -it vaultwarden/server:latest /vaultwarden hash` and store the
+      $argon2id$... value itself (not the ADMIN_TOKEN='...' wrapper the helper prints).
+    quiet: true
+
 # --- Pre-upgrade backup -------------------------------------------------------
 # The stack deploys with pull: always, so any deploy can upgrade the vault. Take a
 # consistent snapshot first — but only when the vault data would actually be handed to
@@ -78,19 +96,55 @@
 # The vault data can exist without the container (manual docker rm, watchtower-recreate
 # incidents) — in that state the next deploy would start a NEW image on the OLD SQLite
 # data with no backup. Gate the backup on the DATA, not the container (#107).
-# `find` on a missing path warns and returns matched=0 rather than failing, so an
-# untouched host correctly reports "no data".
+#
+# Two tasks rather than one, because `find` collapses "directory absent" and
+# "directory present but unreadable" into the same matched=0 answer. The stat
+# distinguishes them, so the assert below can treat the second case as an error
+# instead of as "no data".
+- name: Stat the Vaultwarden data directory
+  ansible.builtin.stat:
+    path: "{{ data_mount }}/vaultwarden"
+  register: vaultwarden_data_dir
+  check_mode: false
+
+# hidden: true because find skips dotfiles by default — without it this asks
+# "non-empty ignoring dotfiles", and a vault directory is not safe to treat as empty
+# just because everything in it happens to be hidden.
 - name: Check whether Vaultwarden data exists
   ansible.builtin.find:
     paths: "{{ data_mount }}/vaultwarden"
     file_type: any
+    hidden: true
     recurse: false
   register: vaultwarden_data_files
   check_mode: false
+  when: vaultwarden_data_dir.stat.exists | default(false)
 
 - name: Determine whether Vaultwarden data is present
   ansible.builtin.set_fact:
-    vaultwarden_data_present: "{{ (vaultwarden_data_files.matched | default(0) | int) > 0 }}"
+    vaultwarden_data_present: >-
+      {{ (vaultwarden_data_dir.stat.exists | default(false))
+         and (vaultwarden_data_files.matched | default(0) | int) > 0 }}
+
+- name: Assert the Vaultwarden data probe is trustworthy
+  ansible.builtin.assert:
+    that:
+      # An existing directory that find could not read (permissions, a dataset that
+      # has not been mounted yet) reports matched=0 — byte-identical to "no data",
+      # and "no data" means no backup. Refuse to guess.
+      - >-
+        not (vaultwarden_data_dir.stat.exists | default(false))
+        or (vaultwarden_data_files.skipped_paths | default({}) | length) == 0
+      # A live container whose data we cannot see is near-proof the probe is wrong
+      # (bad data_mount, volume not mounted) — or that the vault was wiped underneath
+      # a running container. Both are reasons to stop, not to deploy unbacked.
+      - not (vaultwarden_container.exists and not vaultwarden_data_present)
+    fail_msg: >-
+      Cannot trust the Vaultwarden data probe at {{ data_mount }}/vaultwarden: the
+      directory is unreadable, or a running container has no visible data. Proceeding
+      would risk handing the vault to a new image with no backup (#107). Check the
+      mount and the directory's permissions, then re-run.
+    quiet: true
 
 - name: Read the Vaultwarden image reference from the compose file
   ansible.builtin.set_fact:
@@ -152,6 +206,7 @@
         dest: "{{ data_mount }}/backups/vaultwarden-{{ ansible_date_time.iso8601_basic_short }}.tgz"
         format: gz
         mode: "0600"
+      register: vaultwarden_archive
 
     - name: Find existing Vaultwarden backups
       ansible.builtin.find:
@@ -170,6 +225,20 @@
         label: "{{ item.path }}"
 
   rescue:
+    # A write that died mid-stream (disk full, killed process) leaves a truncated
+    # .tgz that the retention prune cannot distinguish from a good backup — and it
+    # would then age out a real one. Delete it, but ONLY when archiving is what
+    # failed: if the prune failed instead, that archive completed and is the only
+    # copy of the pre-upgrade vault. The dest expression matches the archive task
+    # exactly; ansible_date_time is a gathered fact, constant for the whole play.
+    - name: Remove a partially written Vaultwarden archive
+      ansible.builtin.file:
+        path: "{{ data_mount }}/backups/vaultwarden-{{ ansible_date_time.iso8601_basic_short }}.tgz"
+        state: absent
+      when:
+        - vaultwarden_archive is defined
+        - vaultwarden_archive is failed
+
     # Never leave the vault down because a backup failed. Restart it on the image
     # it was already running, then abort so the upgrade is not applied unbacked.
     # Only when there was a container to begin with: state:started against a
@@ -180,12 +249,19 @@
         state: started
       when: vaultwarden_container.exists
 
+    # Carries the real failure forward: a curated message that drops the underlying
+    # error is how a backup failure becomes an unexplained one.
     - name: Fail because the pre-upgrade backup did not complete
       ansible.builtin.fail:
         msg: >-
-          Pre-upgrade backup of {{ data_mount }}/vaultwarden failed. Vaultwarden was
-          restarted on its existing image and the upgrade was NOT applied. Resolve the
-          backup failure (disk space, permissions) and re-run to upgrade.
+          Pre-upgrade backup of {{ data_mount }}/vaultwarden failed at task
+          '{{ ansible_failed_task.name }}':
+          {{ ansible_failed_result.msg | default('see the error above') }}.
+          {{ 'Vaultwarden was restarted on its existing image.'
+             if vaultwarden_container.exists
+             else 'No container existed, so nothing was restarted.' }}
+          The upgrade was NOT applied. Resolve the backup failure (disk space,
+          permissions) and re-run to upgrade.
 
 - name: Deploy Vaultwarden via the shared service pipeline
   ansible.builtin.include_role:
