@@ -186,6 +186,22 @@ state does. Check-and-heal is the repair counterpart to a Silent-green failure: 
 probe asks the artifact that does the work, never the configuration or service that
 describes it.
 
+### Canary dry-run
+A verification run that substitutes a recognisable fake value for a real secret and then
+searches the run's own output for both, proving a suppression works without ever printing
+the thing being protected.
+
+The technique exists because the obvious check is circular: grepping output for a secret
+and finding nothing is equally consistent with the suppression working and with the test
+never having exercised the code path at all. A canary run therefore becomes evidence only
+when paired with its counterfactual — the identical run against the unfixed code, which
+must show both the canary and the real value leaking. Absence means something only after
+presence has been demonstrated. The counterfactual's output holds a genuine secret, so it
+is searched and destroyed in one step rather than displayed, and the real value is matched
+by substitution so it is never echoed. Reverting a file to run the counterfactual restores
+the last committed state, which silently discards an uncommitted fix — so the fix is
+committed first, or re-applied and re-verified afterwards.
+
 ### Reconcile task
 An explicit task that converges one named attribute of an already-existing Guest,
 written and owned by the role rather than delegated to a provisioning module.
@@ -228,6 +244,20 @@ can be rebuilt from scratch, while the running guest is left alone. The cost is 
 inventory and live state may legitimately disagree for these fields — so a declared
 value is not evidence of the live value, and rebuild fidelity is a separate concern
 from convergence.
+
+### Blank-credential disable
+A credential whose empty value is read by the consuming software as an instruction to
+switch the protection off, rather than as a malformed value to reject.
+
+It turns an ordinary configuration mistake — a renamed, misspelled or not-yet-set secret —
+into a running system with the protection removed and every health signal green, giving it
+an unusually short path from typo to exposure among Silent-green failures. The defence is
+to refuse blankness at each layer that could introduce it rather than at the one that
+consumes it: assert the value is present before any state is touched, forbid an empty
+fallback where it is rendered, and make the stack refuse to start on an unset value. A
+health endpoint does not test for this, because services commonly exempt those endpoints
+from the very control in question; the test is a deliberately unauthenticated request that
+must be refused.
 
 ### Silent-green failure
 A failure in which a control is absent or does nothing, while every signal the
