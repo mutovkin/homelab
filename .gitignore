@@ -26,7 +26,7 @@ ansible/.ansible/
 # ansible/roles/services/*/ (#85); without this ignore the leftovers would surface
 # in git status one `git add -A` away from a public repo. Purging the files (and
 # then this line) is #92.
-containers/
+/containers/
 
 # Database dump/backup directories never belong in the repo (was in the old
 # containers/.gitignore)

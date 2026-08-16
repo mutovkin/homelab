@@ -14,8 +14,8 @@
 
 # delete: true — the deploy dir is fully Ansible-owned: a file removed from the
 # role's files/ is removed from the host (this is what retires portainer.sh,
-# sample.ini and the old <svc>.yml compose filenames). Excluded files (.env,
-# repo-only README/docs) are protected from deletion by rsync's exclude rules.
+# sample.ini and the old <svc>.yml compose filenames). Excluded files (.env and
+# README.md) are protected from deletion by rsync's exclude rules.
 - name: Synchronize deploy payload for {{ svc }}
   become: false
   ansible.posix.synchronize:
@@ -50,6 +50,8 @@
 - name: Deploy compose stack for {{ svc }}
   community.docker.docker_compose_v2:
     project_src: "{{ svc_deploy_dir }}"
+    # roles/services/lms/templates/lms-nfs-heal.sh.j2 hardcodes this same filename
+    # so its self-heal path brings up the same config — change both together.
     files:
       - compose.yaml
     state: present
