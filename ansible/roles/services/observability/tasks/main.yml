@@ -4,29 +4,6 @@
     path: /var/run/docker.sock
   register: docker_socket_stat
 
-- name: Create observability deploy directory
-  ansible.builtin.file:
-    path: "{{ data_mount }}/deploy/observability"
-    state: directory
-    mode: "0755"
-
-- name: Synchronize Observability compose files
-  become: false
-  ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../containers/observability/"
-    dest: "{{ data_mount }}/deploy/observability/"
-    delete: false
-    rsync_opts:
-      - "--exclude=.env"
-      - "--exclude=.env.example"
-      - "--exclude=README.md"
-
-- name: Template observability .env file
-  ansible.builtin.template:
-    src: env.j2
-    dest: "{{ data_mount }}/deploy/observability/.env"
-    mode: "0600"
-
 - name: Create observability data directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -47,7 +24,7 @@
 # the only way to apply it is an ad-hoc scp — which Critical Rule 1 forbids.
 - name: Deploy observability service configs
   ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../../containers/observability/data/{{ item.src }}"
+    src: "data/{{ item.src }}"
     dest: "{{ data_mount }}/{{ item.src }}"
     mode: "0644"
   loop:
@@ -62,12 +39,16 @@
 # Grafana keeps provisioning a datasource that no longer exists in version control.
 # --checksum because rsync's default mtime comparison reports every file as changed
 # on a fresh clone, which would restart Grafana spuriously on the other operator machine.
+# times: false because rsync would otherwise "touch" mtimes on content-identical files
+# (a fresh clone/worktree gives every file a new mtime), flipping changed and restarting
+# Grafana for nothing.
 - name: Deploy Grafana provisioning
   become: false
   ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../containers/observability/data/grafana/provisioning/"
+    src: "{{ role_path }}/files/data/grafana/provisioning/"
     dest: "{{ data_mount }}/grafana/provisioning/"
     delete: true
+    times: false
     rsync_opts:
       - "--checksum"
   register: grafana_provisioning
@@ -78,19 +59,18 @@
 - name: Deploy Grafana dashboards
   become: false
   ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../containers/observability/data/grafana/dashboards/"
+    src: "{{ role_path }}/files/data/grafana/dashboards/"
     dest: "{{ data_mount }}/grafana/dashboards/"
     delete: true
+    times: false
     rsync_opts:
       - "--checksum"
 
-- name: Deploy observability stack
-  community.docker.docker_compose_v2:
-    project_src: "{{ data_mount }}/deploy/observability"
-    files:
-      - observability.yml
-    state: present
-    pull: always
+- name: Deploy observability via the shared service pipeline
+  ansible.builtin.include_role:
+    name: services/_deploy
+  vars:
+    svc: observability
 
 # Compose does not track the contents of bind-mounted files, so a config change on
 # its own never restarts the container. Restart the affected services explicitly,

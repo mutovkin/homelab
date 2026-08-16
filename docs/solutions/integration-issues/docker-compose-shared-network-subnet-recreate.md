@@ -82,7 +82,7 @@ because nothing else depends on them.
 
 - Before parameterizing a Compose network subnet, check whether the network is
   referenced as `external: true` by any other stack
-  (`grep -rl <network_name> containers/*/*.yml`). More than one reference = shared
+  (`grep -rl <network_name> ansible/roles/services/*/files/compose.yaml`). More than one reference = shared
   = leave literal.
 - Deploy service/network changes to a live host and verify container state
   **before merge** — this class of failure is invisible to `--check` and to lint.

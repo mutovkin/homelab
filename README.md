@@ -76,23 +76,16 @@ homelab/
 │   ├── eq12.md
 │   ├── n5pro.md
 │   └── architecture.md
-├── ansible/               # Ansible — host config, VM/LXC provisioning, service deployment
-│   ├── inventory/         # Hosts, group vars, host vars, vault
-│   ├── playbooks/         # Orchestration playbooks
-│   └── roles/             # common, proxmox_host, proxmox_guests, docker_host, services/*
-└── containers/            # Docker Compose stacks (standalone-usable)
-    ├── postgresql/
-    ├── observability/
-    ├── vaultwarden/
-    ├── searxng/
-    ├── joplin/
-    ├── immich/
-    ├── frigate/
-    ├── nextcloud/
-    ├── lyrion/
-    ├── portainer/
-    └── watchtower/
+└── ansible/               # Ansible — host config, VM/LXC provisioning, service deployment
+    ├── inventory/         # Hosts, group vars, host vars, vault
+    ├── playbooks/         # Orchestration playbooks
+    └── roles/             # common, proxmox_host, proxmox_guests, docker_host,
+                           # services/* (compose.yaml + env.j2 per service)
 ```
+
+Each service is one self-contained role: `ansible/roles/services/<svc>/` holds its
+`files/compose.yaml`, any shipped configs under `files/`, its `templates/env.j2`, and
+its README. The shared `services/_deploy` role runs the deploy pipeline for all of them.
 
 ## Container Services
 
@@ -100,25 +93,25 @@ homelab/
 
 | Service                                    | Port             | Description                              |
 | ------------------------------------------ | ---------------- | ---------------------------------------- |
-| [PostgreSQL](containers/postgresql/)       | 5432, 10080      | Database server + pgAdmin                |
-| [Observability](containers/observability/) | 8428, 9428, 3000 | VictoriaMetrics + VictoriaLogs + Grafana |
-| [Vaultwarden](containers/vaultwarden/)     | 8086             | Bitwarden-compatible password manager    |
-| [SearXNG](containers/searxng/)             | 18080            | Privacy-respecting search engine         |
-| [Joplin](containers/joplin/)               | 22300            | Note-taking server                       |
-| [Portainer](containers/portainer/)         | 9000             | Container management UI                  |
-| [Watchtower](containers/watchtower/)       | —                | Automatic container updates              |
+| [PostgreSQL](ansible/roles/services/postgresql/)       | 5432, 10080      | Database server + pgAdmin                |
+| [Observability](ansible/roles/services/observability/) | 8428, 9428, 3000 | VictoriaMetrics + VictoriaLogs + Grafana |
+| [Vaultwarden](ansible/roles/services/vaultwarden/)     | 8086             | Bitwarden-compatible password manager    |
+| [SearXNG](ansible/roles/services/searxng/)             | 18080            | Privacy-respecting search engine         |
+| [Joplin](ansible/roles/services/joplin/)               | 22300            | Note-taking server                       |
+| [Portainer](ansible/roles/services/portainer/)         | 9000             | Container management UI                  |
+| [Watchtower](ansible/roles/services/watchtower/)       | —                | Automatic container updates              |
 
 ### N5 Pro (CT 201 — n5pro-docker)
 
 | Service                                 | Port             | Description                                          |
 | --------------------------------------- | ---------------- | ---------------------------------------------------- |
-| [PostgreSQL](containers/postgresql/)    | 5432             | Database for Immich + NextCloud                      |
-| [Immich](containers/immich/)            | 2283             | Self-hosted photo/video management (GPU-accelerated) |
-| [Frigate](containers/frigate/)          | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
-| [NextCloud](containers/nextcloud/)      | 8080             | File sync and collaboration                          |
-| [Lyrion](containers/lyrion/)            | 9001, 9090, 3483 | Music server (Squeezebox/LMS) — NFS from TrueNAS     |
-| [Portainer](containers/portainer/)      | 9000             | Container management UI                              |
-| [Watchtower](containers/watchtower/)    | —                | Automatic container updates                          |
+| [PostgreSQL](ansible/roles/services/postgresql/) | 5432             | Database for Immich + NextCloud                      |
+| [Immich](ansible/roles/services/immich/)         | 2283             | Self-hosted photo/video management (GPU-accelerated) |
+| [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
+| [NextCloud](ansible/roles/services/nextcloud/)   | 8080             | File sync and collaboration                          |
+| [LMS](ansible/roles/services/lms/)               | 9001, 9090, 3483 | Music server (Lyrion/Squeezebox) — NFS from TrueNAS   |
+| [Portainer](ansible/roles/services/portainer/)   | 9000             | Container management UI                              |
+| [Watchtower](ansible/roles/services/watchtower/) | —                | Automatic container updates                          |
 
 ## Documentation
 

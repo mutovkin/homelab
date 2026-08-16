@@ -1,33 +1,4 @@
 ---
-- name: Create Vaultwarden deploy directory
-  ansible.builtin.file:
-    path: "{{ data_mount }}/deploy/vaultwarden"
-    state: directory
-    mode: "0755"
-
-- name: Synchronize Vaultwarden compose and config files
-  become: false
-  ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../containers/vaultwarden/"
-    dest: "{{ data_mount }}/deploy/vaultwarden/"
-    delete: false
-    rsync_opts:
-      - "--exclude=.env"
-      - "--exclude=.env.example"
-      - "--exclude=README.md"
-
-- name: Template Vaultwarden .env file
-  ansible.builtin.template:
-    src: env.j2
-    dest: "{{ data_mount }}/deploy/vaultwarden/.env"
-    mode: "0600"
-
-- name: Create Vaultwarden data directory
-  ansible.builtin.file:
-    path: "{{ data_mount }}/vaultwarden"
-    state: directory
-    mode: "0755"
-
 # --- Pre-upgrade backup -------------------------------------------------------
 # The stack deploys with pull: always, so any deploy can upgrade the vault. Take a
 # consistent snapshot first — but only when the image actually changed, otherwise a
@@ -42,7 +13,7 @@
 - name: Read the Vaultwarden image reference from the compose file
   ansible.builtin.set_fact:
     vaultwarden_image: >-
-      {{ (lookup('file', playbook_dir ~ '/../../containers/vaultwarden/vaultwarden.yml')
+      {{ (lookup('file', role_path ~ '/files/compose.yaml')
           | from_yaml).services.vaultwarden.image }}
 
 # Deliberately the compose file's image, not the running container's: if the tag is
@@ -123,10 +94,10 @@
           restarted on its existing image and the upgrade was NOT applied. Resolve the
           backup failure (disk space, permissions) and re-run to upgrade.
 
-- name: Deploy Vaultwarden stack
-  community.docker.docker_compose_v2:
-    project_src: "{{ data_mount }}/deploy/vaultwarden"
-    files:
-      - vaultwarden.yml
-    state: present
-    pull: always
+- name: Deploy Vaultwarden via the shared service pipeline
+  ansible.builtin.include_role:
+    name: services/_deploy
+  vars:
+    svc: vaultwarden
+    svc_data_dirs:
+      - "{{ data_mount }}/vaultwarden"

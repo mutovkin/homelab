@@ -1,10 +1,4 @@
 ---
-- name: Create SearXNG deploy directory
-  ansible.builtin.file:
-    path: "{{ data_mount }}/deploy/searxng"
-    state: directory
-    mode: "0755"
-
 - name: Ensure SearXNG config and cache directories exist
   ansible.builtin.file:
     path: "{{ item }}"
@@ -16,26 +10,6 @@
     # Persistent favicon cache — left root-owned (the worker's uid) and outside
     # the entrypoint-managed paths so it isn't chowned to 977. See favicons.toml.
     - "{{ data_mount }}/searxng/favicons"
-
-# Sync the compose file (project_src). settings.yml is deployed separately to the
-# container mount path below (config/ here would be unused), so exclude it.
-- name: Synchronize SearXNG compose file
-  become: false
-  ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../containers/searxng/"
-    dest: "{{ data_mount }}/deploy/searxng/"
-    delete: false
-    rsync_opts:
-      - "--exclude=.env"
-      - "--exclude=.env.example"
-      - "--exclude=README.md"
-      - "--exclude=config/"
-
-- name: Template SearXNG .env file
-  ansible.builtin.template:
-    src: env.j2
-    dest: "{{ data_mount }}/deploy/searxng/.env"
-    mode: "0600"
 
 # Deploy the minimal settings.yml to the container's mount path (/data/searxng/
 # config), not the unused deploy dir. braveapi renders only if its vault key is
@@ -52,18 +26,20 @@
 # worker) — see the file header and #65. Static file (no secrets) -> copy.
 - name: Deploy SearXNG favicons.toml to the container mount path
   ansible.builtin.copy:
-    src: "{{ playbook_dir }}/../../containers/searxng/config/favicons.toml"
+    src: config/favicons.toml
     dest: "{{ data_mount }}/searxng/config/favicons.toml"
     mode: "0644"
   register: searxng_favicons
 
-- name: Deploy SearXNG stack
-  community.docker.docker_compose_v2:
-    project_src: "{{ data_mount }}/deploy/searxng"
-    files:
-      - searxng.yml
-    state: present
-    pull: always
-    # Reload the bind-mounted config when settings.yml or favicons.toml changed
-    # (compose won't restart on a mounted-file content change by itself).
-    recreate: "{{ 'always' if (searxng_settings_tpl.changed or searxng_favicons.changed) else 'auto' }}"
+# config/ is excluded from the deploy payload: settings.yml/favicons.toml are
+# deployed to the container mount path above; a copy in the deploy dir would be
+# unused. Recreate reloads the bind-mounted config when it changed (compose
+# won't restart on a mounted-file content change by itself).
+- name: Deploy SearXNG via the shared service pipeline
+  ansible.builtin.include_role:
+    name: services/_deploy
+  vars:
+    svc: searxng
+    svc_rsync_extra:
+      - "--exclude=config/"
+    svc_recreate: "{{ 'always' if (searxng_settings_tpl.changed or searxng_favicons.changed) else 'auto' }}"

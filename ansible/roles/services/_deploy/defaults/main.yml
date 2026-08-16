@@ -1,0 +1,9 @@
+---
+# Parameters for the shared service deploy pipeline (see tasks/main.yml).
+# Callers set `svc`; everything else has a sane default.
+# svc_deploy_dir depends on `data_mount`, which every Docker host defines in its
+# inventory host_vars — this role does not define it.
+svc_deploy_dir: "{{ data_mount }}/deploy/{{ svc }}"
+svc_data_dirs: []
+svc_rsync_extra: []
+svc_recreate: auto

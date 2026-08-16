@@ -1,6 +1,7 @@
 # SearXNG settings — MINIMAL config (managed by Ansible, searxng role).
-# Mirrors containers/searxng/config/settings.yml; see #50 for why we use
-# use_default_settings instead of pinning the full engine catalog (drift).
+# Single source of truth (#85): the old containers/ mirror copy is gone.
+# See #50 for why we use use_default_settings instead of pinning the full
+# engine catalog (drift).
 # The braveapi engine renders only when vault_searxng_brave_api_key is set in
 # the vault — the key is never stored in the (public) repo.
 use_default_settings:

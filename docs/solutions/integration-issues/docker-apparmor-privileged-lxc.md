@@ -86,7 +86,7 @@ start** (`ansible/roles/docker_host/tasks/main.yml`). New order:
 ```
 
 **Layer 2 — Add `security_opt: ["apparmor:unconfined"]` to every service** in all 11
-compose files under `containers/`.
+compose files at `ansible/roles/services/<svc>/files/compose.yaml`.
 
 ```yaml
 services:
@@ -124,7 +124,7 @@ Editing `daemon.json` was unnecessary and was kept out of the template.
 
 ## Prevention
 
-- **Every new compose service** added under `containers/` must include
+- **Every new compose service** added at `ansible/roles/services/<svc>/files/compose.yaml` must include
   `security_opt: ["apparmor:unconfined"]` — both Docker hosts are privileged LXCs.
   Apply it to *each* service in a multi-service file, not just the first.
 - **Keep the AppArmor stop/mask block ordered before** "Configure Docker daemon"

@@ -1,34 +1,14 @@
 ---
-- name: Create Lyrion deploy directory
+# Naming (#93): repo-side this service is `lms` everywhere (role, tag, files).
+# The HOST paths deliberately keep the legacy `lyrion` name: the deploy-dir
+# basename is the compose project name, so renaming {{ data_mount }}/deploy/lyrion
+# would recreate the container under a new project, and {{ data_mount }}/lyrion
+# holds live state. A host-path migration would be a deliberate, separate change.
+- name: Create LMS config directory
   ansible.builtin.file:
-    path: "{{ data_mount }}/deploy/lyrion"
+    path: "{{ data_mount }}/lyrion/config"
     state: directory
     mode: "0755"
-
-- name: Synchronize Lyrion compose files
-  become: false
-  ansible.posix.synchronize:
-    src: "{{ playbook_dir }}/../../containers/lyrion/"
-    dest: "{{ data_mount }}/deploy/lyrion/"
-    delete: false
-    rsync_opts:
-      - "--exclude=.env"
-      - "--exclude=.env.example"
-      - "--exclude=README.md"
-
-- name: Template Lyrion .env file
-  ansible.builtin.template:
-    src: env.j2
-    dest: "{{ data_mount }}/deploy/lyrion/.env"
-    mode: "0600"
-
-- name: Create Lyrion data directories
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    mode: "0755"
-  loop:
-    - "{{ data_mount }}/lyrion/config"
 
 # The LMS image runs /config/custom-init.sh on every container start (its
 # sanctioned extension hook). ffmpeg is needed for transcoding but isn't in the
@@ -68,12 +48,9 @@
     enabled: true
     daemon_reload: "{{ lms_heal_unit.changed }}"
 
-# If the compose file name/list changes here, update COMPOSE_FILE in
-# lms-nfs-heal.sh.j2 too — the self-heal unit re-ups the stack independently.
-- name: Deploy Lyrion stack
-  community.docker.docker_compose_v2:
-    project_src: "{{ data_mount }}/deploy/lyrion"
-    files:
-      - lyrion.yml
-    state: present
-    pull: always
+- name: Deploy LMS via the shared service pipeline
+  ansible.builtin.include_role:
+    name: services/_deploy
+  vars:
+    svc: lms
+    svc_deploy_dir: "{{ data_mount }}/deploy/lyrion"
