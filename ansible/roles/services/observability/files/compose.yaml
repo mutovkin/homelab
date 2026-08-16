@@ -107,6 +107,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /data/vector/vector.yaml:/etc/vector/vector.yaml:ro # Vector configuration file
       - /var/log:/var/log:ro
+      - /data/vector/data:/var/lib/vector # data_dir: disk buffer + file checkpoints must survive recreates (#82)
     command: --config /etc/vector/vector.yaml
     environment:
       TZ: ${TIMEZONE:-UTC}

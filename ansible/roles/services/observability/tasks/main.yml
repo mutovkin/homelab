@@ -13,6 +13,7 @@
     - "{{ data_mount }}/victoriametrics"
     - "{{ data_mount }}/victorialogs"
     - "{{ data_mount }}/vector"
+    - "{{ data_mount }}/vector/data"
     - "{{ data_mount }}/telegraf"
     - "{{ data_mount }}/grafana/data"
     - "{{ data_mount }}/grafana/config"
