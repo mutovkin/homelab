@@ -1,6 +1,7 @@
 ---
 title: "Watchtower with WATCHTOWER_LABEL_ENABLE never self-updates and silently ignores monitor-only containers"
 date: 2026-08-13
+last_updated: 2026-08-16
 category: integration-issues
 module: watchtower
 problem_type: integration_issue
@@ -23,6 +24,8 @@ tags:
   - auto-update
   - notifications
   - shoutrrr
+  - image-pinning
+  - supply-chain
 ---
 
 # Watchtower with WATCHTOWER_LABEL_ENABLE never self-updates and silently ignores monitor-only containers
@@ -123,9 +126,68 @@ ports.
 - With `WATCHTOWER_CLEANUP=true`, images pulled for a *monitor-only* container are never "old
   images of an updated container", so they accumulate on disk until pruned separately.
 
+## Follow-on: per-class update posture (#83)
+
+Fixing the scan scope exposed the next question — everything in scope was on the same
+posture, so the 04:30 session applied any new image unattended, including to
+schema-migrating databases. #83 split the fleet into an auto class and a monitor-only
+class, and pinned Watchtower itself to an immutable tag. Three durable lessons came out
+of it. Full policy and the per-service table live in
+`ansible/roles/services/watchtower/README.md`.
+
+### Verify scan scope without waiting for the nightly session
+
+The count check above is only actionable the next morning. A throwaway one-shot answers
+it immediately, which is what you want right after changing labels:
+
+```bash
+docker run --rm \
+  --security-opt apparmor=unconfined \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  nickfedor/watchtower:1.20.3 \
+  --run-once --monitor-only --label-enable --no-startup-message 2>&1 \
+  | grep 'Update session completed'
+```
+
+`--monitor-only` makes the probe read-only regardless of what the scanned containers are
+labeled, so it can never apply an update as a side effect of measuring. On Docker-in-LXC
+hosts `--security-opt apparmor=unconfined` is **required** — without it the probe hits
+the same AppArmor wall as any compose service here and never starts, which reads as a
+tooling failure rather than the environment gotcha it is.
+
+### Pinning a container to an immutable tag opts it out of ALL notifications
+
+Watchtower compares digests for the **exact reference the container runs**. Its
+notifications are therefore "this tag now points somewhere new", not "a newer version
+exists". The distinction is invisible while everything floats on `:latest` and becomes
+load-bearing the moment you pin:
+
+- Moving tags — `:latest`, `:stable`, `:release`, `:lts`, and major lines like
+  `postgres:18` or `redis:7-alpine` — keep notifying, because patch releases republish
+  the same tag.
+- An immutable tag like `watchtower:1.20.3` notifies about nothing but a re-push of that
+  exact tag. A published `1.20.4` is simply invisible.
+
+So `pin + monitor-only` does not mean "we will be told and can decide". It means the
+unattended path is closed and **a human must check the releases page**. Pair every
+immutable pin with a written manual-check step, or the pin silently becomes indefinite
+staleness — the same failure this document opens with, reintroduced by the fix for it.
+
+### Docker Hub namespace ≠ GitHub org
+
+The fork ships as `nickfedor/watchtower` on Docker Hub but its source lives at
+`https://github.com/nicholas-fedor/watchtower`. `https://github.com/nickfedor/watchtower`
+**404s** — the org is unclaimed. Deriving a source URL from an image reference is a
+reasonable-looking guess that lands on a squattable name adjacent to an image holding
+`docker.sock` on every host, which is exactly the supply-chain shape the monitor-only
+posture defends against. Record the real URL next to the pin and say why it differs, or
+someone will "fix" the mismatch in the wrong direction.
+
 ## Related Issues
 
 - #71 — Watchtower never self-updates; migrate deprecated email notification config
 - #72 — Vaultwarden produces no update notifications; add pre-deploy backup
+- #83 — Update posture per container class; pin the update orchestrator
+  (policy: `ansible/roles/services/watchtower/README.md`)
 - Upstream `containrrr/watchtower` was archived 2025-12-17; this homelab runs the
   `nickfedor/watchtower` community fork.
