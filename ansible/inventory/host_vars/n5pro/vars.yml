@@ -183,12 +183,15 @@ proxmox_lxcs:
     unprivileged: false # required: host GID 993 (render) must pass through for /dev/kfd ROCm access
     mounts:
       # Allocation form — consumed at CREATE only (update:false, #86): a rebuild
-      # allocates a fresh empty 200G /data; the live volume today is
-      # local-zfs:subvol-201-disk-1. DR: restore /data before deploying services.
+      # allocates a fresh empty 200G /data; the live volume is
+      # local-zfs:subvol-201-disk-1 (pct config 201, 2026-08-16). DR: restore
+      # /data before deploying services. Nothing enforces that ordering yet —
+      # tracked in #127.
       # NOTE: /etc/pve/lxc/201.conf carries a [pve:pending] mp0 that is a
-      # semantically identical reorder of the live value (residue of the pre-#86
-      # blind update-PUT era) plus the pending `features: mount=nfs,nesting=1`
-      # from #86's fix. Both merge harmlessly at the CT's next operator-chosen
+      # semantically identical reorder of the live value — likely residue of the
+      # pre-#86 blind update-PUT era (origin unconfirmed; that PUT did send
+      # allocation form) — plus the pending `features: mount=nfs,nesting=1` from
+      # #86's fix. Both merge harmlessly at the CT's next operator-chosen
       # restart — do NOT restart the CT to "clean" them, and do not try to
       # reconcile them.
       mp0: "local-zfs:200,mp=/data"
