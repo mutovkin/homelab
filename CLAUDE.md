@@ -125,9 +125,19 @@ Hard-won lessons — check here before debugging from scratch.
   binary inside the image, so one that can never pass permanently blocks every redeploy.
   See [docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md](docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)
   and [docs/solutions/integration-issues/postgresql-mounted-configs-never-deployed-or-read.md](docs/solutions/integration-issues/postgresql-mounted-configs-never-deployed-or-read.md).
-- **Watchtower scan scope.** With `WATCHTOWER_LABEL_ENABLE=true`, `watchtower.enable=true` is
-  what puts a container in scope; `monitor-only=true` on its own is inert and the container is
-  never scanned or reported. Verify by comparing `scanned=N` against the labelled count.
+- **Watchtower scan scope & update posture.** With `WATCHTOWER_LABEL_ENABLE=true`,
+  `watchtower.enable=true` is what puts a container in scope; `monitor-only=true` on its own is
+  inert and the container is never scanned or reported. Every new compose service MUST pick a
+  posture class (#83): stateless/restart-tolerant → `enable` only (auto-update); stateful,
+  schema-migrating, or socket-holding → `enable` + `monitor-only` (notified, updated only via a
+  deliberate deploy — the pipeline's `pull: always` is the update mechanism). Decision table:
+  `ansible/roles/services/watchtower/README.md`. Verify by comparing `scanned=N` against the
+  labelled count — wait-free via a `--run-once --monitor-only` probe, which on our Docker-in-LXC
+  hosts requires `--security-opt apparmor=unconfined`. Pinning any image to an immutable tag
+  opts it out of ALL watchtower notifications (it only checks the reference the container runs)
+  — watchtower itself is pinned this way, so its bumps are a manual check of
+  <https://github.com/nicholas-fedor/watchtower/releases> (GitHub org ≠ Docker Hub namespace
+  `nickfedor`; the lookalike GitHub URL 404s — don't "fix" it).
   See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md).
 - **nftables `hook input` is inert for docker-published ports.** Docker DNATs published
   ports in prerouting (`dstnat`/-100) and the traffic takes the FORWARD path — an
