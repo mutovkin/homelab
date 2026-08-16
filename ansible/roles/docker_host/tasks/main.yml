@@ -71,6 +71,24 @@
     state: started
     enabled: true
 
+# community.docker's API modules (docker_network, docker_container,
+# docker_container_info, docker_image_pull, docker_container_exec) talk to the
+# Docker socket over HTTP and import Python `requests` ON THE TARGET. The
+# _deploy pipeline's docker_compose_v2 shells out to the `docker` CLI instead
+# and never needed it — which is how the gap stayed hidden: eq12 happens to
+# have python3-requests via dpkg (nothing in this repo installs it), while
+# n5pro-docker (Ubuntu 24.04) does not, so its first API-module task (#84's
+# lms_network cleanup) failed with "Failed to import the required Python
+# library (requests)". Installed here so every docker host can run those
+# modules — also unblocks re-enabling postgresql/immich/nextcloud on n5pro
+# (#91). Deliberately a dedicated task, not an inventory-overridable list:
+# inventory group_vars REPLACE role defaults, so a package that role tasks
+# depend on must not be overridable away.
+- name: Install Python requests (required by community.docker API modules)
+  ansible.builtin.apt:
+    name: python3-requests
+    state: present
+
 # --- ROCm userspace (GPU-enabled containers only) ---
 # Installs AMD ROCm libraries inside the LXC for GPU compute.
 # The host provides the kernel driver (amdgpu) and device nodes;

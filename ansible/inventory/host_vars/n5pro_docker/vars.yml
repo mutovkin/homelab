@@ -32,19 +32,33 @@ services:
 #   - frigate
 #   - nextcloud
 
-# Docker network subnets
+# Docker network subnets — n5pro allocation plan (#84).
+# Fleet-wide 172.16.0.0/12 map (keep every row disjoint):
+#   172.16–172.17   unassigned (docker0 now draws from each host's pool)
+#   172.18–172.19   n5pro auto-allocation pool (docker_default_address_pools below)
+#   172.20–172.25   eq12 range (pins in host_vars/eq12_docker; .21 is the
+#                   postgresql role hardcode — the same literal value on whichever
+#                   host runs it, which is fine: separate NAT'd bridges)
+#   172.26–172.31   n5pro pins (below); 172.30 unassigned — next free n5pro pin
+# lms has NO entry: lyrion runs network_mode: host and no committed compose ever
+# defined a network for it. The live lms_network (172.36.0.0/24 — public space)
+# was created outside Ansible during early bring-up; the lms role retires it.
 docker_networks:
-  immich: "172.31.0.0/24"
-  frigate: "172.32.0.0/24"
-  nextcloud: "172.33.0.0/24"
-  # Pinned to the LIVE network: portainer ran without a templated .env until #85, so
-  # its network was created from the compose default (172.23.0.0/24). Templating any
-  # other value would force a network+container recreate (see docs/solutions/
-  # integration-issues/docker-compose-shared-network-subnet-recreate.md). A deliberate
-  # renumber belongs to #84.
-  portainer: "172.23.0.0/24"
-  watchtower: "172.35.0.0/24"
-  lms: "172.36.0.0/24"
+  portainer: "172.26.0.0/24" # renumbered from live 172.23.0.0/24 — the deliberate recreate #106 deferred to #84
+  watchtower: "172.27.0.0/24" # renumbered from 172.35.0.0/24 (public address space)
+  frigate: "172.28.0.0/24" # latent (#91) — was 172.32.0.0/24 (public address space)
+  nextcloud: "172.29.0.0/24" # latent (#91) — was 172.33.0.0/24 (public address space)
+  immich: "172.31.0.0/24" # latent (#91) — unchanged, already valid RFC1918
+
+# Auto-allocation pool override (#84): the group default (172.20.0.0/14 in
+# group_vars/docker_hosts.yml) overlaps eq12's pins and n5pro's old portainer
+# subnet — ordering-dependent "Pool overlaps" failures on fresh bootstrap.
+# 172.18.0.0/15 is disjoint from every pinned subnet on both hosts. Moving the
+# fleet default (and deleting this override) is #126 — it needs an eq12 daemon
+# restart. docker0 draws from this pool too (it held 172.20.0.0/24 pre-#84).
+docker_default_address_pools:
+  - base: "172.18.0.0/15"
+    size: 24
 
 # NFS mount from TrueNAS (for Frigate recordings, media storage)
 truenas_nfs_server: "192.168.30.200"  # TrueNAS IP — update once assigned
