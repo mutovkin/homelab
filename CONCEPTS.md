@@ -101,6 +101,30 @@ while looking correct. A mirror pair is the most common cause of a silent-green 
 here. Collocation is the structural fix: when a service's definition has exactly one
 home, there is no second copy to drift.
 
+### Container lineage
+Which tool most recently created a running container — the project's primary predictor
+of whether a deploy will recreate that container or leave it alone.
+
+Lineage is a property of the running container, not of the repo: a byte-identical
+deployment can still recreate a container whose last create came from somewhere else,
+because Compose matches a container against the state it expects rather than against the
+file it deployed last time. Lineage is finer-grained than "Compose or not" — the Ansible
+Compose module and the Compose CLI are different front-ends, and a container last acted
+on by one can be recreated by the other. Attributing lineage from a container's creation
+timestamp requires converting it to the host's local time first, since container metadata
+is reported in UTC while update schedules are configured locally.
+
+### Settle run
+An extra deploy performed solely to absorb a known one-cycle convergence, so that the
+run which follows it is a meaningful idempotency proof.
+
+Some legitimate actions cost exactly one cycle — creating a file inside a directory the
+same run synchronises, or touching a stack with the Compose CLI between two Ansible runs.
+The resulting `changed` result is reconciliation, not regression, but it is only
+distinguishable from a real non-idempotency bug by the next run coming back clean with
+container identities unchanged. Either order the work so no such action precedes the
+proof, or budget the settle run and say so before applying.
+
 ### Silent-green failure
 A failure in which a control is absent or does nothing, while every signal the
 project routinely checks keeps reporting success.
