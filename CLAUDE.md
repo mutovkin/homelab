@@ -184,6 +184,32 @@ Hard-won lessons — check here before debugging from scratch.
   raw `/etc/pve/lxc/<id>.conf` — snapshot sections carry their own `features:` lines and
   false-match greps.
   See [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md).
+- **Create-time-only guest fields are REBUILD declarations — write them in the
+  syntax a fresh create needs.** With provisioning pinned `update: false` (#86),
+  `mounts`/`scsi`/`efidisk0`/`usb`/etc. in host_vars never touch an existing guest;
+  their only consumer is a from-scratch rebuild. A named subvol
+  (`local-zfs:subvol-101-disk-1`) is therefore a DR landmine — the volume doesn't
+  exist on a rebuilt host and creation fails; use allocation form
+  (`local-zfs:110,mp=/data`) and keep the data-restore note beside it (no enforced
+  restore gate yet — #127). Pin the rest of the model to the live guest
+  (`qm config`/`pct config`, dated in the comment): VM 100 ran
+  i440fx + efidisk0 + USB sticks + pinned MAC while vars said q35-and-nothing-else.
+  Guest-definition keys are schema-checked against the role's read surface — adding
+  a key means teaching the role to read it AND adding it to the allowlist in the
+  same change. Editing VM 100's `net0` string later hot-rewrites the running HA
+  VM's NIC (it is live-reconciled now).
+  See [docs/solutions/integration-issues/create-time-only-fields-are-rebuild-declarations.md](docs/solutions/integration-issues/create-time-only-fields-are-rebuild-declarations.md).
+- **`authorized_key` reports ok while deploying ZERO keys.** It strips blank and
+  `#`-comment lines before parsing, so an empty or comment-only `.pub` (truncated
+  copy, `touch`ed placeholder) sails through a file-count guard — and the next
+  task in `common` writes `PasswordAuthentication no`. The role therefore asserts,
+  before hardening: files exist, each file contains a real key
+  (`(?m)^(ssh-…|ecdsa-sha2-|sk-)`), and the deploy task's results are non-empty —
+  the whole chain tagged `ssh_hardening` so a `--tags` run can't bypass it. On an
+  already-hardened host a failing assert never un-hardens (keys and drop-in
+  persist). Fresh-guest configuration also waits for SSH now
+  (`configure-guests.yml` pre_tasks, `tags: always` — play-level `gather_facts`
+  used to run under any `--tags`, an ordinary `setup:` task does not).
 - **Compose dotenv interpolates `$` in unquoted `.env` values — and secret-shaped traps
   compound.** A templated `.env` value containing `$` (Argon2 PHC hashes, rotated
   passwords) is silently truncated unless single-quoted (`ADMIN_TOKEN='...'`); the
@@ -206,6 +232,8 @@ Hard-won lessons — check here before debugging from scratch.
 - **Ansible is the only IaC** — no Pulumi/Terraform.
 - **SSH keys**: drop `*.pub` in `ansible/files/ssh_keys/` (`<user>@<host>.pub`); the
   `common` role deploys all keys to every host on the next run.
+- **`proxmox_bridge` is required** in every Proxmox host's host_vars (no vmbr0
+  fallback since #87) — guest `net`/`net0` definitions resolve their bridge from it.
 - **YAML style**: 2-space indent, `---` document start, quote strings only when required.
 - Architecture decisions: `docs/decisions.md`.
 
