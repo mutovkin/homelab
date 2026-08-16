@@ -1,7 +1,13 @@
 ---
-# Provision VMs and LXC containers on a Proxmox host
-# Uses community.proxmox.proxmox_kvm for VMs and community.proxmox.proxmox for LXCs
-# Both modules are idempotent — they check if the vmid exists before creating
+# Provision VMs and LXC containers on a Proxmox host.
+#
+# Uses community.proxmox.proxmox_kvm for VMs and community.proxmox.proxmox for
+# LXCs, but both are pinned CREATE-ONLY via `update: false` — they are not
+# idempotent updaters, and left to their defaults the LXC module rewrites an
+# existing container's whole config on every run (see the comments on each
+# module task). Everything that converges an EXISTING guest is an explicit
+# reconcile task in this file: cores/memory, startup/onboot, NICs, LXC features,
+# and the cluster PCI mappings. Anything not on that list is create-time only.
 
 # --- LXC template auto-resolution ---
 # LXC definitions can use `os: ubuntu-24.04` instead of a hardcoded ostemplate.
@@ -100,10 +106,18 @@
 # leave `.rc` undefined for the create/update `when:` expressions (the old
 # create-only tasks had exactly that latent landmine), and it is what makes
 # `--check` a real drift report instead of a wall of "skipping".
+#
+# `failed_when` is DISCRIMINATING, not blanket-false. A genuinely missing
+# mapping exits 255 with "mapping '<id>' not found" on stderr and is the normal
+# first-run state; anything else (pmxcfs wedged, API down, permission denied)
+# must fail loudly rather than be silently treated as "absent" — which would
+# quietly recreate a mapping we simply failed to read.
 - name: Read current cluster PCI mappings
   ansible.builtin.command: "pvesh get /cluster/mapping/pci/{{ item.id }} --output-format json"
   register: pci_mapping_current
-  failed_when: false
+  failed_when:
+    - pci_mapping_current.rc != 0
+    - "'not found' not in pci_mapping_current.stderr"
   changed_when: false
   check_mode: false
   loop: "{{ proxmox_pci_mappings }}"
@@ -126,6 +140,28 @@
   loop: "{{ proxmox_pci_mappings }}"
   loop_control:
     label: "PCI mapping {{ item.id }}"
+
+# A cluster PCI mapping can carry one entry PER NODE — `map` is a list. This
+# role models a single-node mapping (one `path`/`iommugroup` per id), so its
+# compare assumes a one-element list and `pvesh set -map <single>` would REPLACE
+# the whole list, deleting other nodes' entries. Refuse rather than clobber.
+# Every task below is additionally gated on length == 1 so nothing is reachable
+# for a multi-node mapping even if this fail is ever removed.
+- name: Refuse to converge multi-node PCI mappings
+  ansible.builtin.fail:
+    msg: >-
+      Multi-node PCI mappings are not supported by this role; refusing to
+      converge '{{ item.item.id }}'. It has
+      {{ (item.stdout | from_json).map | length }} node entries
+      ({{ (item.stdout | from_json).map | join(' | ') }}) and `pvesh set -map`
+      replaces the entire list, which would delete the other nodes' entries.
+      Manage this mapping outside the role, or reduce it to a single node.
+  loop: "{{ pci_mapping_current.results | default([]) }}"
+  loop_control:
+    label: "PCI mapping {{ item.item.id }}"
+  when:
+    - item.rc == 0
+    - (item.stdout | from_json).map | default([]) | length > 1
 
 # Drift report. Runs in check mode (debug always does), so `--check` surfaces
 # exactly what a real run would create or rewrite.
@@ -150,6 +186,7 @@
     label: "PCI mapping {{ item.item.id }}"
   when:
     - item.rc == 0
+    - (item.stdout | from_json).map | default([]) | length == 1
     - >-
       (item.stdout | from_json).map | default([]) != [pci_mapping_desired[item.item.id].map]
       or (item.stdout | from_json).description | default('') != pci_mapping_desired[item.item.id].description
@@ -189,6 +226,7 @@
     label: "PCI mapping {{ item.item.id }} — update"
   when:
     - item.rc == 0
+    - (item.stdout | from_json).map | default([]) | length == 1
     - >-
       (item.stdout | from_json).map | default([]) != [pci_mapping_desired[item.item.id].map]
       or (item.stdout | from_json).description | default('') != pci_mapping_desired[item.item.id].description
@@ -241,11 +279,17 @@
   become: true
   ansible.builtin.shell:
     cmd: |
-      set -o pipefail
+      set -euo pipefail   # -e so a failed qm read/set aborts instead of falsely echoing "changed"
       args=""
+      # Read the config ONCE, unprotected: with -e, a genuine `qm config` failure
+      # (pmxcfs wedged, VM vanished) aborts here instead of being swallowed by a
+      # `|| true` on the whole pipeline and silently yielding an empty $current —
+      # which would look like "NIC missing" and rewrite the interface.
+      cfg=$(qm config {{ item.vmid }})
       {% for nic_name, nic_val in item.net.items() %}
-      # Get the current configuration (e.g. "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1")
-      current=$(qm config {{ item.vmid }} | grep "^{{ nic_name }}:" | cut -d' ' -f2- || true)
+      # Get the current configuration (e.g. "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1").
+      # `|| true` here is legitimate: a genuinely absent NIC is a no-match, not an error.
+      current=$(printf '%s\n' "$cfg" | grep "^{{ nic_name }}:" | cut -d' ' -f2- || true)
       desired="{{ nic_val }}"
 
       if [ -z "$current" ]; then
@@ -327,13 +371,15 @@
 # proxmox_kvm state=present creates but never updates, so cores/memory edited in
 # host_vars silently never reached an existing VM. These tasks close that gap.
 #
-# RECONCILED: cores, memory. Nothing else.
+# RECONCILED HERE: cores, memory. Nothing else.
+# RECONCILED BY THEIR OWN TASKS ABOVE: net (MAC-preserving NIC task),
+# startup/onboot.
 # CREATE-TIME ONLY (deliberate — changing them on a live guest is destructive,
-# guest-visible, or both): sockets, bios, machine, vga, scsi/efidisk/ide, net
-# (handled by its own MAC-preserving task above), hostpci. `ide2` in particular
-# must NOT be reconciled — the TrueNAS installer ISO is deliberately ejected
-# post-install, so live reads `none,media=cdrom` while host_vars still names the
-# ISO for a from-scratch rebuild. Rebuild fidelity of those fields is #87.
+# guest-visible, or both): sockets, bios, machine, vga, scsi, efidisk0, ide,
+# hostpci. `ide2` in particular must NOT be reconciled — the TrueNAS installer
+# ISO is deliberately ejected post-install, so live reads `none,media=cdrom`
+# while host_vars still names the ISO for a from-scratch rebuild. Rebuild
+# fidelity of those fields is #87.
 #
 # Neither VM has memory/cpu hotplug enabled, so applying cores/memory to a
 # RUNNING VM cannot take effect without a guest stop. We therefore fail loudly
@@ -341,17 +387,21 @@
 # went unnoticed in the first place. `qm set` on a running VM would also create
 # pending changes that make `qm config` disagree with the running guest and
 # poison this very comparison.
-# `failed_when: false`: a guest listed in host_vars but not yet created has no
-# config to read. That is the normal state during a dry run of a NEW guest —
-# provisioning is skipped in --check, so `qm config <new-vmid>` exits non-zero.
-# The documented "dry-run first" workflow must not blow up on it; the drift
-# compute below skips those entries and lets provisioning own creation.
+# A guest listed in host_vars but not yet created has no config to read. That is
+# the normal state during a dry run of a NEW guest — provisioning is skipped in
+# --check, so `qm config <new-vmid>` exits 2 with "Configuration file '...' does
+# not exist" on stderr — and the documented dry-run-first workflow must not blow
+# up on it. But the tolerance is DISCRIMINATING, not blanket: any other failure
+# (pmxcfs unavailable, permission denied) fails loudly, because silently
+# treating it as "absent" would drop a live guest out of reconcile entirely.
 - name: Read current VM configuration
   become: true
   ansible.builtin.command: "qm config {{ item.vmid }}"
   register: vm_config_raw
   changed_when: false
-  failed_when: false
+  failed_when:
+    - vm_config_raw.rc != 0
+    - "'does not exist' not in vm_config_raw.stderr"
   check_mode: false  # read-only; must run in --check so drift is reported, not skipped
   loop: "{{ proxmox_vms }}"
   loop_control:
@@ -362,14 +412,30 @@
   ansible.builtin.command: "qm status {{ item.vmid }}"
   register: vm_status_raw
   changed_when: false
-  failed_when: false
+  failed_when:
+    - vm_status_raw.rc != 0
+    - "'does not exist' not in vm_status_raw.stderr"
   check_mode: false  # read-only; gates whether drift may be applied at all
   loop: "{{ proxmox_vms }}"
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
+- name: Report VMs that do not exist yet
+  ansible.builtin.debug:
+    msg: "VM {{ item.item.vmid }} ({{ item.item.name }}): not created yet — provisioning owns creation"
+  loop: "{{ vm_config_raw.results | default([]) }}"
+  loop_control:
+    label: "VM {{ item.item.vmid }} ({{ item.item.name }})"
+  when: item.rc != 0
+
+# Facts persist across role inclusions within a play, so seed the accumulator
+# explicitly rather than relying on `| default([])` to paper over a stale value.
+- name: Seed VM drift accumulator
+  ansible.builtin.set_fact:
+    vm_resource_drift: []
+
 # A missing `cores:`/`memory:` line means the VM sits on Proxmox's own default
-# (1 core / 512 MB) — qm config only prints non-default keys.
+# (1 core / 512 MB) — qm config omits keys that were never set.
 - name: Compute VM cores/memory drift
   ansible.builtin.set_fact:
     vm_resource_drift: "{{ vm_resource_drift | default([]) + [drift_entry] }}"
@@ -390,11 +456,18 @@
       # 'yes'/'no' rather than a bool: set_fact round-trips values through
       # templating, and a plain string compares unambiguously downstream.
       #
-      # Fails CLOSED. 'no' (safe to mutate) requires positive proof: the status
-      # read succeeded AND reported exactly `status: stopped`. Everything else —
-      # paused, suspended, io-error, prelaunch, a failed read, an empty string —
-      # is 'yes' and gets refused. Asking "is it running?" would have inverted
-      # that and handed a paused VM straight to `qm set`.
+      # Fails CLOSED: 'no' (safe to mutate) requires positive proof — the status
+      # read succeeded AND printed exactly `status: stopped`. A failed read or
+      # any unexpected output is 'yes' and gets refused.
+      #
+      # To be accurate about what this does and does not catch: plain `qm status`
+      # only ever prints running or stopped (the richer paused/prelaunch/io-error
+      # values are qmpstatus and never appear here), so the closed polarity is
+      # mainly insurance against a failed or empty read rather than against exotic
+      # states. The one real case it does NOT catch alone is a hibernated
+      # (suspend-to-disk) VM, which honestly reports stopped and will reach
+      # `qm set` — there Proxmox's own `suspended` lock rejects the command
+      # loudly. Gate plus lock keep that safe; the gate by itself would not.
       running: "{{ 'no' if (status_rc == '0' and status_out is search('(?m)^status: stopped')) else 'yes' }}"
       args: >-
         {{ ((['-cores ' ~ want_cores] if 'cores' in drift_fields else [])
@@ -430,6 +503,11 @@
       Memory/CPU hotplug is not enabled on these VMs; converging would require a
       guest stop. Either pin host_vars back to the live values, or stop the VM in
       a maintenance window and re-run.
+      Note that once the VM is stopped, a single re-run both applies the change
+      AND boots the guest again — the 'Start virtual machines' task below starts
+      anything with `started: true`, so no second run is needed.
+      Scope the maintenance run with `--limit <host>` (e.g.
+      `task infra:hosts -- --limit {{ inventory_hostname }}`).
   when: vm_resource_drift | default([]) | selectattr('running', 'equalto', 'yes') | list | length > 0
 
 # Stopped VMs only — enforced by the loop, not just by the fail task above.
@@ -542,12 +620,30 @@
 #      spelled `mount=nfs` (format 'fstype;fstype;...').
 #   2. The script set `-o pipefail` but not `-e`, so that failure was swallowed
 #      and `echo "changed"` ran anyway — a green report over a no-op. The
-#      startup/onboot tasks below already carry `-euo` for exactly this reason.
+#      startup/onboot reconcile tasks (VM one above, LXC one below) already
+#      carry `-euo` for exactly this reason.
 #
 # The old existence check also grepped the raw /etc/pve/lxc/<id>.conf, which
 # contains SNAPSHOT sections ([preissue77] on CT 201) that carry their own
 # `features:` line — so it could match a snapshot's value and skip a genuinely
 # drifted live config. Compare against `pct config` (live view only) instead.
+
+# The features task only runs for PRIVILEGED containers, so `nfs_enabled` on an
+# unprivileged one would be silently inert — a var that looks like configuration
+# and does nothing, which is the failure mode this whole issue is about.
+- name: Assert nfs_enabled is only set on privileged containers
+  ansible.builtin.assert:
+    that:
+      - not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+    fail_msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}) sets nfs_enabled but is
+      unprivileged. nfs_enabled is only implemented for privileged CTs (the
+      features task is gated on privileged); either make the CT privileged or
+      drop nfs_enabled.
+  loop: "{{ proxmox_lxcs | selectattr('nfs_enabled', 'defined') | selectattr('nfs_enabled') | list }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — nfs_enabled"
+
 - name: Set features for privileged LXC containers
   become: true
   vars:
@@ -569,7 +665,8 @@
       echo "changed"
     fi
   register: pct_features
-  changed_when: pct_features.stdout == "changed"
+  # Last line, not whole stdout: pct/pvesh can emit progress chatter ahead of it.
+  changed_when: pct_features.stdout_lines | default([]) | last | default('') == 'changed'
   loop: "{{ proxmox_lxcs }}"
   when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
   loop_control:
@@ -619,26 +716,46 @@
 # with no restart. Note the sharp edge — lowering memory below what the
 # container is currently using takes effect immediately and can OOM its
 # workload. That is a deliberate operator action; the role does not guard it.
-# `failed_when: false` for the same reason as the VM config read above: a CT
-# added to host_vars but not yet created has nothing to read, and a dry run of
-# that addition must report the pending create rather than fail the play.
+# Same discriminating tolerance as the VM config read above: a CT added to
+# host_vars but not yet created exits 2 with "Configuration file '...' does not
+# exist" on stderr and is reported as pending, while any OTHER read failure
+# fails the play instead of silently dropping the container from reconcile.
 - name: Read current LXC configuration
   become: true
   ansible.builtin.command: "pct config {{ item.vmid }}"
   register: lxc_config_raw
   changed_when: false
-  failed_when: false
+  failed_when:
+    - lxc_config_raw.rc != 0
+    - "'does not exist' not in lxc_config_raw.stderr"
   check_mode: false  # read-only; must run in --check so drift is reported, not skipped
   loop: "{{ proxmox_lxcs }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
+- name: Report LXC containers that do not exist yet
+  ansible.builtin.debug:
+    msg: "CT {{ item.item.vmid }} ({{ item.item.hostname }}): not created yet — provisioning owns creation"
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when: item.rc != 0
+
+# Facts persist across role inclusions within a play, so seed the accumulator
+# explicitly rather than relying on `| default([])` to paper over a stale value.
+- name: Seed LXC drift accumulator
+  ansible.builtin.set_fact:
+    lxc_resource_drift: []
+
 - name: Compute LXC cores/memory drift
   ansible.builtin.set_fact:
     lxc_resource_drift: "{{ lxc_resource_drift | default([]) + [drift_entry] }}"
   vars:
-    # A missing `cores:` line means unlimited (all host cores); treat it as drift
-    # against any explicit desired value rather than guessing a number.
+    # The 'unset' sentinel covers a key `pct config` omits entirely, which means
+    # different things per key: no `cores:` means unlimited (all host cores),
+    # no `memory:` means Proxmox's 512 MB default. Rather than encode both, treat
+    # either omission as drift against any explicit desired value and let the
+    # `pct set` write make it explicit.
     live_cores: "{{ item.stdout | regex_search('(?m)^cores: (\\d+)', '\\1') | default([], true) | join | default('unset', true) }}"
     live_memory: "{{ item.stdout | regex_search('(?m)^memory: (\\d+)', '\\1') | default([], true) | join | default('unset', true) }}"
     want_cores: "{{ item.item.cores | default(proxmox_lxc_defaults.cores) }}"

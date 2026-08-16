@@ -100,6 +100,11 @@
 | 24    | AMD HDMI/DP audio (`c7:00.1`)              | Pair with GPU for video+audio passthrough |
 | 30    | AMD Strix Halo NPU (`c8:00.1`)             | AI accelerator                            |
 
+The cluster PCI mappings these use (`truenas_sata`, `truenas_nvme0`,
+`truenas_nvme1`) are defined in `ansible/inventory/host_vars/n5pro/vars.yml`
+(`proxmox_pci_mappings`) and reconciled by the `proxmox_guests` role — update
+them there after any hardware re-seat that changes a path or IOMMU group.
+
 ## Planned Workloads
 
 ### VM 200: TrueNAS
