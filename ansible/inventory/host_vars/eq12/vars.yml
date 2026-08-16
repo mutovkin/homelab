@@ -42,6 +42,8 @@ proxmox_vms:
     # untouched by adding it here.
     balloon: 2048
     cpu: host
+    # Quoted deliberately: the module param is type=str, and the YAML bool trap
+    # (`agent: yes`) would send the string "True" instead of "1".
     agent: "1" # qemu-guest-agent runs inside HAOS
     scsihw: virtio-scsi-pci # live VM predates the role's virtio-scsi-single default
     scsi:
@@ -63,9 +65,20 @@ proxmox_vms:
       usb1: "host=10c4:ea60" # USB serial radio stick (CP2102)
     localtime: true
     tablet: false
-    # Not modelled (benign / non-reproducible): boot order (live order=scsi0,
-    # which is also PVE's create default), smbios1 uuid, vmgenid, meta,
-    # snapshot parent, tteck description text.
+    # Pins the MAC so a rebuilt VM keeps its DHCP reservation and IP. Declaring
+    # `net` also enrolls VM 100 in the MAC-preserving NIC-reconcile task, where
+    # desired == live makes it a no-op (simulated against the captured live
+    # config before landing this). WARNING: because that task DOES reconcile,
+    # editing this string later hot-rewrites the running HA VM's NIC.
+    net:
+      net0: "virtio=02:AB:9F:1F:CD:8C,bridge=vmbr0"
+    # Not modelled (benign / non-reproducible): smbios1 uuid, vmgenid, meta,
+    # snapshot parent, tteck description text. Boot order is deliberately left
+    # to PVE: live carries an explicit `boot: order=scsi0`, while a rebuild gets
+    # a device-derived order (VM 200, created by this role with no boot param,
+    # came out as `order=scsi0;ide2;net0`) — scsi0 still first, with a net
+    # fallback. The `tags` divergence is also deliberate: live carries only
+    # proxmox-helper-scripts; home-assistant is added here on purpose.
     onboot: true
     started: true
     tags:
@@ -86,9 +99,11 @@ proxmox_lxcs:
       # (provisioning is pinned update:false, #86), so this line's only job is
       # to tell a from-scratch rebuild what to allocate — naming a subvol here
       # fails creation on a rebuilt host because the volume does not exist yet
-      # (#87). Live volume today: local-zfs:subvol-101-disk-1 (110G, backup=1).
+      # (#87). Live volume: local-zfs:subvol-101-disk-1, 110G, backup=1
+      # (pct config 101, 2026-08-16).
       # DR: a rebuild allocates a FRESH EMPTY /data — restore it from the vzdump
-      # backup (backup=1 includes mp0) before deploying services.
+      # backup (backup=1 includes mp0) before deploying services. Nothing
+      # enforces that ordering yet — tracked in #127.
       mp0: "local-zfs:110,mp=/data,backup=1"
     netif:
       net0: "name=eth0,bridge=vmbr0,gw=192.168.23.1,hwaddr=AE:E1:F1:EE:F5:9A,ip=192.168.25.15/18,type=veth"
