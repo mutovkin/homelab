@@ -73,7 +73,11 @@
   ansible.builtin.assert:
     that:
       - vault_vaultwarden_admin_token_hash is match('^\$argon2id\$')
-      - vault_vaultwarden_admin_token_hash is match('^[A-Za-z0-9+/$,=.]+$')
+      # \Z, not $: Python's $ also matches immediately BEFORE a trailing newline, so a
+      # hash var carrying one (a stray editor newline in the vault) would pass here.
+      # \Z anchors at the true end of string, so that value fails loudly right now
+      # instead of reaching vaultwarden and aborting its startup with a PHC parse error.
+      - vault_vaultwarden_admin_token_hash is match('^[A-Za-z0-9+/$,=.]+\Z')
     fail_msg: >-
       vault_vaultwarden_admin_token_hash is not an Argon2id PHC string, so Vaultwarden
       would treat it as a PLAINTEXT admin token and undo #81. Regenerate it with
