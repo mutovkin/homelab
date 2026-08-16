@@ -1,0 +1,42 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible — restricts the Vaultwarden HTTP port (tcp/{{ vaultwarden_fw_port }})
+# to approved sources. Self-contained fail-open table: it ONLY governs flows
+# ADDRESSED TO THIS HOST on that one port, and cannot affect SSH or any other
+# traffic (policy accept + a terminal accept for every other dport comes first,
+# and `fib daddr type != local accept` puts forwarded / container-egress traffic
+# to some external :{{ vaultwarden_fw_port }} explicitly out of scope). Deleting
+# and recreating the table on each load keeps it idempotent.
+#
+# Hook choice: docker-published ports are DNAT'd in prerouting (priority
+# dstnat/-100) and traverse the FORWARD path — an input-hook chain never sees
+# that traffic. This chain hooks prerouting at -150, BEFORE DNAT, so it matches
+# the original dport on every inbound path (DNAT/forward for LAN IPv4, and the
+# docker-proxy input path that serves the [::] listener).
+#
+# IPv6: the allowlist is IPv4-only; the final drop matches IPv6 too, so all
+# external IPv6 access to the port is dropped by design (::1 arrives via
+# "lo" and is accepted).
+#
+# Fail-open: unit stop, table delete, or the stock nftables.service flushing the
+# ruleset all leave the port OPEN, never the host unreachable. Reload with
+# `systemctl restart vaultwarden-firewall` (the deploy does this via handler).
+add table inet vaultwarden_fw
+delete table inet vaultwarden_fw
+table inet vaultwarden_fw {
+  chain prerouting {
+    type filter hook prerouting priority -150; policy accept;
+    # All other TCP traffic exits here (terminal accept); non-TCP falls through to policy accept.
+    tcp dport != {{ vaultwarden_fw_port }} accept
+    # In scope only when addressed to this host: at -150 daddr is still the host
+    # LAN IP (pre-DNAT), while container egress / east-west / other forwarded
+    # flows to some external :{{ vaultwarden_fw_port }} are non-local and exit here.
+    fib daddr type != local accept
+    iif "lo" accept
+    ip saddr 127.0.0.1 accept
+{% for src in vaultwarden_fw_allowed_sources %}
+    ip saddr {{ src }} accept
+{% endfor %}
+    # Any other source reaching the Vaultwarden port is dropped (IPv4 and IPv6).
+    tcp dport {{ vaultwarden_fw_port }} drop
+  }
+}
