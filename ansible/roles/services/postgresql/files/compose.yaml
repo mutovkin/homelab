@@ -6,7 +6,15 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # The tag is pinned to major 18, so Watchtower could only ever deliver an 18.x
+      # minor — not a major migration. It is monitor-only anyway because this is the
+      # primary database for every other stack: even a minor bump should land with a
+      # fresh dump and an operator watching, not at 04:30 unattended. "enable" keeps it
+      # in scan scope so the minor is reported; "monitor-only" stops Watchtower applying
+      # it. Update via `task deploy:service -- --tags postgresql`, after a
+      # pg_dumpall (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
