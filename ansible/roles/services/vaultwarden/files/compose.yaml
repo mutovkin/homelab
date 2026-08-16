@@ -15,6 +15,8 @@ services:
       - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:
       - /data/vaultwarden:/data
+    # Published LAN-wide (NPM is a separate LXC and must reach it), but scoped by the
+    # role's `inet vaultwarden_fw` nftables table to NPM + the operator subnet (#81).
     ports:
       - 8086:80
     environment:
