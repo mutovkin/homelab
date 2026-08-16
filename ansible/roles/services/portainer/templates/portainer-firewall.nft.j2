@@ -1,9 +1,11 @@
 #!/usr/sbin/nft -f
 # Managed by Ansible — restricts the Portainer UI port (tcp/{{ portainer_fw_port }})
-# to approved sources. Self-contained fail-open table: it ONLY governs this one
-# port and cannot affect SSH or any other traffic (policy accept + a terminal
-# accept for every other dport comes first). Deleting and recreating the table
-# on each load keeps it idempotent.
+# to approved sources. Self-contained fail-open table: it ONLY governs flows
+# ADDRESSED TO THIS HOST on that one port, and cannot affect SSH or any other
+# traffic (policy accept + a terminal accept for every other dport comes first,
+# and `fib daddr type != local accept` puts forwarded / container-egress traffic
+# to some external :{{ portainer_fw_port }} explicitly out of scope). Deleting
+# and recreating the table on each load keeps it idempotent.
 #
 # Hook choice: docker-published ports are DNAT'd in prerouting (priority
 # dstnat/-100) and traverse the FORWARD path — an input-hook chain never sees
@@ -23,8 +25,12 @@ delete table inet portainer_fw
 table inet portainer_fw {
   chain prerouting {
     type filter hook prerouting priority -150; policy accept;
-    # Only filter the Portainer port; everything else exits here (terminal accept).
+    # All other TCP traffic exits here (terminal accept); non-TCP falls through to policy accept.
     tcp dport != {{ portainer_fw_port }} accept
+    # In scope only when addressed to this host: at -150 daddr is still the host
+    # LAN IP (pre-DNAT), while container egress / east-west / other forwarded
+    # flows to some external :{{ portainer_fw_port }} are non-local and exit here.
+    fib daddr type != local accept
     iif "lo" accept
     ip saddr 127.0.0.1 accept
 {% for src in portainer_fw_allowed_sources %}

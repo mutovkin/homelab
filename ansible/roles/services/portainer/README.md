@@ -45,8 +45,12 @@ UI port is restricted by an Ansible-managed **fail-open nftables table**
 - loopback
 
 Everything else is dropped, including all external IPv6. The table hooks
-`prerouting` at priority `-150` (before Docker's DNAT) because docker-published
-ports never traverse the `input` hook. It is fail-open by design: stopping
+`prerouting` at priority `-150` (before Docker's DNAT at `dstnat`/-100): the IPv4
+path to a docker-published port is DNAT'd and forwarded — it never traverses
+`input` — while the `[::]` listener is served by docker-proxy via the input path;
+prerouting covers both. A `fib daddr type != local accept` rule scopes the filter
+to traffic addressed to this host, so container egress to some external :9000 is
+unaffected. It is fail-open by design: stopping
 `portainer-firewall.service` or flushing the ruleset leaves the port open rather
 than the host unreachable.
 
