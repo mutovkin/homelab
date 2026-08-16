@@ -245,6 +245,15 @@ inventory and live state may legitimately disagree for these fields — so a dec
 value is not evidence of the live value, and rebuild fidelity is a separate concern
 from convergence.
 
+Because a rebuild is the only thing that ever reads them, these declarations are build
+orders rather than descriptions, and must be written in the form the creation path
+accepts — a request to allocate a new resource — not the form that names the resource
+currently in place. The two are easy to confuse because both are valid syntax for the
+same field, and the one describing live state is the one that matches what the
+hypervisor reports; only the other one actually builds anything. It follows that an
+ordinary converged run says nothing about these fields, so their correctness cannot be
+inferred from the absence of drift — the opposite of how a Reconcile task is verified.
+
 ### Blank-credential disable
 A credential whose empty value is read by the consuming software as an instruction to
 switch the protection off, rather than as a malformed value to reject.
