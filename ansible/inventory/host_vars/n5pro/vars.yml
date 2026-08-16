@@ -129,6 +129,13 @@ proxmox_vms:
     cores: 4
     memory: 24576
     ide:
+      # DR flow (deliberate, #87): host_vars keep the installer ISO attached so
+      # a re-created VM 200 (fresh empty scsi0) falls through boot order to the
+      # installer — reinstall TrueNAS, then import the ZFS pools (every data
+      # disk is PCI-passthrough and survives the VM). The LIVE VM reads
+      # `ide2: none,media=cdrom` because the ISO was ejected post-install; the
+      # reconcile tasks deliberately exclude ide2, so this mismatch is permanent
+      # and correct.
       ide2: "local:iso/{{ truenas_iso_filename }},media=cdrom"
     scsi:
       scsi0: "local-zfs:64,format=raw"
@@ -175,6 +182,18 @@ proxmox_lxcs:
     storage: local-zfs
     unprivileged: false # required: host GID 993 (render) must pass through for /dev/kfd ROCm access
     mounts:
+      # Allocation form — consumed at CREATE only (update:false, #86): a rebuild
+      # allocates a fresh empty 200G /data; the live volume is
+      # local-zfs:subvol-201-disk-1 (pct config 201, 2026-08-16). DR: restore
+      # /data before deploying services. Nothing enforces that ordering yet —
+      # tracked in #127.
+      # NOTE: /etc/pve/lxc/201.conf carries a [pve:pending] mp0 that is a
+      # semantically identical reorder of the live value — likely residue of the
+      # pre-#86 blind update-PUT era (origin unconfirmed; that PUT did send
+      # allocation form) — plus the pending `features: mount=nfs,nesting=1` from
+      # #86's fix. Both merge harmlessly at the CT's next operator-chosen
+      # restart — do NOT restart the CT to "clean" them, and do not try to
+      # reconcile them.
       mp0: "local-zfs:200,mp=/data"
     netif:
       net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:FC:95:51,ip=192.168.30.15/18,type=veth"

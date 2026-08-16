@@ -9,6 +9,100 @@
 # reconcile task in this file: cores/memory, startup/onboot, NICs, LXC features,
 # and the cluster PCI mappings. Anything not on that list is create-time only.
 
+# --- Guest definition schema guard ---
+#
+# This repo's recurring failure class is the var that LOOKS like configuration
+# and is consumed by nothing: `nfs=1` as an LXC feature key (#86),
+# `monitor-only=true` without `watchtower.enable` (#83), `proxmox_bridge` itself
+# before #87 wired it. Each was green for the deployment's whole life. A typo in
+# a guest definition (`ballon: 2048`, `scsi_hw:`) lands in exactly the same
+# place: no module ever reads it, nothing fails, and the operator believes the
+# value applied.
+#
+# So the allowed key sets below are the role's read surface, derived from what
+# the tasks in this file actually reference (`item.<key>` plus the
+# selectattr/rejectattr filters on `started`, `os`, `net`, `name`, `nfs_enabled`
+# and `gpu_sharing`). Adding a key to a guest definition means teaching the role
+# to read it — and therefore adding it here in the same change.
+- name: Assert VM definitions use only keys this role reads
+  ansible.builtin.assert:
+    that:
+      - item.keys() | difference(proxmox_vm_allowed_keys) | length == 0
+    fail_msg: >-
+      VM {{ item.vmid | default('<no vmid>') }} declares
+      {{ item.keys() | difference(proxmox_vm_allowed_keys) | join(', ') }},
+      which is consumed by nothing in the proxmox_guests role — a typo, or a
+      field the role was never taught to read. Either way it would silently do
+      nothing. Fix the spelling, or add the key to both the role and this list.
+  vars:
+    proxmox_vm_allowed_keys:
+      - vmid
+      - name
+      - cores
+      - sockets
+      - memory
+      - bios
+      - machine
+      - scsihw
+      - vga
+      - scsi
+      - agent
+      - balloon
+      - cpu
+      - usb
+      - localtime
+      - tablet
+      - net
+      - net_bridge
+      - hostpci
+      - efidisk0
+      - ide
+      - onboot
+      - started
+      - startup
+      - tags
+      - description
+  loop: "{{ proxmox_vms }}"
+  loop_control:
+    label: "VM {{ item.vmid | default('?') }} — schema"
+
+- name: Assert LXC definitions use only keys this role reads
+  ansible.builtin.assert:
+    that:
+      - item.keys() | difference(proxmox_lxc_allowed_keys) | length == 0
+    fail_msg: >-
+      CT {{ item.vmid | default('<no vmid>') }} declares
+      {{ item.keys() | difference(proxmox_lxc_allowed_keys) | join(', ') }},
+      which is consumed by nothing in the proxmox_guests role — a typo, or a
+      field the role was never taught to read. Either way it would silently do
+      nothing. Fix the spelling, or add the key to both the role and this list.
+  vars:
+    proxmox_lxc_allowed_keys:
+      - vmid
+      - hostname
+      - os
+      - ostemplate
+      - cores
+      - memory
+      - swap
+      - storage
+      - root_disk_size
+      - mounts
+      - netif
+      - net_bridge
+      - nesting
+      - nfs_enabled
+      - unprivileged
+      - gpu_sharing
+      - onboot
+      - started
+      - startup
+      - tags
+      - description
+  loop: "{{ proxmox_lxcs }}"
+  loop_control:
+    label: "CT {{ item.vmid | default('?') }} — schema"
+
 # --- LXC template auto-resolution ---
 # LXC definitions can use `os: ubuntu-24.04` instead of a hardcoded ostemplate.
 # This pre-task resolves the latest available template for each OS, downloads
@@ -249,11 +343,21 @@
     sockets: "{{ item.sockets | default(proxmox_vm_defaults.sockets) }}"
     memory: "{{ item.memory | default(proxmox_vm_defaults.memory) }}"
     bios: "{{ item.bios | default(proxmox_vm_defaults.bios) }}"
-    machine: "{{ item.machine | default(proxmox_vm_defaults.machine) }}"
+    # null default → omitted → PVE's own default machine type (i440fx), which is
+    # what VM 100 actually runs; a guest that needs q35 says so in host_vars.
+    machine: "{{ item.machine | default(proxmox_vm_defaults.machine) | default(omit, true) }}"
     onboot: "{{ item.onboot | default(proxmox_vm_defaults.onboot) }}"
-    scsihw: virtio-scsi-single
+    scsihw: "{{ item.scsihw | default('virtio-scsi-single') }}"
     vga: "{{ item.vga | default(omit) }}"
     scsi: "{{ item.scsi | default({}) }}"
+    # Rebuild fidelity (#87) — modelled from the live guests so a from-scratch
+    # create matches them. Omitted when a guest does not declare them.
+    agent: "{{ item.agent | default(omit) }}"
+    balloon: "{{ item.balloon | default(omit) }}"
+    cpu: "{{ item.cpu | default(omit) }}"
+    usb: "{{ item.usb | default(omit) }}"
+    localtime: "{{ item.localtime | default(omit) }}"
+    tablet: "{{ item.tablet | default(omit) }}"
     net: "{{ item.net | default({'net0': 'virtio,bridge=' + (item.net_bridge | default(proxmox_vm_defaults.net_bridge))}) }}"
     hostpci: "{{ item.hostpci | default({}) }}"
     efidisk0: "{{ item.efidisk0 | default(omit) }}"
@@ -375,11 +479,14 @@
 # RECONCILED BY THEIR OWN TASKS ABOVE: net (MAC-preserving NIC task),
 # startup/onboot.
 # CREATE-TIME ONLY (deliberate — changing them on a live guest is destructive,
-# guest-visible, or both): sockets, bios, machine, vga, scsi, efidisk0, ide,
-# hostpci. `ide2` in particular must NOT be reconciled — the TrueNAS installer
-# ISO is deliberately ejected post-install, so live reads `none,media=cdrom`
-# while host_vars still names the ISO for a from-scratch rebuild. Rebuild
-# fidelity of those fields is #87.
+# guest-visible, or both): sockets, bios, machine, vga, scsi, scsihw, efidisk0,
+# ide, hostpci, agent, balloon, cpu, usb, localtime, tablet, tags, description,
+# name — all passed at create and never reconciled afterwards. Those fields were
+# modelled from the live guests in #87 so a from-scratch rebuild matches them;
+# `ide2` in particular must NOT be reconciled — the TrueNAS installer ISO is
+# deliberately ejected post-install, so live reads `none,media=cdrom` while
+# host_vars still names the ISO. That mismatch is the documented DR flow; see
+# the comment on ide2 in n5pro host_vars.
 #
 # Neither VM has memory/cpu hotplug enabled, so applying cores/memory to a
 # RUNNING VM cannot take effect without a guest stop. We therefore fail loudly
