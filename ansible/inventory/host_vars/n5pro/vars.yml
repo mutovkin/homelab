@@ -180,6 +180,11 @@ proxmox_lxcs:
       net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:FC:95:51,ip=192.168.30.15/18,type=veth"
       net1: "name=eth1,bridge=vmbr2,hwaddr=BC:24:11:FC:95:52,ip=10.99.99.3/24,type=veth"
     nesting: true
+    # Maps to the LXC `mount=nfs` feature (applies at the CT's next start).
+    # NFS works today regardless, because this CT runs with
+    # `lxc.apparmor.profile: unconfined` — the feature is belt-and-braces.
+    # It was previously emitted as `nfs=1`, which is not a valid feature key,
+    # so it failed schema validation and never persisted (#86).
     nfs_enabled: true
     # order=2 boots after TrueNAS (order=1). The wait for TrueNAS lives on the
     # TrueNAS guest's up= delay, not here (Proxmox up= delays the NEXT guest in

@@ -532,16 +532,40 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
+# This task reported `changed` on every run for CT 201 while converging nothing,
+# for the whole life of the deployment (#86). Two independent bugs stacked:
+#
+#   1. `nfs` is not a valid LXC feature key. PVE's schema ($features_desc in
+#      /usr/share/perl5/PVE/LXC/Config.pm) defines exactly mount, nesting,
+#      keyctl, fuse, mknod, force_rw_sys — so `pct set -features nesting=1,nfs=1`
+#      failed schema validation every single run. "This CT may mount NFS" is
+#      spelled `mount=nfs` (format 'fstype;fstype;...').
+#   2. The script set `-o pipefail` but not `-e`, so that failure was swallowed
+#      and `echo "changed"` ran anyway — a green report over a no-op. The
+#      startup/onboot tasks below already carry `-euo` for exactly this reason.
+#
+# The old existence check also grepped the raw /etc/pve/lxc/<id>.conf, which
+# contains SNAPSHOT sections ([preissue77] on CT 201) that carry their own
+# `features:` line — so it could match a snapshot's value and skip a genuinely
+# drifted live config. Compare against `pct config` (live view only) instead.
 - name: Set features for privileged LXC containers
   become: true
+  vars:
+    # Alphabetical (mount before nesting) to match PVE's canonical print order.
+    desired_features: >-
+      {{ ((['mount=nfs'] if item.nfs_enabled | default(false) else [])
+          + ['nesting=' ~ (item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0'))]) | join(',') }}
   ansible.builtin.shell: |
-    set -o pipefail
-    features="nesting={{ item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0') }}"
-    {% if item.nfs_enabled | default(false) %}
-    features="$features,nfs=1"
-    {% endif %}
-    if ! grep -q "^features: $features" /etc/pve/lxc/{{ item.vmid }}.conf; then
-      pct set {{ item.vmid }} -features "$features"
+    set -euo pipefail   # -e so a failed pct set aborts instead of falsely echoing "changed"
+    desired="{{ desired_features }}"
+    current=$(pct config {{ item.vmid }} | sed -n 's/^features: //p')
+
+    # Order-insensitive compare: stay idempotent even if PVE ever writes the
+    # keys back in a different order than we emit them.
+    norm() { tr ',' '\n' | sort | paste -sd ',' -; }
+
+    if [ "$(printf '%s' "$current" | norm)" != "$(printf '%s' "$desired" | norm)" ]; then
+      pct set {{ item.vmid }} -features "$desired"
       echo "changed"
     fi
   register: pct_features
