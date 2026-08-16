@@ -48,6 +48,15 @@
     enabled: true
     daemon_reload: "{{ lms_heal_unit.changed }}"
 
+# lms uses network_mode: host (UDP broadcast discovery) and defines no compose
+# network. A pre-#85 compose file left an orphaned lms_network behind at
+# 172.36.0.0/24 — public Internet address space (#84). Compose never removes
+# networks dropped from config, so retire it explicitly. No-op once gone.
+- name: Remove orphaned lms_network (#84 — public-space subnet, no attached containers)
+  community.docker.docker_network:
+    name: lms_network
+    state: absent
+
 - name: Deploy LMS via the shared service pipeline
   ansible.builtin.include_role:
     name: services/_deploy
