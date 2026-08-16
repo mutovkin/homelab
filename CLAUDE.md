@@ -190,8 +190,14 @@ Hard-won lessons — check here before debugging from scratch.
   compose file's `${VAR}` substitution is single-pass, so quoting in `.env` is
   sufficient. Related: vaultwarden accepts a non-PHC `ADMIN_TOKEN` as a *plaintext*
   token instead of rejecting it — assert the `$argon2id$` shape in the role
-  (see `roles/services/vaultwarden/tasks/main.yml`). And never run `--diff` against a
-  secret-bearing env template: both diff sides print plaintext (#88). Fleet-wide
+  (see `roles/services/vaultwarden/tasks/main.yml`). Secret-bearing template tasks set
+  `diff: false` (`_deploy` .env, NUT configs, searxng
+  settings.yml — #88; postgres' vaulted init script already had it from #78): the file
+  still reports changed, its content never renders — give every new secret-bearing
+  template/copy task the same treatment. Reserve `no_log: true` for secrets in module
+  *args* (`proxmox_guests` precedent); no_log also censors failure output, which would
+  blind a fail-loudly assert (#88 asserts VM/VL/Grafana creds non-empty BY NAME, with
+  compose `${VAR:?}` as backstop). Fleet-wide
   quoting sweep: #117. See
   [docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md](docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md).
 
