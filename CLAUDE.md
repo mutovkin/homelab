@@ -129,6 +129,16 @@ Hard-won lessons — check here before debugging from scratch.
   what puts a container in scope; `monitor-only=true` on its own is inert and the container is
   never scanned or reported. Verify by comparing `scanned=N` against the labelled count.
   See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md).
+- **nftables `hook input` is inert for docker-published ports.** Docker DNATs published
+  ports in prerouting (`dstnat`/-100) and the traffic takes the FORWARD path — an
+  input-hook allowlist loads cleanly and filters nothing. Filter docker-published ports
+  in `hook prerouting` at a priority before -100 (we use -150) and scope with
+  `fib daddr type != local accept` or you silently drop container egress to the same
+  port elsewhere. Also: a `RemainAfterExit` oneshot that loads an nft table stays
+  "active" after the table is externally flushed, so `state: started` can never heal
+  it — probe the kernel (`nft list table`), heal via handler + `flush_handlers`, and
+  hard-assert. Verify from a BLOCKED source, not just an allowed one.
+  See [docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md](docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md).
 - **Ansible variable precedence.** Inventory `group_vars` REPLACE role defaults (lists never
   merge). Role-critical packages go in `roles/<role>/vars/main.yml`, which outranks inventory.
   See [docs/solutions/security-issues/unattended-upgrades-silently-inert-fleet-wide.md](docs/solutions/security-issues/unattended-upgrades-silently-inert-fleet-wide.md).
