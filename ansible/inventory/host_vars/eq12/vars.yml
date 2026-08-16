@@ -38,7 +38,15 @@ proxmox_vms:
     memory: 4096
     scsi:
       scsi0: "local-zfs:32,format=raw"
-    bios: seabios
+    # Pinned to live: HAOS boots UEFI, so recreating this VM with seabios would
+    # not boot. The vars said seabios purely because nothing ever compared them
+    # against the running guest (#86).
+    bios: ovmf
+    # NOTE (rebuild fidelity, tracked in #87): the live VM predates Ansible and
+    # carries an efidisk0, a usb device, and the qemu guest agent that are not
+    # modelled here; it also has no `machine:` line at all (i440fx default)
+    # despite the q35 below. bios/machine are create-time-only, so this does not
+    # affect the running guest — but a from-scratch rebuild would not match yet.
     machine: q35
     onboot: true
     started: true

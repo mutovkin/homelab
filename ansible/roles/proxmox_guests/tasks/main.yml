@@ -261,6 +261,106 @@
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }}) — startup/onboot"
 
+# --- VM cores/memory reconcile (#86) ---
+#
+# proxmox_kvm state=present creates but never updates, so cores/memory edited in
+# host_vars silently never reached an existing VM. These tasks close that gap.
+#
+# RECONCILED: cores, memory. Nothing else.
+# CREATE-TIME ONLY (deliberate — changing them on a live guest is destructive,
+# guest-visible, or both): sockets, bios, machine, vga, scsi/efidisk/ide, net
+# (handled by its own MAC-preserving task above), hostpci. `ide2` in particular
+# must NOT be reconciled — the TrueNAS installer ISO is deliberately ejected
+# post-install, so live reads `none,media=cdrom` while host_vars still names the
+# ISO for a from-scratch rebuild. Rebuild fidelity of those fields is #87.
+#
+# Neither VM has memory/cpu hotplug enabled, so applying cores/memory to a
+# RUNNING VM cannot take effect without a guest stop. We therefore fail loudly
+# instead of warning: a warning inside a green play is exactly how this drift
+# went unnoticed in the first place. `qm set` on a running VM would also create
+# pending changes that make `qm config` disagree with the running guest and
+# poison this very comparison.
+- name: Read current VM configuration
+  become: true
+  ansible.builtin.command: "qm config {{ item.vmid }}"
+  register: vm_config_raw
+  changed_when: false
+  check_mode: false  # read-only; must run in --check so drift is reported, not skipped
+  loop: "{{ proxmox_vms }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+- name: Read current VM run state
+  become: true
+  ansible.builtin.command: "qm status {{ item.vmid }}"
+  register: vm_status_raw
+  changed_when: false
+  check_mode: false  # read-only; gates whether drift may be applied at all
+  loop: "{{ proxmox_vms }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+# A missing `cores:`/`memory:` line means the VM sits on Proxmox's own default
+# (1 core / 512 MB) — qm config only prints non-default keys.
+- name: Compute VM cores/memory drift
+  ansible.builtin.set_fact:
+    vm_resource_drift: "{{ vm_resource_drift | default([]) + [drift_entry] }}"
+  vars:
+    live_cores: "{{ item.stdout | regex_search('(?m)^cores: (\\d+)', '\\1') | default([], true) | join | default('1', true) }}"
+    live_memory: "{{ item.stdout | regex_search('(?m)^memory: (\\d+)', '\\1') | default([], true) | join | default('512', true) }}"
+    want_cores: "{{ item.item.cores | default(proxmox_vm_defaults.cores) }}"
+    want_memory: "{{ item.item.memory | default(proxmox_vm_defaults.memory) }}"
+    drift_fields: >-
+      {{ ([] if live_cores | int == want_cores | int else ['cores'])
+         + ([] if live_memory | int == want_memory | int else ['memory']) }}
+    live_status: "{{ vm_status_raw.results | selectattr('item.vmid', 'equalto', item.item.vmid) | map(attribute='stdout') | join }}"
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      name: "{{ item.item.name }}"
+      # 'yes'/'no' rather than a bool: set_fact round-trips values through
+      # templating, and a plain string compares unambiguously downstream.
+      running: "{{ 'yes' if live_status is search('running') else 'no' }}"
+      args: >-
+        {{ ((['-cores ' ~ want_cores] if 'cores' in drift_fields else [])
+            + (['-memory ' ~ want_memory] if 'memory' in drift_fields else [])) | join(' ') }}
+      human: >-
+        {{ ((['cores live=' ~ live_cores ~ ' desired=' ~ want_cores] if 'cores' in drift_fields else [])
+            + (['memory live=' ~ live_memory ~ ' desired=' ~ want_memory] if 'memory' in drift_fields else [])) | join(', ') }}
+  loop: "{{ vm_config_raw.results | default([]) }}"
+  loop_control:
+    label: "VM {{ item.item.vmid }} ({{ item.item.name }})"
+  when: drift_fields | length > 0
+
+- name: Report VM cores/memory drift
+  ansible.builtin.debug:
+    msg: "VM {{ item.vmid }} ({{ item.name }}): {{ item.human }} — will apply via qm set (VM is stopped)"
+  loop: "{{ vm_resource_drift | default([]) | selectattr('running', 'equalto', 'no') | list }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+# Runs in check mode too, so `task infra:hosts:check` reports the conflict
+# instead of a silently green play.
+- name: Refuse to change cores/memory on a running VM
+  ansible.builtin.fail:
+    msg: >-
+      Refusing to change a running production VM.
+      {% for e in vm_resource_drift | default([]) | selectattr('running', 'equalto', 'yes') | list %}
+      VM {{ e.vmid }} ({{ e.name }}): {{ e.human }}.
+      {% endfor %}
+      Memory/CPU hotplug is not enabled on these VMs; converging would require a
+      guest stop. Either pin host_vars back to the live values, or stop the VM in
+      a maintenance window and re-run.
+  when: vm_resource_drift | default([]) | selectattr('running', 'equalto', 'yes') | list | length > 0
+
+# Stopped VMs only — enforced by the loop, not just by the fail task above.
+- name: Apply cores/memory to stopped VMs
+  become: true
+  ansible.builtin.command: "qm set {{ item.vmid }} {{ item.args }}"
+  changed_when: true
+  loop: "{{ vm_resource_drift | default([]) | selectattr('running', 'equalto', 'no') | list }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }}) — cores/memory"
+
 - name: Start virtual machines
   become: false
   no_log: true  # hides vault_proxmox_api_token_secret from -v/logs. NOTE: also
@@ -379,6 +479,71 @@
   loop: "{{ proxmox_lxcs }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — startup/onboot"
+
+# --- CT cores/memory reconcile (#86) ---
+#
+# Same create-only gap as the VM tasks above: community.proxmox.proxmox
+# state=present never updates an existing container.
+#
+# RECONCILED: cores, memory. CREATE-TIME ONLY: swap, netif, mounts, rootfs,
+# storage, unprivileged, ostemplate — changing those on a live container either
+# bounces its networking, moves its data mounts, or requires a recreate.
+#
+# Unlike VMs, cgroup limits apply HOT: `pct set` retunes a running container
+# with no restart. Note the sharp edge — lowering memory below what the
+# container is currently using takes effect immediately and can OOM its
+# workload. That is a deliberate operator action; the role does not guard it.
+- name: Read current LXC configuration
+  become: true
+  ansible.builtin.command: "pct config {{ item.vmid }}"
+  register: lxc_config_raw
+  changed_when: false
+  check_mode: false  # read-only; must run in --check so drift is reported, not skipped
+  loop: "{{ proxmox_lxcs }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Compute LXC cores/memory drift
+  ansible.builtin.set_fact:
+    lxc_resource_drift: "{{ lxc_resource_drift | default([]) + [drift_entry] }}"
+  vars:
+    # A missing `cores:` line means unlimited (all host cores); treat it as drift
+    # against any explicit desired value rather than guessing a number.
+    live_cores: "{{ item.stdout | regex_search('(?m)^cores: (\\d+)', '\\1') | default([], true) | join | default('unset', true) }}"
+    live_memory: "{{ item.stdout | regex_search('(?m)^memory: (\\d+)', '\\1') | default([], true) | join | default('unset', true) }}"
+    want_cores: "{{ item.item.cores | default(proxmox_lxc_defaults.cores) }}"
+    want_memory: "{{ item.item.memory | default(proxmox_lxc_defaults.memory) }}"
+    drift_fields: >-
+      {{ ([] if live_cores == want_cores | string else ['cores'])
+         + ([] if live_memory == want_memory | string else ['memory']) }}
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      hostname: "{{ item.item.hostname }}"
+      args: >-
+        {{ ((['-cores ' ~ want_cores] if 'cores' in drift_fields else [])
+            + (['-memory ' ~ want_memory] if 'memory' in drift_fields else [])) | join(' ') }}
+      human: >-
+        {{ ((['cores live=' ~ live_cores ~ ' desired=' ~ want_cores] if 'cores' in drift_fields else [])
+            + (['memory live=' ~ live_memory ~ ' desired=' ~ want_memory] if 'memory' in drift_fields else [])) | join(', ') }}
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when: drift_fields | length > 0
+
+- name: Report LXC cores/memory drift
+  ansible.builtin.debug:
+    msg: "CT {{ item.vmid }} ({{ item.hostname }}): {{ item.human }} — will hot-apply via pct set"
+  loop: "{{ lxc_resource_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Apply cores/memory to LXC containers
+  become: true
+  ansible.builtin.command: "pct set {{ item.vmid }} {{ item.args }}"
+  changed_when: true
+  loop: "{{ lxc_resource_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — cores/memory"
 
 # Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor
 # profile to be unconfined. Otherwise, Proxmox applies a default profile that blocks
