@@ -154,6 +154,17 @@ Hard-won lessons — check here before debugging from scratch.
 - **`compose up` recreates any container Watchtower last created**, even with a byte-identical compose file — so the first deploy after a Watchtower update bounces that service, and a recreate in a deploy is not proof your change caused it. See [docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md](docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md).
 - **A service running without its templated `.env` is a config change waiting to happen.** Portainer on n5pro had no `.env` on disk, so its docker network was created from the compose file's *default* subnet, not host_vars. The first deploy that templates `.env` therefore changes the subnet and recreates the network + container. Before letting a first-ever `.env` land, check what the running container/network was actually created from (`docker network inspect`), and pin host_vars to observed reality — renumbering is a separate, deliberate change.
 
+- **Compose dotenv interpolates `$` in unquoted `.env` values — and secret-shaped traps
+  compound.** A templated `.env` value containing `$` (Argon2 PHC hashes, rotated
+  passwords) is silently truncated unless single-quoted (`ADMIN_TOKEN='...'`); the
+  compose file's `${VAR}` substitution is single-pass, so quoting in `.env` is
+  sufficient. Related: vaultwarden accepts a non-PHC `ADMIN_TOKEN` as a *plaintext*
+  token instead of rejecting it — assert the `$argon2id$` shape in the role
+  (see `roles/services/vaultwarden/tasks/main.yml`). And never run `--diff` against a
+  secret-bearing env template: both diff sides print plaintext (#88). Fleet-wide
+  quoting sweep: #117. See
+  [docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md](docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md).
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.
