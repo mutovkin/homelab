@@ -1,3 +1,11 @@
 ---
 # Number of pre-upgrade Vaultwarden backup archives to retain in {{ data_mount }}/backups.
 vaultwarden_backup_retention: 7
+
+# Firewall scoping for the Vaultwarden HTTP port (see templates/vaultwarden-firewall.nft.j2).
+# Plain-HTTP origin for the password vault — LAN exposure allows credential capture, so
+# only the NPM reverse proxy and operator workstations may reach it (#81).
+vaultwarden_fw_port: 8086
+vaultwarden_fw_allowed_sources:
+  - 192.168.25.20 # NPM LXC (CT 104) — reverse-proxy upstream reach
+  - 192.168.48.0/24 # operator workstation subnet

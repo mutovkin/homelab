@@ -295,6 +295,9 @@ instead of ending green.
 ## Related Issues
 
 - Issue #80 — this fix (Portainer exposure), shipped in the #80 PR.
+- Issue #81 — Vaultwarden hardening reuses this pattern verbatim (its own
+  `inet vaultwarden_fw` table on tcp/8086), making it the second consumer copied
+  line-for-line and strengthening the case for the extraction proposed in #114.
 - Issue #112 — follow-up: bring the nut firewall up to the same self-healing standard
   (check-and-heal + `PartOf=`); its input hook itself is correct and stays.
 - Issue #114 — proposes extracting a shared scoped-firewall pattern from this and the

@@ -316,7 +316,8 @@ vault_vm_auth_password: "your-vm-auth-password"
 vault_vl_auth_username: "logs"
 vault_vl_auth_password: "your-vl-auth-password"
 vault_vaultwarden_domain: "https://vault.yourdomain.com"
-vault_vaultwarden_admin_token: "your-admin-token"
+vault_vaultwarden_admin_token_hash: "$argon2id$v=19$m=65540,t=3,p=4$c2FsdA$aGFzaA"
+vault_vaultwarden_admin_token_plain: "your-admin-token"
 vault_vaultwarden_signups_domains: "yourdomain.com"
 vault_smtp_host: "smtp.gmail.com"
 vault_smtp_from: "your-email@gmail.com"
@@ -339,6 +340,22 @@ vault_watchtower_email_port: "587"
 vault_watchtower_email_user: "your-email@gmail.com"
 vault_watchtower_email_password: "your-app-password"
 ```
+
+> **Why Vaultwarden has two token variables.** Only
+> `vault_vaultwarden_admin_token_hash` is templated into the container's `.env` — an
+> Argon2id PHC hash verifies an `/admin` login but cannot produce one, so `docker
+> inspect` and the on-disk env file never hold a usable credential.
+> `vault_vaultwarden_admin_token_plain` is the token you actually type at `/admin`; it
+> is templated nowhere and is kept only because the hash is one-way — losing it means
+> losing `/admin`. Generate the hash from your token with Vaultwarden's own helper:
+>
+> ```bash
+> docker run --rm -it vaultwarden/server:latest /vaultwarden hash
+> ```
+>
+> Paste the `$argon2id$...` value as the `_hash` variable — without the
+> `ADMIN_TOKEN='...'` wrapper the helper prints around it. See
+> `ansible/roles/services/vaultwarden/README.md` for the parameters and rotation notes.
 
 > **Where do these values come from?** They are the same passwords currently in the
 > `.env` files on your deb-docker LXC. SSH in and check:
