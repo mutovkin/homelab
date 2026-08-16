@@ -12,10 +12,10 @@ set -euo pipefail
 NFS_ADDR="{{ truenas_hostonly_ip }}"
 NFS_PATH="{{ truenas_music_share }}"
 DEPLOY_DIR="{{ data_mount }}/deploy/lyrion"
-# Keep COMPOSE_FILE in sync with the `files:` arg of the "Deploy Lyrion stack"
-# task in roles/services/lms/tasks/main.yml — both must name the same compose
-# file or this self-heal path would bring up a different config than Ansible.
-COMPOSE_FILE="lyrion.yml"
+# Keep COMPOSE_FILE in sync with the `files:` arg of the shared deploy task in
+# roles/services/_deploy/tasks/main.yml — both must name the same compose file
+# or this self-heal path would bring up a different config than Ansible.
+COMPOSE_FILE="compose.yaml"
 MAX_WAIT={{ lms_nfs_heal_max_wait | default(600) }}   # seconds before giving up
 INTERVAL=10
 
