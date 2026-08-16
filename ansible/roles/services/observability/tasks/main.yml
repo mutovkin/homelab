@@ -1,4 +1,43 @@
 ---
+# #88: no credential in this stack may be blank. VictoriaMetrics/VictoriaLogs
+# treat an EMPTY --httpAuth value as "auth disabled", and Grafana starts
+# auth-weak on a blank admin user/password — either used to deploy green with a
+# published port left open. This assert now fails first, ahead of env.j2's
+# hard-fail and compose's `:?` guard, and before anything touches state. It runs
+# under --check, so a dry run with a missing or renamed vault var reports the var
+# BY NAME instead of a Jinja trace.
+#
+# The loop item is the variable NAME, never its value: quiet:true trims success
+# output, and on failure the assertion is reported as a literal expression while
+# fail_msg names the variable — so no value prints either way.
+#
+# Condition, filter by filter — each one earns its place (matrix-tested):
+#   default('', true)  a defined-but-null `vault_x:` (the natural way to blank a
+#                      value) is None, and `None | length` crashes with a raw
+#                      Jinja error instead of our message.
+#   | string           a non-string value (an unquoted integer) crashes `trim`
+#                      the same way.
+#   | trim             a whitespace-only value used to PASS.
+# Falsy scalars (0, false) are rejected as blank too — nonsense as a credential,
+# and failing loud is the safe direction. No opt-out var: auth is mandatory.
+- name: Assert observability credentials are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined — the observability stack must never deploy
+      with blank credentials: VM/VL would run with HTTP auth silently disabled on
+      0.0.0.0:8428/9428, and Grafana would start auth-weak on :3000. Set it with
+      `task vault:edit -- inventory/host_vars/<host>/vault.yml`.
+    quiet: true
+  loop:
+    - vault_vm_auth_username
+    - vault_vm_auth_password
+    - vault_vl_auth_username
+    - vault_vl_auth_password
+    - vault_grafana_user
+    - vault_grafana_password
+
 - name: Stat Docker socket
   ansible.builtin.stat:
     path: /var/run/docker.sock

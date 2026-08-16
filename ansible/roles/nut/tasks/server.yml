@@ -63,6 +63,10 @@
     owner: root
     group: nut
     mode: "0640"
+  # The rendered file embeds vault NUT passwords: --diff would print old AND new
+  # plaintext (#88). diff:false suppresses content while keeping changed:true and
+  # full failure output (unlike no_log, which would censor errors too).
+  diff: false
   notify: restart-nut-server
 
 - name: Deploy upsmon.conf (server)
@@ -72,6 +76,8 @@
     owner: root
     group: nut
     mode: "0640"
+  # Embeds vault_nut_master_password — see diff:false rationale on upsd.users (#88).
+  diff: false
   notify: restart-nut-monitor
 
 - name: Ensure NUT runtime directory exists

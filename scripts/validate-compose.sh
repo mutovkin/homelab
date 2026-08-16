@@ -17,9 +17,13 @@
 #   2. env-template cross-check — every `${VAR}` referenced *without* a
 #      `:-default` must actually be emitted by the Ansible role that deploys the
 #      stack (the sibling templates/env.j2 in the same role, which becomes the
-#      stack's .env).  Check 1 alone cannot catch a misspelled variable, because
-#      the dummy env is derived from the compose file itself and so agrees with any
-#      typo; this check compares it against the only real source of values.
+#      stack's .env).  Both required forms count: the bare `${VAR}` and the
+#      hard-fail `${VAR:?message}` (#88).  A `:?` reference is the strongest claim
+#      a compose file can make that a variable is mandatory, so it needs this
+#      rename protection more than a bare reference, not less.  Check 1 alone
+#      cannot catch a misspelled variable, because the dummy env is derived from
+#      the compose file itself and so agrees with any typo; this check compares it
+#      against the only real source of values.
 #
 # Scope limit worth knowing before you trust a green run: this validates the
 # compose files themselves.  It does NOT check that bind-mounted host paths exist
@@ -141,9 +145,10 @@ for file in "${files[@]}"; do
     continue
   fi
 
-  # Cross-check against the env template.  Only bare `${NAME}` references are
-  # checked — `${NAME:-default}` is self-sufficient by construction.  Comment
-  # lines are stripped so a `${VAR}` mentioned in prose doesn't count.
+  # Cross-check against the env template.  Two forms are required and therefore
+  # checked: bare `${NAME}`, and `${NAME:?msg}` which aborts the whole parse when
+  # unset (#88).  `${NAME:-default}` is skipped — self-sufficient by construction.
+  # Comment lines are stripped so a `${VAR}` mentioned in prose doesn't count.
   # The env template is the sibling templates/env.j2 of the role that owns this
   # compose file — the layout guarantees the pairing (#85).
   template="${repo_root}/ansible/roles/services/${svc}/templates/env.j2"
@@ -164,7 +169,8 @@ for file in "${files[@]}"; do
   # LC_ALL=C so sort/comm agree on ordering regardless of the caller's locale —
   # a mismatch makes comm print to stderr and still exit 0, i.e. fail silently.
   referenced="$(grep -vE '^[[:space:]]*#' "${file}" |
-    grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | tr -d '${}' | LC_ALL=C sort -u || true)"
+    grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*(\}|:\?)' |
+    sed -E 's/^\$\{//; s/(\}|:\?)$//' | LC_ALL=C sort -u || true)"
   defined="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${template}" | tr -d '=' | LC_ALL=C sort -u || true)"
   undefined="$(LC_ALL=C comm -23 <(printf '%s\n' "${referenced}") <(printf '%s\n' "${defined}") |
     grep -v '^$' | tr '\n' ' ' || true)"

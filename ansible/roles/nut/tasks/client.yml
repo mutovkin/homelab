@@ -24,6 +24,9 @@
     owner: root
     group: nut
     mode: "0640"
+  # Embeds vault_nut_slave_password: --diff would print plaintext (#88).
+  # diff:false, not no_log — keeps changed:true and failure output intact.
+  diff: false
   notify: restart-nut-monitor
 
 - name: Enable and start NUT monitor

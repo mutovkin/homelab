@@ -29,6 +29,12 @@
     src: "{{ role_path | dirname }}/{{ svc }}/templates/env.j2"
     dest: "{{ svc_deploy_dir }}/.env"
     mode: "0600"
+  # Every service's .env embeds vault secrets: --diff prints BOTH sides in
+  # plaintext (#88 — a live SMTP password leaked into a transcript this way).
+  # diff:false suppresses content but keeps changed:true and, unlike no_log,
+  # keeps failure output ("'vault_x' is undefined") readable — that loud
+  # failure is itself a control (#88 part 2).
+  diff: false
 
 - name: Create data directories for {{ svc }}
   ansible.builtin.file:

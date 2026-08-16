@@ -84,11 +84,13 @@ nano .env
 # Required: Set Grafana password (generate with: openssl rand -hex 32):
 GRAFANA_PASSWORD=<your-password>
 
-# Optional: Enable VictoriaMetrics/VictoriaLogs authentication:
-# VM_AUTH_USERNAME=obs
-# VM_AUTH_PASSWORD=<your-password>
-# VL_AUTH_USERNAME=obs
-# VL_AUTH_PASSWORD=<your-password>
+# Required: VictoriaMetrics/VictoriaLogs authentication. Since #88 these four are
+# mandatory and asserted non-empty by the role — an empty value does not mean
+# "no auth", it means VM/VL serve 8428/9428 unauthenticated:
+VM_AUTH_USERNAME=obs
+VM_AUTH_PASSWORD=<your-password>
+VL_AUTH_USERNAME=obs
+VL_AUTH_PASSWORD=<your-password>
 
 # Required: Docker group ID (for Telegraf to access Docker socket):
 DOCKER_GID=999                    # Run: getent group docker | cut -d: -f3
