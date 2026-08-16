@@ -11,14 +11,22 @@
   # booting — site.yml imports this playbook straight after proxmox-hosts.yml,
   # so on a from-scratch rebuild the guest is seconds old (#87).
   gather_facts: false
+  # `tags: always` on both: play-level gather_facts used to run whatever --tags
+  # was passed, so without it a tag-scoped run (e.g. --tags ssh_hardening, the
+  # workflow this repo's own comments advertise) would skip the wait AND the
+  # setup — reinstating the boot race and leaving every role factless.
   pre_tasks:
     - name: Wait for freshly provisioned guests to accept SSH
       ansible.builtin.wait_for_connection:
         timeout: 300
         sleep: 5
+      tags:
+        - always
 
     - name: Gather facts once reachable
       ansible.builtin.setup:
+      tags:
+        - always
   roles:
     - common
     - docker_host
