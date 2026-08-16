@@ -40,14 +40,21 @@ proxmox_vm_defaults:
   storage: local-zfs
   bios: seabios
   # PVE's own default machine type (i440fx) unless a guest asks for q35 — the
-  # old q35 default here misdescribed VM 100, which runs i440fx (#87). null is
-  # omitted from the module call, so PVE picks.
+  # old q35 default (echoed by VM 100's old explicit `machine: q35`) never
+  # matched the live VM, which runs the i440fx default (#87). null is omitted
+  # from the module call, so PVE picks.
   machine: null
   # Default bridge for guests that don't set net/netif/net_bridge explicitly.
   # Wired to the host's declared primary bridge (eq12: vmbr0; n5pro: vmbr1 — on
   # n5pro vmbr0 is the secondary 5GbE DHCP bridge, so the old hardcoded vmbr0
   # default put a new guest on the wrong network, #87).
-  net_bridge: "{{ proxmox_bridge | default('vmbr0') }}"
+  # Deliberately NO `| default(...)` fallback: a silent fallback just re-arms
+  # that same wrong-bridge failure for the next host that forgets to declare
+  # proxmox_bridge. Missing it is an undefined-var failure at provisioning
+  # template time instead. Note Jinja evaluates default() arguments eagerly, so
+  # that failure fires even for guests that pin net/netif explicitly — intended:
+  # declare the host's primary bridge.
+  net_bridge: "{{ proxmox_bridge }}"
   net_model: virtio
   onboot: true
   started: true
@@ -60,8 +67,9 @@ proxmox_lxc_defaults:
   root_disk_size: 8
   storage: local-zfs
   ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
-  # Same host-primary-bridge wiring as proxmox_vm_defaults above (#87).
-  net_bridge: "{{ proxmox_bridge | default('vmbr0') }}"
+  # Same host-primary-bridge wiring, and same deliberate absence of a fallback,
+  # as proxmox_vm_defaults above (#87).
+  net_bridge: "{{ proxmox_bridge }}"
   onboot: true
   started: true
   nesting: false
