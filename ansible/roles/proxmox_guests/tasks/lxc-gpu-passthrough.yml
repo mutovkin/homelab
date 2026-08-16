@@ -32,6 +32,10 @@
     executable: /bin/bash
   register: dev_kfd_major_minor
   changed_when: false
+  # Read-only. Must run in --check: skipped, the lineinfile below renders
+  # "lxc.cgroup2.devices.allow: c  rwm" with an empty device number and reports a
+  # false pending diff on every dry run.
+  check_mode: false
   when: dev_kfd.stat.exists
 
 - name: "Add GPU DRI passthrough to LXC config — CT {{ item.vmid }}"
