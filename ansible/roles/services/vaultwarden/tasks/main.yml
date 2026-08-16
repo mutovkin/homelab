@@ -65,14 +65,32 @@
 
 # --- Pre-upgrade backup -------------------------------------------------------
 # The stack deploys with pull: always, so any deploy can upgrade the vault. Take a
-# consistent snapshot first — but only when the image actually changed, otherwise a
-# routine no-op deploy would stop a healthy container for nothing.
+# consistent snapshot first — but only when the vault data would actually be handed to
+# a different image, otherwise a routine no-op deploy would stop a healthy container
+# for nothing.
 
 - name: Inspect the running Vaultwarden container
   community.docker.docker_container_info:
     name: vaultwarden
   register: vaultwarden_container
   check_mode: false
+
+# The vault data can exist without the container (manual docker rm, watchtower-recreate
+# incidents) — in that state the next deploy would start a NEW image on the OLD SQLite
+# data with no backup. Gate the backup on the DATA, not the container (#107).
+# `find` on a missing path warns and returns matched=0 rather than failing, so an
+# untouched host correctly reports "no data".
+- name: Check whether Vaultwarden data exists
+  ansible.builtin.find:
+    paths: "{{ data_mount }}/vaultwarden"
+    file_type: any
+    recurse: false
+  register: vaultwarden_data_files
+  check_mode: false
+
+- name: Determine whether Vaultwarden data is present
+  ansible.builtin.set_fact:
+    vaultwarden_data_present: "{{ (vaultwarden_data_files.matched | default(0) | int) > 0 }}"
 
 - name: Read the Vaultwarden image reference from the compose file
   ansible.builtin.set_fact:
@@ -89,13 +107,17 @@
     pull: always
   register: vaultwarden_pulled
   check_mode: false  # a real pull, so --check can honestly report an upgrade
-  when: vaultwarden_container.exists
+  when: vaultwarden_container.exists or vaultwarden_data_present
 
+# Upgrade-pending means "existing vault data is about to be handed to a different
+# image". Container-absent + data-present counts: compose will start a freshly pulled
+# image on that data, which is exactly the unbacked upgrade #107 is about.
 - name: Determine whether this deploy would upgrade Vaultwarden
   ansible.builtin.set_fact:
     vaultwarden_upgrade_pending: >-
-      {{ vaultwarden_container.exists
-         and vaultwarden_pulled.image.Id | default('') != vaultwarden_container.container.Image }}
+      {{ vaultwarden_data_present
+         and (not vaultwarden_container.exists
+              or vaultwarden_pulled.image.Id | default('') != vaultwarden_container.container.Image) }}
 
 # Checked before anything is stopped: a retention of 0 would slice [0:] and delete
 # every archive, including the one just taken, right before the upgrade is applied.
@@ -106,6 +128,9 @@
     fail_msg: "vaultwarden_backup_retention must be >= 1, got {{ vaultwarden_backup_retention }}"
     quiet: true
 
+# Fires whenever vault data exists and the image behind it is about to change —
+# including a container-absent start, where there is nothing to stop but plenty to
+# lose (#107). A no-op deploy on an up-to-date container still stops nothing.
 - name: Back up Vaultwarden before the upgrade is applied
   when: vaultwarden_upgrade_pending
   block:
@@ -113,6 +138,7 @@
       community.docker.docker_container:
         name: vaultwarden
         state: stopped
+      when: vaultwarden_container.exists
 
     - name: Create Vaultwarden backup directory
       ansible.builtin.file:
@@ -146,10 +172,13 @@
   rescue:
     # Never leave the vault down because a backup failed. Restart it on the image
     # it was already running, then abort so the upgrade is not applied unbacked.
+    # Only when there was a container to begin with: state:started against a
+    # nonexistent container with no image spec is an error, not a restart.
     - name: Restart Vaultwarden on its existing image after a failed backup
       community.docker.docker_container:
         name: vaultwarden
         state: started
+      when: vaultwarden_container.exists
 
     - name: Fail because the pre-upgrade backup did not complete
       ansible.builtin.fail:
