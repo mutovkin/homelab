@@ -6,7 +6,12 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # Stateful and schema-migrating: `occ upgrade` runs one-way DB migrations on
+      # start, and Nextcloud refuses to skip a major. "enable" keeps it in scan scope
+      # so new versions are reported; "monitor-only" stops Watchtower applying them.
+      # Update deliberately via `task deploy:service -- --tags nextcloud` (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     ports:
       - "8080:80"
     environment:
@@ -45,6 +50,11 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+    labels:
+      # Auto-update class: pinned to major 7, cache-only state, recreate-from-image is
+      # the recovery path anyway. The label is also what puts it in scan scope at all —
+      # without it the container is silently never scanned or reported (#83).
+      - "com.centurylinklabs.watchtower.enable=true"
     volumes:
       - nextcloud-redis-data:/data
     networks:

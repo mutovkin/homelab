@@ -6,7 +6,12 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # Stateful and schema-migrating: every release runs one-way postgres migrations
+      # against the photo library. "enable" keeps it in scan scope so new versions are
+      # reported; "monitor-only" stops Watchtower applying them. Update deliberately
+      # via `task deploy:service -- --tags immich`, after a DB dump (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     ports:
       - "2283:2283"
     environment:
@@ -39,7 +44,11 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # Stateless itself, but Immich requires server and ML to run the same release —
+      # auto-updating one alone breaks lockstep. Reported, never auto-updated; it moves
+      # together with immich-server on a deliberate deploy (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     environment:
       MACHINE_LEARNING_WORKERS: 1
       MACHINE_LEARNING_WORKER_TIMEOUT: 120
@@ -61,6 +70,11 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+    labels:
+      # Auto-update class: pinned to major 7, cache-only state, recreate-from-image is
+      # the recovery path anyway. The label is also what puts it in scan scope at all —
+      # without it the container is silently never scanned or reported (#83).
+      - "com.centurylinklabs.watchtower.enable=true"
     volumes:
       - immich-redis-data:/data
     networks:

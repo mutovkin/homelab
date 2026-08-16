@@ -1,7 +1,11 @@
 services:
   watchtower:
     container_name: watchtower
-    image: nickfedor/watchtower:latest
+    # Pinned deliberately (#83): the update orchestrator holds docker.sock read-write
+    # and is a third-party fork of an archived upstream, so it must not execute a new
+    # `latest` unattended. Bump by editing this tag in git, where it is reviewable.
+    # Digest at pin time: sha256:bee77696862e09521c49e5ab4904a4179accece6d561a2ef334c7589b84a2438
+    image: nickfedor/watchtower:1.20.3
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
@@ -10,6 +14,13 @@ services:
       # scanned at all. Without it here, Watchtower kept the other labeled
       # containers current but could never update itself.
       - "com.centurylinklabs.watchtower.enable=true"
+      # Socket-holding ⇒ monitor-only: it stays counted in `scanned=N` and never
+      # self-updates. This guards the one residual unattended path the tag pin leaves
+      # open — a re-pushed `1.20.3`. Note it does NOT give us release notifications:
+      # Watchtower only checks the reference it runs, so with the tag pinned a new
+      # 1.20.4 is never seen. Checking the fork's releases is a deliberate, manual
+      # step — see README "Update Posture" (#83).
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:

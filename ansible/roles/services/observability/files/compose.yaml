@@ -52,7 +52,13 @@ services:
     networks:
       - observability
     labels:
+      # Stateful TSDB with an on-disk format that migrates forward one way: an
+      # unattended upgrade would rewrite 5y of metrics with no fresh backup. "enable"
+      # keeps it in scan scope so new versions are reported; "monitor-only" stops
+      # Watchtower applying them. Update via `task deploy:service -- --tags
+      # observability` (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
 
   # VictoriaLogs - High-performance log aggregation
   victorialogs:
@@ -89,7 +95,10 @@ services:
     networks:
       - observability
     labels:
+      # Same class as victoriametrics: stateful on-disk log store, 90d retention,
+      # forward-only format migrations. Scanned and reported, never auto-updated (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
 
   # Vector - High-performance log collection and routing
   vector:
@@ -99,7 +108,14 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # Proven breaking-change history: the unattended 0.57 update shipped two
+      # independent breaking changes — a crash loop from template confinement, then a
+      # silent 401 from disabled ${VAR} interpolation — and the log pipeline was dead
+      # for ~30 days (see
+      # docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md).
+      # Scanned and reported, never auto-updated (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     ports:
       - "8686:8686" # Vector GraphQL API for monitoring and debugging
     volumes:
@@ -146,7 +162,15 @@ services:
       - "apparmor:unconfined"
     user: telegraf:${DOCKER_GID:-996}
     labels:
+      # Two reasons, either sufficient. (1) Socket holder: it bind-mounts
+      # /var/run/docker.sock, and `:ro` is cosmetic for a unix socket — the API is
+      # bidirectional over it regardless — so the "socket holder ⇒ monitor-only" rule
+      # applies here as much as to portainer and watchtower. (2) Vector-shaped risk:
+      # floating `telegraf:latest` reading a bind-mounted telegraf.conf, where a plugin
+      # deprecation across releases stops metrics without stopping the container.
+      # Scanned and reported, never auto-updated (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:
       - /data/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -224,7 +248,11 @@ services:
         max-size: "10m"
         max-file: "3"
     labels:
+      # Stateful: the grafana.db SQLite schema migrates forward on start and cannot be
+      # rolled back by pinning the old tag again. Scanned and reported, never
+      # auto-updated (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3000/api/health || exit 1"]
       interval: 30s

@@ -6,7 +6,13 @@ services:
     security_opt:
       - "apparmor:unconfined"
     labels:
+      # Stateful and schema-migrating: the recordings/events SQLite DB migrates forward
+      # on start, and releases regularly change config.yml schema (a rejected config
+      # leaves the NVR down). "enable" keeps it in scan scope so new versions are
+      # reported; "monitor-only" stops Watchtower applying them. Update deliberately
+      # via `task deploy:service -- --tags frigate` (#83).
       - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
     ports:
       - "5000:5000"   # Web UI
       - "8554:8554"   # RTSP feeds
