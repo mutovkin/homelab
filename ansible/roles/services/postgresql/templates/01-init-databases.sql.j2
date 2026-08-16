@@ -1,0 +1,10 @@
+-- Deployed by Ansible (roles/services/postgresql) — rendered from vault.
+-- Runs ONLY on a fresh initdb (empty data dir); never affects a live cluster.
+-- Create databases for different applications
+CREATE DATABASE joplin;
+
+-- Create users with appropriate permissions
+CREATE USER joplin_user WITH PASSWORD '{{ vault_joplin_postgres_password }}';
+
+-- Grant permissions
+GRANT ALL PRIVILEGES ON DATABASE joplin TO joplin_user;

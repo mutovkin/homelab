@@ -14,39 +14,53 @@ Key features:
 - Robust backup and recovery tools
 - pgAdmin web interface for database management
 
-## Data Folder Permissions
+## Configuration ownership
 
-The PostgreSQL container requires specific permissions for data directories. Set up the following directories with correct ownership:
+All bind-mounted directories and config files are created and deployed by this role
+(`tasks/main.yml`) — edit them in the repo, never on the host (#78):
+
+| Repo path | Host path (mounted into the container) | Paired action on change |
+| --------- | -------------------------------------- | ----------------------- |
+| `files/config/postgresql.conf` | `/data/postgresql/config/postgresql.conf` | restarts `postgres` (client-visible outage) |
+| `files/config/pg_hba.conf` | `/data/postgresql/config/pg_hba.conf` | restarts `postgres` (client-visible outage) |
+| `files/config/pgadmin/servers.json` | `/data/postgresql/config/pgadmin/servers.json` | restarts `pgadmin4` |
+| `templates/01-init-databases.sql.j2` | `/data/postgresql/init-scripts/01-init-databases.sql` | none — init scripts run only on a fresh initdb |
+
+`postgresql.conf` sets `hba_file = '/etc/postgresql/pg_hba.conf'` so the mounted
+`pg_hba.conf` is actually read (without it PostgreSQL falls back to the copy in
+`$PGDATA` and the mount is silently ignored). `hba_file` is startup-only, hence the
+restart rather than a reload.
+
+The init script is a template rendering `vault_joplin_postgres_password` from
+`ansible/inventory/host_vars/eq12_docker/vault.yml`; it is written `999:999` mode
+`0600` so the credential is not world-readable on the host, and is deployed with
+`diff: false` so a `--diff` run never prints it.
+
+`config/` is excluded from the deploy-dir rsync payload — the configs go straight to
+their container mount paths, so a second copy under `/data/deploy/postgresql/` would
+just be decorative drift.
+
+### Standalone (non-Ansible) use
+
+Place the config files yourself before `docker compose up`:
 
 ```bash
-# Create the data directories
-sudo mkdir -p /data/postgresql/data
-sudo mkdir -p /data/postgresql/config
-sudo mkdir -p /data/postgresql/init-scripts
+sudo mkdir -p /data/postgresql/{data,config/pgadmin,init-scripts}
+sudo cp files/config/postgresql.conf files/config/pg_hba.conf /data/postgresql/config/
+sudo cp files/config/pgadmin/servers.json /data/postgresql/config/pgadmin/
+# render templates/01-init-databases.sql.j2 with your own password, then:
+#   sudo install -o 999 -g 999 -m 0600 01-init-databases.sql /data/postgresql/init-scripts/
+
+# pgAdmin writes as UID 5050 and crash-loops if Docker auto-creates this root-owned
 sudo mkdir -p /data/postgresql/pgadmin
-
-# Set ownership to the PostgreSQL user (UID 999)
-sudo chown -R 999:999 /data/postgresql/data
-
-# Set ownership for pgAdmin (UID 5050)
-sudo chown -R 5050:5050 /data/postgresql/pgadmin
-
-# Config files can be owned by root (they're mounted read-only)
-sudo chown -R root:root /data/postgresql/config
-sudo chown -R root:root /data/postgresql/init-scripts
-
-# Set appropriate permissions
-sudo chmod -R 755 /data/postgresql/data
-sudo chmod -R 755 /data/postgresql/pgadmin
-sudo chmod -R 644 /data/postgresql/config/*
-sudo chmod -R 644 /data/postgresql/init-scripts/*
+sudo chown 5050:5050 /data/postgresql/pgadmin
 ```
 
 ## Important Notes
 
 - **PostgreSQL data**: UID 999 (postgres user in container)
 - **pgAdmin data**: UID 5050 (pgadmin user in container)
-- **Config files**: Read-only mounts, can be owned by root
+- **Config files**: Read-only mounts, owned by root
 - **Init scripts**: Executed only on first database initialization
 
 Ensure adequate disk space as databases can grow significantly over time. The backup directory should also have sufficient space for automated backups.
