@@ -73,7 +73,7 @@ networks:
     name: nextcloud_network
     ipam:
       config:
-        - subnet: ${NEXTCLOUD_NETWORK_SUBNET:-172.33.0.0/24}
+        - subnet: ${NEXTCLOUD_NETWORK_SUBNET:-172.29.0.0/24}
   postgres_network:
     external: true
     name: postgres_network
