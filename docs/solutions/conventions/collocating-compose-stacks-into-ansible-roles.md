@@ -49,8 +49,9 @@ and the live file was whatever had last been hand-copied. PostgreSQL still has t
 identical defect on all four of its bind-mounted configs (#78).
 
 Issue #85 collapsed the two directories into one: each stack moved to
-`ansible/roles/services/<svc>/files/compose.yaml`, and the eleven copy-pasted
-five-task deploy blocks became a single parameterized role, `services/_deploy`. The
+`ansible/roles/services/<svc>/files/compose.yaml`, and the eleven copy-pasted deploy
+blocks (four to five near-identical tasks each) became a single parameterized role,
+`services/_deploy`. The
 constraint that made it interesting was not the move, it was the bar the move had to
 clear: **the on-host deploy payload byte-identical, and zero container recreations**.
 A refactor that restarts the vault, renumbers a network, or bounces Grafana is not a
@@ -62,8 +63,10 @@ instrument. It surfaced two latent hazards that had nothing to do with moving fi
 is about both the hazards and the method that caught them.
 
 Status as written: the work landed on branch `fix/85-collocate-containers`, unmerged
-as of this writing. The evidence below is static verification plus `--check --diff`
-dry runs against the live hosts; the live apply had not yet been run.
+as of this writing. The evidence below is static verification, `--check --diff` dry
+runs, and the live apply to both Docker hosts, which converged to a clean idempotent
+re-run on each. The Live-apply findings section records what only the apply could
+teach.
 
 ## Guidance
 
@@ -257,6 +260,58 @@ genuinely-changing `.env` files are ever shown. When a secret-bearing `.env` *is
 expected to change, plan for `no_log` or redaction before running the dry run in a
 shared or logged context.
 
+## Live-apply findings
+
+The dry run caught what it could. Four things only the apply could teach.
+
+### Template comments are payload
+
+A comment-only edit to a `.j2` that renders into a live config file is not cosmetic. It
+flips the template task's `changed`, and `changed` is what downstream machinery keys
+off. Here, rewording one comment line in `settings.yml.j2` — the line that used to
+advertise the mirror pair this change deleted — flipped the searxng template task, which
+feeds `svc_recreate: always`, which recreated the container. The recreate was correct
+behaviour working exactly as designed; the surprise was that a comment triggered it.
+
+Audit template diffs for their **consequences**, not their content. "It's only a
+comment" is a statement about the diff; whether it restarts a service is a question
+about what reads that task's `changed` flag.
+
+### Creating a file in an rsync'd directory costs one idempotency cycle
+
+Writing a new file into a directory that a later `synchronize` task also manages bumps
+that directory's mtime. The *next* sync therefore reports one final `changed` while it
+settles the directory's own metadata, and the run after that is clean.
+
+This showed up as n5pro needing three runs to go quiet, where eq12 went quiet on two —
+the difference being that n5pro was the host creating portainer's `.env` for the first
+time. That is convergence, not non-idempotency. Before chasing a phantom idempotency
+bug, check whether the previous run created a file inside a directory the run also
+syncs, and simply run once more.
+
+### Live-vs-repo drift is invisible to a collocation dry-run
+
+Renaming the compose file means rsync **deletes** the old-named file and **sends** the
+new one. It never content-compares the two, because as far as rsync is concerned they
+are unrelated paths. So if the live file had drifted from the repo — hand-edited on the
+host, or left behind by an older revision — the dry run shows only `deleting <old>` and
+`<new>` being sent, and reports nothing about the drift it is silently resolving.
+
+A byte-identity proof covers repo→repo. It does not cover repo→host. If an apply must be
+recreate-free, diff the live files against the repo copies *before* applying; the dry run
+structurally cannot do it for you.
+
+### A fleet-wide simultaneous restart is probably your package manager
+
+Containers restarting across both hosts within minutes of each other looks alarming and
+looks like Watchtower. Check `dpkg.log` first: unattended-upgrades bumping `docker-ce`
+restarts the daemon, which restarts its containers, on every host at roughly the same
+time because every host runs the same upgrade timer.
+
+Distinguishing this matters because the signatures differ in kind: a daemon upgrade
+**restarts** containers (same container ID, new uptime), while Watchtower and compose
+**recreate** them (new container ID). Read the container ID before reading the clock.
+
 ## Why This Matters
 
 The unifying idea is that **a refactor's blast radius is not bounded by the files it
@@ -346,6 +401,9 @@ git diff -M100% --summary origin/master...HEAD
 - `docs/solutions/integration-issues/docker-compose-shared-network-subnet-recreate.md`
   — the recreate mechanism the portainer pin avoids triggering (#45). Covers the
   *definition-hash* trigger; this doc covers the *resolved-value* trigger. Read both.
+- `docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md`
+  — why some containers recreate on a deploy that changed nothing about them; found
+  while decomposing this change's apply.
 - `docs/solutions/conventions/ansible-change-loop-pitfalls.md` — §1 check-mode safety
   and §2 existence gates; see the carve-out above for why this change's stat guard is
   not the anti-pattern §2 describes.
