@@ -6,6 +6,9 @@
 !.claude/skills/homelab-change-loop
 !.claude/skills/orchestrator
 
+# ZCode per-session plan artifacts (local scratch, never committed)
+.zcode/plans/
+
 # Ansible
 .vault_password
 *.retry
