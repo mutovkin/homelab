@@ -21,12 +21,11 @@
    └─────────┘ └────┬─────┘ └───────┘  └───────┘  └────┬───────┘
                     │                                  │
     ┌───────┬───────┼───────┬──────┬──────┬──────┐     │
-    │       │       │       │      │      │      │     ├──Immich
-   PG    Obs    Vault    SearX  Joplin  Port  Watch    ├──Frigate
-                                                       ├──NextCloud
-                                                       ├──PG
-                                                       ├──Port
+    │       │       │       │      │      │      │     ├──LMS
+   PG    Obs    Vault    SearX  Joplin  Port  Watch    ├──Port
                                                        └──Watch
+                                                  (planned #91: Immich, Frigate,
+                                                   NextCloud, PG)
 ```
 
 ## Automation Layers
@@ -69,7 +68,7 @@ All Docker networks use 172.x.x.x subnets to avoid conflicts with the LAN (192.1
 | Observability | `observability_network`       | 172.20.0.0/24 | 172.20.0.1 |
 | PostgreSQL    | `postgres_network`            | 172.21.0.0/24 | 172.21.0.1 |
 | SearXNG       | `searxng_network`             | 172.22.0.0/24 | 172.22.0.1 |
-| Portainer     | `default`                     | 172.23.0.0/24 | 172.23.0.1 |
+| Portainer     | `portainer_network`           | 172.23.0.0/24 | 172.23.0.1 |
 | Vaultwarden   | `vaultwarden_network`         | 172.24.0.0/24 | 172.24.0.1 |
 | Watchtower    | `watchtower_network`          | 172.25.0.0/24 | 172.25.0.1 |
 | Joplin        | `postgres_network` (shared)   | 172.21.0.0/24 | 172.21.0.1 |
@@ -99,16 +98,18 @@ eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 - **Method**: Direct LAN (both machines on the same 192.168.x.x network)
 - **Use cases**:
   - Centralized monitoring: Telegraf on N5 Pro → VictoriaMetrics on EQ12 (or vice versa)
-  - NFS: N5 Pro Docker LXC → TrueNAS VM for Frigate recordings and media storage
+  - NFS: N5 Pro Docker LXC → TrueNAS VM for the LMS music library today; for Frigate
+    recordings and other media once those stacks land (#91)
 - **Configuration**: LAN IPs templated into `.env` files by Ansible using inventory variables
 
 ## GPU Device Passthrough (N5 Pro)
 
 The N5 Pro Docker LXC (CT-201) has `/dev/dri` device passthrough configured via the
-`proxmox_guests` role. This provides VAAPI hardware acceleration for:
+`proxmox_guests` role. The passthrough is live today; its intended VAAPI consumers are
+both still planned (#91) — nothing currently deployed on CT-201 uses it:
 
-- **Frigate**: Hardware video decoding of camera streams
-- **Immich**: Video transcoding and ML inference acceleration
+- **Frigate** (planned): Hardware video decoding of camera streams
+- **Immich** (planned): Video transcoding and ML inference acceleration
 
 This is device sharing (not full PCI passthrough), configured via LXC config entries:
 
@@ -125,7 +126,7 @@ for direct access to 5× 26TB HDDs.
 | Host   | Docker Host           | Services                                                                       |
 | ------ | --------------------- | ------------------------------------------------------------------------------ |
 | EQ12   | CT 101 (deb-docker)   | PostgreSQL, Observability, Vaultwarden, SearXNG, Joplin, Portainer, Watchtower |
-| N5 Pro | CT 201 (n5pro-docker) | PostgreSQL, Immich, Frigate, NextCloud, Portainer, Watchtower                  |
+| N5 Pro | CT 201 (n5pro-docker) | LMS, Portainer, Watchtower (planned #91: PostgreSQL, Immich, Frigate, NextCloud) |
 
 Service placement is configured via `ansible/inventory/host_vars/*/vars.yml` — the
 `services` list variable controls which compose stacks deploy to which Docker host.
@@ -141,13 +142,25 @@ Service placement is configured via `ansible/inventory/host_vars/*/vars.yml` —
 | 8086  | Vaultwarden                |
 | 8089  | VictoriaMetrics (InfluxDB) |
 | 8428  | VictoriaMetrics (HTTP API) |
-| 8686  | Vector (GraphQL API)       |
+| 9000  | Portainer (nftables allowlist) |
 | 9428  | VictoriaLogs (HTTP API)    |
 | 10080 | pgAdmin                    |
 | 18080 | SearXNG                    |
 | 22300 | Joplin                     |
 
 ### N5 Pro
+
+Deployed today (LMS runs on `network_mode: host`, so its ports are bound directly
+on CT-201):
+
+| Port          | Service                        |
+| ------------- | ------------------------------ |
+| 3483 tcp+udp  | LMS (Slimproto control + discovery) |
+| 9000          | Portainer (nftables allowlist) |
+| 9001          | LMS (web UI)                   |
+| 9090          | LMS (CLI / JSON-RPC)           |
+
+Planned (#91) — not currently listening:
 
 | Port | Service           |
 | ---- | ----------------- |
