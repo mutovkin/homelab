@@ -228,7 +228,13 @@
   loop_control:
     loop_var: apt_timer
 
-- name: Apply pending security upgrades
+# Deliberate maintenance-window mass upgrade only (#97). Unconditional until
+# #97, this applied ALL pending upgrades on every run of the role — a pending
+# docker-ce upgrade would restart dockerd and bounce every container as a side
+# effect of an unrelated deploy. Security patching is unattended-upgrades'
+# job (#77, above); run this by choice: -e apt_apply_pending_upgrades=true
+- name: Apply pending package upgrades (deliberate maintenance only)
   ansible.builtin.apt:
     upgrade: safe
     update_cache: true
+  when: apt_apply_pending_upgrades | bool

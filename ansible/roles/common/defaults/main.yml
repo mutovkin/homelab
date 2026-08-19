@@ -2,6 +2,11 @@
 # defaults for common role
 timezone: UTC
 apt_dist_upgrade: false
+# Mass-upgrade gate (#97). Default false: unattended-upgrades owns nightly
+# security patching (#77); applying every pending upgrade as a side effect of
+# an unrelated deploy restarts daemons (a pending docker-ce bounces every
+# container). Opt in deliberately: -e apt_apply_pending_upgrades=true
+apt_apply_pending_upgrades: false
 
 # Operator extras. Overriding this from inventory REPLACES the whole list —
 # Ansible does not merge — so add packages here rather than in group_vars. The
