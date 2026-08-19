@@ -1,4 +1,63 @@
 ---
+# Frigate's whole configuration is one bind-mounted config.yml. Until #91 the role
+# only created the directory, so camera config existed on the host and nowhere else
+# — invisible to review and gone on a rebuild. It is Ansible-owned now.
+#
+# NOT DEPLOYED ON ANY HOST TODAY: frigate is commented out of n5pro_docker's
+# `services` list. Everything below is therefore role-side only and has not been
+# exercised live; the restart pairing is a no-op until the service is enabled.
+
+# An NVR with no cameras is never what someone meant. Fail at enable time, loudly,
+# instead of rendering a config Frigate either rejects or accepts as "record
+# nothing". See defaults/main.yml for the frigate_cameras structure.
+- name: Assert Frigate has at least one camera defined
+  ansible.builtin.assert:
+    that:
+      - frigate_cameras | length > 0
+    fail_msg: >-
+      frigate_cameras is empty. Define the cameras in the host_vars of the host
+      running frigate (see roles/services/frigate/defaults/main.yml for the
+      structure, and use the {FRIGATE_RTSP_PASSWORD} placeholder in stream URLs
+      rather than a plaintext credential).
+    quiet: true
+
+- name: Assert every Frigate camera has a stream URL
+  ansible.builtin.assert:
+    that:
+      - item.value.stream_url | default('') | length > 0
+    fail_msg: "frigate_cameras['{{ item.key }}'] has no stream_url."
+    quiet: true
+  loop: "{{ frigate_cameras | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Create Frigate config directory
+  ansible.builtin.file:
+    path: "{{ data_mount }}/frigate/config"
+    state: directory
+    mode: "0755"
+
+# Captured BEFORE the config is written and the stack deployed, for the restart
+# pairing below: never restart a container this run created (it would race
+# Frigate's first-boot DB creation), and never restart one the deploy recreated
+# (it already started with the new config).
+- name: Check whether the Frigate container pre-exists
+  community.docker.docker_container_info:
+    name: frigate
+  register: frigate_container_before
+  check_mode: false
+
+# Deployed to the container's MOUNT PATH, not the deploy dir — same split as the
+# postgresql role's server configs. It lives in templates/ rather than files/ for
+# exactly that reason: anything under files/ is rsynced into the deploy dir, where
+# a copy of this file would be decorative and would drift.
+- name: Deploy Frigate config.yml
+  ansible.builtin.template:
+    src: config.yml.j2
+    dest: "{{ data_mount }}/frigate/config/config.yml"
+    mode: "0644"
+  register: frigate_config
+
 - name: Deploy Frigate via the shared service pipeline
   ansible.builtin.include_role:
     name: services/_deploy
@@ -7,3 +66,56 @@
     svc_data_dirs:
       - "{{ data_mount }}/frigate/config"
       - "{{ data_mount }}/frigate/recordings"
+
+- name: Re-read the Frigate container after the deploy
+  community.docker.docker_container_info:
+    name: frigate
+  register: frigate_container_after
+  check_mode: false
+
+# Single source of truth for the restart decision. Deliberately NO default()
+# filters on the registers: a rename must fail loudly rather than silently skip the
+# restart — the do-nothing failure mode of #78.
+- name: Determine whether Frigate must be restarted for a changed config
+  ansible.builtin.set_fact:
+    frigate_restart_needed: >-
+      {{ frigate_config is changed
+         and frigate_container_before.exists
+         and frigate_container_after.exists
+         and frigate_container_before.container.Id == frigate_container_after.container.Id }}
+
+- name: Preview the config-change restart (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      config.yml changed: a real apply WILL restart frigate (recording gap of a few
+      seconds) so the new configuration is loaded.
+  when:
+    - ansible_check_mode
+    - frigate_restart_needed | bool
+
+# Compose does not track bind-mounted file contents, and Frigate reads config.yml
+# only at start.
+- name: Restart Frigate so the changed config.yml is loaded
+  community.docker.docker_container:
+    name: frigate
+    state: started
+    restart: true
+  when:
+    - not ansible_check_mode
+    - frigate_restart_needed | bool
+
+# Frigate REJECTS an invalid config and exits, so a green play could otherwise mean
+# a crash-looping NVR. Prove the API answers before declaring success (the module
+# returns on issuance, not on service).
+- name: Wait for Frigate to serve its API after the restart
+  ansible.builtin.uri:
+    url: http://localhost:5000/api/version
+    status_code: 200
+  register: frigate_api_ready
+  until: frigate_api_ready is succeeded
+  retries: 12
+  delay: 5
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - frigate_restart_needed | bool
