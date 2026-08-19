@@ -1,0 +1,5 @@
+---
+# Number of pre-deploy PostgreSQL cluster dumps to retain in {{ data_mount }}/backups.
+# Same shape and directory as the Vaultwarden pre-upgrade archives (#107); the two
+# use different filename patterns so their retentions never prune each other.
+joplin_backup_retention: 7
