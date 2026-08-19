@@ -1,67 +1,19 @@
 ---
 # --- Firewall: restrict the Vaultwarden HTTP port to approved sources (#81) ---
-# Fail-open nftables table (see docs/solutions/conventions/scoped-nftables-on-live-host.md);
-# hooks prerouting, not input: the IPv4 path to a docker-published port is DNAT'd
-# and forwarded (invisible to input), and prerouting before DNAT also covers the
-# docker-proxy [::] input path.
-- name: Install nftables
-  ansible.builtin.apt:
-    name: nftables
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-
-- name: Ensure nftables include dir exists
-  ansible.builtin.file:
-    path: /etc/nftables.d
-    state: directory
-    mode: "0755"
-
-- name: Deploy Vaultwarden firewall ruleset
-  ansible.builtin.template:
-    src: vaultwarden-firewall.nft.j2
-    dest: /etc/nftables.d/vaultwarden-firewall.nft
-    mode: "0644"
-    validate: "/usr/sbin/nft -c -f %s"
-  notify: reload-vaultwarden-firewall
-
-- name: Deploy Vaultwarden firewall systemd unit
-  ansible.builtin.template:
-    src: vaultwarden-firewall.service.j2
-    dest: /etc/systemd/system/vaultwarden-firewall.service
-    mode: "0644"
-  notify: reload-vaultwarden-firewall
-
-- name: Enable and start Vaultwarden firewall
-  ansible.builtin.systemd:
-    name: vaultwarden-firewall.service
-    enabled: true
-    state: started
-    daemon_reload: true
-  # In --check the unit file may not have been written yet, so enable/start can't
-  # find it. Skip this one task in check mode; a real run writes it first.
-  when: not ansible_check_mode
-
-- name: Flush handlers so firewall changes are live before the compose deploy
-  ansible.builtin.meta: flush_handlers
-
-# A RemainAfterExit oneshot stays "active" even if the table was externally
-# flushed, so state: started can never heal it. Detect drift and notify.
-- name: Check Vaultwarden firewall table is live
-  ansible.builtin.command: /usr/sbin/nft list table inet vaultwarden_fw
-  register: vaultwarden_fw_check
-  changed_when: vaultwarden_fw_check.rc != 0
-  failed_when: false
-  notify: reload-vaultwarden-firewall
-  when: not ansible_check_mode
-
-- name: Heal a missing firewall table immediately
-  ansible.builtin.meta: flush_handlers
-
-- name: Assert Vaultwarden firewall table is live
-  ansible.builtin.command: /usr/sbin/nft list table inet vaultwarden_fw
-  changed_when: false
-  when: not ansible_check_mode
+# Shared fail-open nftables table (roles/nft_scoped_fw, #114 — see
+# docs/solutions/conventions/scoped-nftables-on-live-host.md); hooks prerouting,
+# not input: the IPv4 path to a docker-published port is DNAT'd and forwarded
+# (invisible to input), and prerouting before DNAT also covers the docker-proxy
+# [::] input path. Included BEFORE the compose deploy below so the rules are live
+# before the port is (re)published — the shared role reloads inline, so no
+# flush_handlers dance is needed.
+- name: Restrict the Vaultwarden HTTP port to approved sources
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: vaultwarden
+    nft_fw_description: Vaultwarden HTTP firewall (Ansible-managed nftables table inet vaultwarden_fw)
+    nft_fw_ports: "{{ vaultwarden_fw_ports }}"
 
 # --- Admin token shape --------------------------------------------------------
 # Vaultwarden accepts a non-PHC ADMIN_TOKEN as a LITERAL plaintext token — it does not

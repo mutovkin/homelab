@@ -1,0 +1,41 @@
+# PostgreSQL Client Authentication Configuration File
+# Deployed by Ansible (roles/services/postgresql) — edit the TEMPLATE in the
+# repo, not this file and not the live copy.
+# The LAN entries below are GENERATED from postgres_firewall.ports[{{ postgres_hba_port }}] in
+# host_vars — the same list the nftables allowlist is built from (#114), so the
+# firewall and pg_hba can no longer drift apart. To grant a new LAN client, add
+# it there once.
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+
+# Unix socket: peer requires OS user == DB role, so a root `docker exec` shell
+# no longer gets a passwordless superuser session (#79). Admin/backup sessions:
+#   docker exec -u postgres postgres psql ...
+#   docker exec -u postgres postgres pg_dumpall ...
+# First-boot initdb is unaffected: the image entrypoint runs its socket psql as
+# the postgres OS user (uid 999), which peer-maps to the postgres role.
+local   all             all                                     peer
+
+# IPv4 local connections:
+host    all             all             127.0.0.1/32            scram-sha-256
+
+# IPv6 local connections:
+host    all             all             ::1/128                 scram-sha-256
+
+# Docker networks: 172.16.0.0/12 covers this host's (eq12) compose subnets —
+# the 172.2x ranges, incl. postgres_network 172.21.0.0/24 (joplin, pgadmin).
+host    all             all             172.16.0.0/12           scram-sha-256
+
+# LAN clients: exactly the nftables-allowlisted sources for tcp/{{ postgres_hba_port }} (#79, #114).
+# The previous 0.0.0.0/0 catch-all accepted auth attempts from any LAN source;
+# live pg_stat_activity shows the only real TCP client is joplin over the bridge.
+# A future off-host consumer (e.g. an n5pro service) arrives SNAT'd as its docker
+# host's LAN IP — add that /32 to postgres_firewall.ports[{{ postgres_hba_port }}] and both this
+# file and the firewall follow.
+{% for src in postgres_firewall.ports[postgres_hba_port] %}
+host    all             all             {{ "%-24s" | format(src) }}scram-sha-256
+{% endfor %}
+
+# Replication connections
+host    replication     all             127.0.0.1/32            scram-sha-256
+host    replication     all             ::1/128                 scram-sha-256
+host    replication     all             172.16.0.0/12           scram-sha-256

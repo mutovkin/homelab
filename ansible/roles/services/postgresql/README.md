@@ -22,7 +22,7 @@ All bind-mounted directories and config files are created and deployed by this r
 | Repo path | Host path (mounted into the container) | Paired action on change |
 | --------- | -------------------------------------- | ----------------------- |
 | `files/config/postgresql.conf` | `/data/postgresql/config/postgresql.conf` | restarts `postgres` (client-visible outage) |
-| `files/config/pg_hba.conf` | `/data/postgresql/config/pg_hba.conf` | restarts `postgres` (client-visible outage) |
+| `templates/pg_hba.conf.j2` | `/data/postgresql/config/pg_hba.conf` | restarts `postgres` (client-visible outage) |
 | `files/config/pgadmin/servers.json` | `/data/postgresql/config/pgadmin/servers.json` | none — imported only on first pgAdmin launch (fresh `/var/lib/pgadmin`) or with `PGADMIN_REPLACE_SERVERS_ON_STARTUP=True` (not set); on an initialized install, change servers in the UI |
 | `templates/01-init-databases.sql.j2` | `/data/postgresql/init-scripts/01-init-databases.sql` | none — init scripts run only on a fresh initdb |
 
@@ -71,11 +71,15 @@ either way); only those ports are ever dropped; unloading the table (`ExecStop`,
 flush) leaves the ports **open**, never the host unreachable. The ruleset is validated
 with `nft -c -f` at template time before it is written.
 
+Since #114 the table is built by the **shared `nft_scoped_fw` role**, which this role
+includes with `nft_fw_name: postgres`, the per-port allowlist, `scope_guard: host_addr`
+(plus `lan_iface` and `drop_ipv6`). The artifacts it owns:
+
 | Artifact | Purpose |
 | -------- | ------- |
-| `templates/postgres-firewall.nft.j2` | ruleset → `/etc/nftables.d/postgres-firewall.nft` |
-| `templates/postgres-firewall.service.j2` | oneshot unit → `/etc/systemd/system/postgres-firewall.service` (`RemainAfterExit`, `PartOf=nftables.service`, loads at boot before `docker.service`, ordering only) |
-| `tasks/main.yml` probe → reload → verify | converge the *loaded* table, not just the files on disk (see below) |
+| `roles/nft_scoped_fw/templates/scoped-firewall.nft.j2` | ruleset → `/etc/nftables.d/postgres-firewall.nft` |
+| `roles/nft_scoped_fw/templates/scoped-firewall.service.j2` | oneshot unit → `/etc/systemd/system/postgres-firewall.service` (`RemainAfterExit`, `PartOf=nftables.service`, loads at boot before `docker.service`, ordering only) |
+| `roles/nft_scoped_fw/tasks/main.yml` probe → reload → verify | converge the *loaded* table, not just the files on disk (see below) |
 
 **Keeping the table actually loaded.** `/etc/nftables.conf` opens with `flush ruleset`,
 so any restart of the enabled `nftables.service` — an unattended-upgrades package upgrade,
@@ -98,18 +102,23 @@ rather than silently deploying unprotected:
 postgres_firewall:
   host_addr: 192.168.25.15
   lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
-  ports: [5432, 10080]
-  allowed_sources:
-    - 192.168.25.20/32  # NPM LXC (CT 104)
-    - 192.168.48.0/24   # operator workstation subnet
+  ports:
+    5432:
+      - 192.168.48.0/24   # operator workstation subnet
+    10080:
+      - 192.168.25.20/32  # NPM LXC (CT 104)
+      - 192.168.48.0/24   # operator workstation subnet
 ```
 
-An assert task validates it *structurally* rather than against a blocklist of wildcard
-spellings (which would wave through `192.168.0.0/0`, `0/0`, `0.0.0.00/0`): the list must
-be non-empty and every entry an IPv4 CIDR with a `/1`–`/32` prefix. It also requires
-`host_addr` to be one of the host's real IPv4 addresses — a drifted value would silently
-no-op the entire filter, since every packet would exit at the `ip daddr != host_addr
-accept` rule.
+The allowlist is **per port** (#114): NPM reverse-proxies pgAdmin's `10080` and has no
+business speaking the PostgreSQL wire protocol, so it is not on `5432`.
+
+The shared role asserts it *structurally* rather than against a blocklist of wildcard
+spellings (which would wave through `192.168.0.0/0`, `0/0`, `0.0.0.00/0`): the mapping
+must be non-empty, keys integer ports, every source list non-empty and every entry an
+IPv4 CIDR with a `/1`–`/32` prefix. It also requires `host_addr` to be one of the host's
+real IPv4 addresses — a drifted value would silently no-op the entire filter, since every
+packet would exit at the `ip daddr != host_addr accept` rule.
 
 Always allowed regardless of the allowlist: loopback (`iif lo`, `127.0.0.1`) and the
 docker bridge ranges `172.16.0.0/12` (a container reaching a published port via the host
@@ -136,8 +145,9 @@ wholesale; add `ip6 saddr` accepts above that rule if an IPv6 client is ever nee
   is `gosu postgres pg_isready` (gosu ships in the official image) and the role's
   readiness gate passes `user: postgres` to `docker_container_exec`.
 - TCP is `scram-sha-256` everywhere. The old `0.0.0.0/0` catch-all is gone; LAN entries
-  now list exactly the allowlisted sources. Adding a new off-host consumer means editing
-  **both** `files/config/pg_hba.conf` and `postgres_firewall.allowed_sources`.
+  are **generated** from `postgres_firewall.ports[5432]` by `templates/pg_hba.conf.j2`
+  (#114), so the firewall and `pg_hba.conf` cannot drift. Adding a new off-host consumer
+  is a one-line edit to that list in host_vars; nothing else.
 - `listen_addresses = '*'` stays. Inside the container it binds only the container's own
   interfaces (loopback + its `172.21.0.0/24` address); a narrower value would hardcode a
   dynamic bridge IP. Exposure is controlled at the publish + nftables layer, not here.
@@ -158,8 +168,11 @@ this role directory, `ansible/roles/services/postgresql/`):
 
 ```bash
 sudo mkdir -p /data/postgresql/{data,config/pgadmin,init-scripts}
-sudo cp files/config/postgresql.conf files/config/pg_hba.conf /data/postgresql/config/
+sudo cp files/config/postgresql.conf /data/postgresql/config/
 sudo cp files/config/pgadmin/servers.json /data/postgresql/config/pgadmin/
+# pg_hba.conf is a template (its LAN entries come from the firewall allowlist):
+# render templates/pg_hba.conf.j2 with your own client CIDRs, then:
+#   sudo install -m 0644 pg_hba.conf /data/postgresql/config/
 # render templates/01-init-databases.sql.j2 with your own password, then:
 #   sudo install -o 999 -g 999 -m 0600 01-init-databases.sql /data/postgresql/init-scripts/
 
