@@ -38,6 +38,35 @@
     - vault_grafana_user
     - vault_grafana_password
 
+# --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
+# --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
+# (--httpAuth.* guards :8428 only), published on tcp AND udp, on 0.0.0.0/[::]. Its
+# only intended client is the Home Assistant VM. Hence nft_fw_protocols: [tcp, udp] —
+# governing only TCP would leave the UDP half of the same unauthenticated write port
+# wide open. The read ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately not
+# governed: NPM and operator workstations must keep reaching them.
+#
+# Implemented by the shared nft_scoped_fw role (#114) rather than a fork of it — the
+# fail-open table, prerouting hook, drift probe and self-heal all live there. See
+# docs/solutions/conventions/scoped-nftables-on-live-host.md.
+#
+# observability_firewall (lan_iface/ports) comes from host_vars; deliberately NO role
+# defaults — a host that deploys this role without defining it must fail loudly, not
+# silently publish an open write port.
+- name: Restrict the unauthenticated InfluxDB ingest port to its writer
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: observability
+    nft_fw_description: Observability ingest firewall (Ansible-managed nftables table inet observability_fw)
+    nft_fw_ports: "{{ observability_firewall.ports }}"
+    nft_fw_protocols: [tcp, udp]
+    # Default for the prerouting hook anyway; stated because the choice matters —
+    # at -150 daddr is still pre-DNAT, so container egress to some external :8089
+    # is non-local and exits before the drop.
+    nft_fw_scope_guard: fib
+    nft_fw_lan_iface: "{{ observability_firewall.lan_iface }}"
+
 - name: Stat Docker socket
   ansible.builtin.stat:
     path: /var/run/docker.sock
@@ -132,3 +161,34 @@
   # Skipped in check mode: on a host that has never been deployed the containers do
   # not exist yet, and docker_container would fail rather than preview anything.
   when: not ansible_check_mode
+
+# --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------
+# `never` keeps these tasks out of every ordinary run; they execute ONLY when the
+# operator asks for them by tag. Included (not inlined) so the tag lives on one
+# statement and the whole file inherits it.
+#   ansible-playbook playbooks/deploy-services.yml \
+#     --limit eq12_docker --tags vector_buffer_reset
+# Runbook (symptoms, when this is the right answer, what it costs):
+# docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
+#
+# The `when` is NOT redundant with `never`. deploy-services.yml includes each role
+# with `apply: tags: "{{ service }}"`, so every task in this role also carries the
+# tag `observability` — and `never` only suppresses a task while none of ITS tags is
+# explicitly requested. `--tags observability`, the documented way to deploy this one
+# service, therefore requests a tag this task has, and the destructive reset would
+# run on an ordinary single-service deploy. Verified, not theorised: a check-mode run
+# with `--tags observability` executed "Stop Vector" before this guard was added.
+# ansible_run_tags is exactly what the operator typed, so this distinguishes "asked
+# for the reset" from "asked for the service".
+# `apply:` is required, not decoration: on a DYNAMIC include, bare `tags:` tag only
+# the include statement — the included tasks do not inherit them, so they would carry
+# only the playbook's `observability` tag and `--tags vector_buffer_reset` would
+# include the file and then filter every task inside it out (an opt-in path that
+# silently does nothing). Also verified by running it.
+- name: Reset the Vector disk buffer (opt-in, destructive)
+  ansible.builtin.include_tasks:
+    file: vector-buffer-reset.yml
+    apply:
+      tags: [vector_buffer_reset]
+  when: "'vector_buffer_reset' in ansible_run_tags"
+  tags: [never, vector_buffer_reset]

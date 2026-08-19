@@ -45,3 +45,18 @@ postgres_firewall:
     10080:
       - 192.168.25.20/32  # NPM LXC (CT 104)
       - 192.168.48.0/24   # operator workstation subnet
+
+# Scoped fail-open nftables allowlist for VictoriaMetrics' InfluxDB ingest port
+# (#122). :8089 is an UNAUTHENTICATED write endpoint on tcp AND udp —
+# --httpAuth.username/password guard :8428 only, never the --influxListenAddr
+# listener. Its one intended client is the Home Assistant VM. Sources NOT listed
+# are dropped for this port only; loopback and the docker bridges (172.16.0.0/12,
+# accepted only when they do NOT arrive on lan_iface) are always allowed. The read
+# ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately NOT in this list —
+# NPM and operator workstations must keep reaching them.
+observability_firewall:
+  lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
+  ports:
+    # InfluxDB line protocol, tcp AND udp (nft_fw_protocols: [tcp, udp] in the role).
+    8089:
+      - 192.168.25.10/32  # Home Assistant VM (VM 100, MAC 02:ab:9f:1f:cd:8c)

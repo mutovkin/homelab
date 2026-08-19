@@ -13,6 +13,10 @@
       - nft_fw_name is match('^[a-z][a-z0-9_]*$')
       - nft_fw_hook in ['input', 'prerouting']
       - nft_fw_scope_guard in ['fib', 'host_addr', 'none']
+      # An empty list would render a chain with NO terminal accept and NO drop —
+      # a table that governs nothing while still reporting green.
+      - nft_fw_protocols | length > 0
+      - nft_fw_protocols | reject('in', ['tcp', 'udp']) | list | length == 0
       - nft_fw_ports | length > 0
       # Every key an integer port. A quoted "5432" would render fine into nft
       # but break every consumer that looks the port up as a number.
@@ -38,7 +42,8 @@
         or nft_fw_host_addr in ansible_facts['all_ipv4_addresses']
     fail_msg: >-
       nft_scoped_fw parameters for '{{ nft_fw_name | default('') }}' are not
-      scoped: nft_fw_ports must be a non-empty {port: [source, ...]} mapping with
+      scoped: nft_fw_protocols must be a non-empty subset of [tcp, udp], and
+      nft_fw_ports must be a non-empty {port: [source, ...]} mapping with
       integer ports and every source an IPv4 CIDR of prefix /1../32 (a wildcard
       or empty list would re-open the exposure this table closes), and with
       scope_guard host_addr, nft_fw_host_addr must be one of this host's real

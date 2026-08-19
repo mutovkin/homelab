@@ -34,8 +34,14 @@ services:
 
 # Docker network subnets — n5pro allocation plan (#84).
 # Fleet-wide 172.16.0.0/12 map (keep every row disjoint):
-#   172.16–172.17   unassigned (docker0 now draws from each host's pool)
-#   172.18–172.19   n5pro auto-allocation pool (docker_default_address_pools below)
+#   172.16–172.17   unassigned
+#   172.18–172.19   FLEET-WIDE auto-allocation pool, both hosts (#126) —
+#                   docker_default_address_pools in group_vars/docker_hosts.yml.
+#                   docker0 draws from it too, and unlike a user-defined network it
+#                   is RE-ALLOCATED on daemon restart: eq12's default bridge moved
+#                   172.20.1.0/24 -> 172.18.0.0/24 the moment the pool changed. That
+#                   is harmless here (no container uses the default bridge) but it
+#                   means the pool's first /24 is effectively spoken for.
 #   172.20–172.25   eq12 range (pins in host_vars/eq12_docker; .21 is the
 #                   postgresql role hardcode — the same literal value on whichever
 #                   host runs it, which is fine: separate NAT'd bridges)
@@ -50,15 +56,9 @@ docker_networks:
   nextcloud: "172.29.0.0/24" # latent (#91) — was 172.33.0.0/24 (public address space)
   immich: "172.31.0.0/24" # latent (#91) — unchanged, already valid RFC1918
 
-# Auto-allocation pool override (#84): the group default (172.20.0.0/14 in
-# group_vars/docker_hosts.yml) overlaps eq12's pins and n5pro's old portainer
-# subnet — ordering-dependent "Pool overlaps" failures on fresh bootstrap.
-# 172.18.0.0/15 is disjoint from every pinned subnet on both hosts. Moving the
-# fleet default (and deleting this override) is #126 — it needs an eq12 daemon
-# restart. docker0 draws from this pool too (it held 172.20.0.0/24 pre-#84).
-docker_default_address_pools:
-  - base: "172.18.0.0/15"
-    size: 24
+# No docker_default_address_pools override here any more: #126 moved 172.18.0.0/15
+# to group_vars/docker_hosts.yml, so it is the fleet default and this host inherits
+# the identical value (the daemon.json rendered here is byte-for-byte unchanged).
 
 # Host-only NFS (vmbr2) — dedicated path for container NFS volumes
 truenas_hostonly_ip: "10.99.99.2"  # TrueNAS IP on vmbr2 (manual config in TrueNAS)

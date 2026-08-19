@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# Managed by Ansible (roles/nft_scoped_fw) — restricts tcp/{{ nft_fw_ports.keys() | join(',') }} to approved sources.
+# Managed by Ansible (roles/nft_scoped_fw) — restricts {{ nft_fw_protocols | join('+') }}/{{ nft_fw_ports.keys() | join(',') }} to approved sources.
 #
 # Self-contained FAIL-OPEN table: it only ever drops the ports listed above, and
 # every other packet exits on the first (terminal) rule. Unloading it — ExecStop,
@@ -29,10 +29,22 @@ delete table inet {{ nft_fw_name }}_fw
 table inet {{ nft_fw_name }}_fw {
   chain {{ nft_fw_hook }} {
     type filter hook {{ nft_fw_hook }} priority {{ nft_fw_priority }}; policy accept;
+{% if nft_fw_protocols | length == 1 %}
     # FIRST + terminal: every TCP packet not aimed at a governed port exits here.
     # nft gives this rule an implicit l4proto tcp dependency, so non-TCP simply
     # falls through to `policy accept` — fail-open either way.
-    tcp dport != { {{ nft_fw_ports.keys() | join(', ') }} } accept
+{% else %}
+    # FIRST + terminal, one rule per governed transport: a {{ nft_fw_protocols | join('/') }} packet not
+    # aimed at a governed port exits on its own rule here. Each rule carries an
+    # implicit l4proto dependency, so the other transports simply do not match it —
+    # which is exactly why ALL of these must come before the scope guard and every
+    # other accept below. A packet of a protocol governed by NONE of these rules
+    # matches nothing in this chain at all and lands on `policy accept`, so the
+    # table stays fail-open in every direction.
+{% endif %}
+{% for proto in nft_fw_protocols %}
+    {{ proto }} dport != { {{ nft_fw_ports.keys() | join(', ') }} } accept
+{% endfor %}
 {% if nft_fw_scope_guard == 'fib' %}
     # In scope only when addressed to this host: at this priority daddr is still
     # the host's own address (pre-DNAT), while container egress / east-west /
@@ -56,13 +68,19 @@ table inet {{ nft_fw_name }}_fw {
     # Per-port allowlists: a source approved for one port has no access to the
     # others (#114).
 {% for port, sources in nft_fw_ports.items() %}
-    tcp dport {{ port }} ip saddr { {{ sources | join(', ') }} } accept
+{% for proto in nft_fw_protocols %}
+    {{ proto }} dport {{ port }} ip saddr { {{ sources | join(', ') }} } accept
+{% endfor %}
 {% endfor %}
 {% if nft_fw_drop_ipv6 %}
     # No IPv6 allowlist: drop the governed ports over IPv6 entirely.
-    meta nfproto ipv6 tcp dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+{% for proto in nft_fw_protocols %}
+    meta nfproto ipv6 {{ proto }} dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+{% endfor %}
 {% endif %}
     # Any other source reaching a governed port is dropped.
-    {% if nft_fw_scope_guard == 'host_addr' %}ip daddr {{ nft_fw_host_addr }} {% endif %}tcp dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+{% for proto in nft_fw_protocols %}
+    {% if nft_fw_scope_guard == 'host_addr' %}ip daddr {{ nft_fw_host_addr }} {% endif %}{{ proto }} dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+{% endfor %}
   }
 }
