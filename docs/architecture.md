@@ -83,8 +83,11 @@ All Docker networks use 172.x.x.x subnets to avoid conflicts with the LAN (192.1
 | Frigate        | `frigate_network`           | 172.28.0.0/24 | 172.28.0.1 |
 | NextCloud      | `nextcloud_network`         | 172.29.0.0/24 | 172.29.0.1 |
 | Immich         | `immich_network`            | 172.31.0.0/24 | 172.31.0.1 |
-| Immich → PG    | `postgres_network` (shared) | 172.21.0.0/24 | 172.21.0.1 |
 | NextCloud → PG | `postgres_network` (shared) | 172.21.0.0/24 | 172.21.0.1 |
+
+Immich deliberately does **not** attach to `postgres_network`: it runs its own
+VectorChord-enabled `immich-postgres` sidecar on `immich_network` (#91), because the
+shared server is vanilla `postgres:18` and Immich needs PG 14-17 with VectorChord.
 
 Only Portainer, Watchtower, and LMS are deployed today (#91 tracks the rest).
 LMS has no docker network (`network_mode: host`). `postgres_network`'s subnet is
@@ -98,8 +101,12 @@ eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 - **Method**: Direct LAN (both machines on the same 192.168.x.x network)
 - **Use cases**:
   - Centralized monitoring: Telegraf on N5 Pro → VictoriaMetrics on EQ12 (or vice versa)
-  - NFS: N5 Pro Docker LXC → TrueNAS VM for the LMS music library today; for Frigate
-    recordings and other media once those stacks land (#91)
+  - NFS: N5 Pro Docker LXC → TrueNAS VM for the LMS music library today, and for other
+    media if a stack that needs it lands. **Not** Frigate recordings:
+    `FRIGATE_RECORDINGS_DIR` resolves under `data_mount`
+    (`roles/services/frigate/templates/env.j2`), which on n5pro_docker is CT 201's local
+    ZFS subvol — the "NFS from TrueNAS" claim in the compose file was never true and was
+    corrected in #91
 - **Configuration**: LAN IPs templated into `.env` files by Ansible using inventory variables
 
 ### LAN Address Ranges

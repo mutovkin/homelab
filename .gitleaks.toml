@@ -50,10 +50,16 @@ targetRules = ["generic-api-key"]
 paths = ['''containers/observability/data/grafana/config/sample\.ini$''']
 regexes = ['''^SW2YcwTIb9zpOOhoPsMm$''']
 
-# Documentation placeholder for a Proxmox API token secret in ONBOARDING.md.
+# Documentation placeholder for a Proxmox API token secret in docs/onboarding.md.
+#
+# BOTH paths are required and neither is redundant. The file moved from the repo root
+# to docs/ in #96, so the working tree needs the new path — but CI runs
+# `gitleaks git --log-opts=--all`, which scans every historical commit at the path the
+# blob had THEN. Drop the old path and the scan goes red on ~160 commits of history
+# that can never be edited; drop the new one and the next edit near line 245 goes red.
 [[allowlists]]
-description = "ONBOARDING.md fake Proxmox API token placeholder"
+description = "onboarding doc fake Proxmox API token placeholder (pre- and post-#96 paths)"
 condition = "AND"
 targetRules = ["generic-api-key"]
-paths = ['''ONBOARDING\.md$''']
+paths = ['''docs/onboarding\.md$''', '''ONBOARDING\.md$''']
 regexes = ['''^aabbccdd-1122-3344-5566-778899aabbcc$''']

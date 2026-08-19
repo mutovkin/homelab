@@ -2,7 +2,8 @@
 # Deploy Docker Compose services to hosts based on their service assignments
 # Each host's `services` list (inventory/host_vars/*/vars.yml) drives BOTH which
 # roles run and the order they run in — keep dependencies earlier in the list
-# (e.g. postgresql before joplin/immich/nextcloud, which share postgres_network).
+# (e.g. postgresql before joplin/nextcloud, which share postgres_network — immich
+# has its own DB sidecar since #91 and does not).
 # Run: ansible-playbook playbooks/deploy-services.yml
 # Single service: ansible-playbook playbooks/deploy-services.yml --tags postgresql
 # Valid --tags values are the entries of each host's `services` list. Because the

@@ -95,8 +95,10 @@ networks:
   # Ansible role (community.docker.docker_network, subnet 172.21.0.0/24). It is
   # decoupled from this compose project's lifecycle so that when watchtower
   # recreates postgres/pgadmin, they reattach to the still-present network
-  # (the recreate-detach bug, #45). joplin/immich/nextcloud also attach as
-  # external. For standalone use, create it first:
+  # (the recreate-detach bug, #45). joplin and nextcloud also attach as external
+  # consumers; immich does NOT — it runs its own VectorChord postgres sidecar
+  # (#91), because this server is vanilla postgres:18. For standalone use,
+  # create it first:
   #   docker network create --subnet 172.21.0.0/24 postgres_network
   postgres_network:
     external: true

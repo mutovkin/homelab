@@ -1,11 +1,15 @@
 ---
 # Watchtower release watch (#121b)
 #
-# Watchtower is pinned to an immutable tag (`nickfedor/watchtower:1.20.3`) because it
+# Watchtower is pinned to an immutable tag (`nickfedor/watchtower:1.21.0`) because it
 # holds docker.sock read-write on every host. That pin has a cost: Watchtower compares
 # digests for the EXACT reference a container runs, so it can only ever report a re-push
-# of `1.20.3` — a published `1.20.4` is invisible to it, and the one container nothing
+# of `1.21.0` — a published `1.21.1` is invisible to it, and the one container nothing
 # else watches is the one that watches everything else.
+#
+# This comment names the current pin only as an illustration; the JOB never reads it —
+# it extracts the tag from the compose file, so the check cannot drift even if this
+# paragraph does.
 #
 # The bump procedure in ansible/roles/services/watchtower/README.md therefore starts with
 # a manual releases-page check. A doc sentence is not a reminder; this job is. When the
@@ -46,8 +50,12 @@ jobs:
         run: |
           set -euo pipefail
           compose=ansible/roles/services/watchtower/files/compose.yaml
+          # `|| true`: under `set -euo pipefail` a failing command substitution aborts
+          # the step at the assignment, which would make the guard below unreachable —
+          # and "the image reference was renamed" is the single likeliest failure and
+          # the whole reason the guard exists. Let it fail into an empty string instead.
           tag="$(grep -oE '^\s*image:\s*nickfedor/watchtower:[^[:space:]]+' "$compose" \
-                 | head -1 | sed 's|.*nickfedor/watchtower:||')"
+                 | head -1 | sed 's|.*nickfedor/watchtower:||' || true)"
           if [ -z "$tag" ]; then
             echo "::error::No nickfedor/watchtower image tag found in $compose — has the" \
                  "image reference been renamed? Fix this check together with it."
@@ -66,9 +74,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$(gh api repos/nicholas-fedor/watchtower/releases/latest --jq .tag_name)"
+          # `|| true` for the same reason as the step above: a rate-limited or failing
+          # API call must reach the guard's message, not die at the assignment.
+          tag="$(gh api repos/nicholas-fedor/watchtower/releases/latest --jq .tag_name || true)"
           if [ -z "$tag" ]; then
-            echo "::error::Could not read the latest release of nicholas-fedor/watchtower."
+            echo "::error::Could not read the latest release of nicholas-fedor/watchtower" \
+                 "(API error or rate limit). Re-run the job; if it persists, check the repo" \
+                 "still exists under that org."
             exit 1
           fi
           echo "latest=${tag#v}" >> "$GITHUB_OUTPUT"
