@@ -113,10 +113,14 @@
 # The USB driver handshake can take a few seconds after a restart, so a single
 # immediate upsc call raced it and failed a healthy server (#94). `until`
 # exhausting its retries fails the task on its own — no failed_when needed.
+# Read-only probe (check_mode: false): --check gets a real verdict on a converged
+# host. On an unconverged host a dry-run fails here — the driver genuinely isn't
+# running yet; run the live apply first. (#94)
 - name: Verify UPS communication
   ansible.builtin.command: "upsc {{ nut_server.ups_name }}"
   register: nut_ups_status
   changed_when: false
+  check_mode: false
   retries: 5
   delay: 5
   until: "'ups.status' in nut_ups_status.stdout"

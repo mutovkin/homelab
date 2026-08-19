@@ -17,6 +17,9 @@ services:
 
 # Docker network subnets (must match compose files)
 docker_networks:
+  # Renumbering observability? telegraf.conf's http_response probe hardcodes THIS
+  # network's gateway (172.20.0.1) to reach searxng across compose projects —
+  # update it there too or the probe silently goes red (#94).
   observability: "172.20.0.0/24"
   searxng: "172.22.0.0/24"
   portainer: "172.23.0.0/24"
