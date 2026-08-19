@@ -191,11 +191,29 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      - /etc:/host/etc:ro
+      # Deliberately NO `- /etc:/host/etc:ro` — see the HOST_ETC note below (#95).
     environment:
+      # HOST_PROC/HOST_SYS are load-bearing: gopsutil reads every cpu/mem/disk/net/
+      # netstat/kernel/processes/swap/system metric out of them, so without the
+      # redirect telegraf would report the container's namespace, not the host's.
       HOST_PROC: /host/proc
       HOST_SYS: /host/sys
-      HOST_ETC: /host/etc
+      # There is deliberately no HOST_ETC (and no /etc mount) — removed in #95.
+      # None of the 12 enabled inputs (cpu, disk, kernel, mem, processes, swap,
+      # system, net, netstat, docker, ping, http_response) reads it: gopsutil
+      # consults HOST_ETC only for platform/distro identification
+      # (/etc/os-release, machine-id), which nothing here emits as a field or tag.
+      # Proven empirically before removal — `telegraf --test` with
+      # `-e HOST_ETC=/nonexistent` produced byte-identical metric sets (same
+      # fields, same tags, no warnings) for every input group. HOST_MOUNT_PREFIX
+      # is not set anywhere either, so nothing else re-derives an /etc path.
+      # What it cost: the whole host /etc — directory listing plus every
+      # world-readable file in it — exposed to a floating `telegraf:latest` that
+      # Watchtower scans, for zero consumers. (The container already runs as
+      # telegraf:996 with no-new-privileges, so /etc/shadow was never readable;
+      # the rest of /etc was.) If a future input genuinely needs platform tagging,
+      # mount the single file it needs, not the tree:
+      #   - /etc/os-release:/host/etc/os-release:ro
       TZ: ${TIMEZONE:-UTC}
       # VictoriaMetrics auth — always on since #88; see the `:-` note on vector.
       VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}

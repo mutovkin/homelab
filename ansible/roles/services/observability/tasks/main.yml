@@ -65,11 +65,21 @@
       # documented model no longer matches the host — catch it here.
       - observability_firewall.host_addr in ansible_all_ipv4_addresses
       - observability_firewall.ports | length > 0
+      # lan_iface is the only thing making the docker-bridge accept safe: the rule
+      # is `iifname != "<lan_iface>" ip saddr 172.16.0.0/12 accept`. A name that is
+      # not a real interface can never match iifname, so the negation is always
+      # true and a LAN packet with a FORGED 172.16/12 source is accepted — the
+      # ruleset still loads, so only this assert catches the typo.
+      - observability_firewall.lan_iface in ansible_interfaces
     fail_msg: >-
       observability_firewall must be scoped: allowed_sources non-empty with every
       entry an IPv4 CIDR of prefix /1../32 (a wildcard or empty list would re-open
-      the unauthenticated :8089 write exposure #122 closes), ports non-empty, and
-      host_addr must be one of this host's real IPv4 addresses.
+      the unauthenticated :8089 write exposure #122 closes), ports non-empty,
+      host_addr must be one of this host's real IPv4 addresses, and lan_iface must
+      be one of this host's real interfaces — a lan_iface that does not exist makes
+      the forged-source guard in the nft template inert, since `iifname !=
+      "<lan_iface>"` then matches every packet and accepts any spoofed
+      172.16.0.0/12 source arriving from the LAN.
     success_msg: "observability firewall allowlist is scoped."
 
 - name: Install nftables
