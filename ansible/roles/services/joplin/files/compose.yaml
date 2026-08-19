@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Postgres-backed and schema-migrating: an unattended 04:30 upgrade would run a
       # one-way migration with no fresh backup. "enable" keeps it in scan scope so new

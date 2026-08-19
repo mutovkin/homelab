@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     ports:

@@ -9,6 +9,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # WATCHTOWER_LABEL_ENABLE=true means only containers carrying this label are
       # scanned at all. Without it here, Watchtower kept the other labeled

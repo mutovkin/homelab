@@ -5,6 +5,7 @@ services:
     restart: always
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.monitor-only=true"
