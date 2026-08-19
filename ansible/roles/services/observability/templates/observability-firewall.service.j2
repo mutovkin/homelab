@@ -1,0 +1,18 @@
+[Unit]
+Description=Observability ingest firewall (Ansible-managed nftables table inet observability_fw)
+# Boot: load after the stock nftables.service (its `flush ruleset` would wipe us);
+# publish the rules before docker starts exposing ports.
+After=nftables.service
+Before=docker.service
+# A runtime restart of nftables.service also flushes this table; PartOf makes
+# that restart re-run this unit (After= orders us behind the flush), re-loading it.
+PartOf=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/observability-firewall.nft
+ExecStop=-/usr/sbin/nft delete table inet observability_fw
+
+[Install]
+WantedBy=multi-user.target

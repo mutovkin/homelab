@@ -38,6 +38,100 @@
     - vault_grafana_user
     - vault_grafana_password
 
+# --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
+# --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
+# (--httpAuth.* guards :8428 only), published on tcp AND udp, on 0.0.0.0/[::]. Its
+# only intended client is the Home Assistant VM. Fail-open nftables table, prerouting
+# hook — see the header in templates/observability-firewall.nft.j2 and
+# docs/solutions/conventions/scoped-nftables-on-live-host.md.
+#
+# observability_firewall (host_addr/lan_iface/ports/allowed_sources) comes from
+# host_vars; deliberately NO role defaults — a host that deploys this role without
+# defining it must fail loudly, not silently publish an open write port.
+- name: Assert observability firewall allowlist is defined and scoped
+  ansible.builtin.assert:
+    that:
+      - observability_firewall.allowed_sources | length > 0
+      # Structural, not a spelling blocklist: a list of forbidden strings would wave
+      # through 192.168.0.0/0, 0/0 and 0.0.0.00/0. Every entry must be an IPv4 CIDR
+      # with a /1../32 prefix, which rejects /0, malformed and non-IPv4 entries. An
+      # out-of-range octet is caught downstream by the nft -c -f validate below.
+      - >-
+        observability_firewall.allowed_sources
+        | reject('match', '^\d{1,3}(\.\d{1,3}){3}/([1-9]|[12]\d|3[0-2])$')
+        | list | length == 0
+      # A drifted host_addr does not silently no-op this ruleset (it scopes with
+      # `fib daddr type != local`, not a literal address), but it does mean the
+      # documented model no longer matches the host — catch it here.
+      - observability_firewall.host_addr in ansible_all_ipv4_addresses
+      - observability_firewall.ports | length > 0
+    fail_msg: >-
+      observability_firewall must be scoped: allowed_sources non-empty with every
+      entry an IPv4 CIDR of prefix /1../32 (a wildcard or empty list would re-open
+      the unauthenticated :8089 write exposure #122 closes), ports non-empty, and
+      host_addr must be one of this host's real IPv4 addresses.
+    success_msg: "observability firewall allowlist is scoped."
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure nftables include dir exists
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy observability firewall ruleset
+  ansible.builtin.template:
+    src: observability-firewall.nft.j2
+    dest: /etc/nftables.d/observability-firewall.nft
+    mode: "0644"
+    validate: "/usr/sbin/nft -c -f %s"
+  notify: reload-observability-firewall
+
+- name: Deploy observability firewall systemd unit
+  ansible.builtin.template:
+    src: observability-firewall.service.j2
+    dest: /etc/systemd/system/observability-firewall.service
+    mode: "0644"
+  notify: reload-observability-firewall
+
+- name: Enable and start observability firewall
+  ansible.builtin.systemd:
+    name: observability-firewall.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  # In --check the unit file may not have been written yet, so enable/start can't
+  # find it. Skip this one task in check mode; a real run writes it first.
+  when: not ansible_check_mode
+
+- name: Flush handlers so firewall changes are live before the compose deploy
+  ansible.builtin.meta: flush_handlers
+
+# A RemainAfterExit oneshot stays "active" even if the table was externally flushed
+# (a restart of the stock nftables.service opens with `flush ruleset`), so
+# state: started can never heal it. Probe the KERNEL and notify on drift.
+- name: Check observability firewall table is live
+  ansible.builtin.command: /usr/sbin/nft list table inet observability_fw
+  register: observability_fw_check
+  changed_when: observability_fw_check.rc != 0
+  failed_when: false
+  notify: reload-observability-firewall
+  when: not ansible_check_mode
+
+- name: Heal a missing firewall table immediately
+  ansible.builtin.meta: flush_handlers
+
+- name: Assert observability firewall table is live
+  ansible.builtin.command: /usr/sbin/nft list table inet observability_fw
+  changed_when: false
+  when: not ansible_check_mode
+
 - name: Stat Docker socket
   ansible.builtin.stat:
     path: /var/run/docker.sock
@@ -132,3 +226,34 @@
   # Skipped in check mode: on a host that has never been deployed the containers do
   # not exist yet, and docker_container would fail rather than preview anything.
   when: not ansible_check_mode
+
+# --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------
+# `never` keeps these tasks out of every ordinary run; they execute ONLY when the
+# operator asks for them by tag. Included (not inlined) so the tag lives on one
+# statement and the whole file inherits it.
+#   ansible-playbook playbooks/deploy-services.yml \
+#     --limit eq12_docker --tags vector_buffer_reset
+# Runbook (symptoms, when this is the right answer, what it costs):
+# docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
+#
+# The `when` is NOT redundant with `never`. deploy-services.yml includes each role
+# with `apply: tags: "{{ service }}"`, so every task in this role also carries the
+# tag `observability` — and `never` only suppresses a task while none of ITS tags is
+# explicitly requested. `--tags observability`, the documented way to deploy this one
+# service, therefore requests a tag this task has, and the destructive reset would
+# run on an ordinary single-service deploy. Verified, not theorised: a check-mode run
+# with `--tags observability` executed "Stop Vector" before this guard was added.
+# ansible_run_tags is exactly what the operator typed, so this distinguishes "asked
+# for the reset" from "asked for the service".
+# `apply:` is required, not decoration: on a DYNAMIC include, bare `tags:` tag only
+# the include statement — the included tasks do not inherit them, so they would carry
+# only the playbook's `observability` tag and `--tags vector_buffer_reset` would
+# include the file and then filter every task inside it out (an opt-in path that
+# silently does nothing). Also verified by running it.
+- name: Reset the Vector disk buffer (opt-in, destructive)
+  ansible.builtin.include_tasks:
+    file: vector-buffer-reset.yml
+    apply:
+      tags: [vector_buffer_reset]
+  when: "'vector_buffer_reset' in ansible_run_tags"
+  tags: [never, vector_buffer_reset]

@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      # No setuid/setgid/fscaps escalation from anything inside this container (#95).
+      - "no-new-privileges:true"
     ports:
       - "8428:8428" # HTTP API and Web UI (vmui)
       - "8089:8089" # InfluxDB HTTP API (for Home Assistant)
@@ -67,6 +69,8 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      # No setuid/setgid/fscaps escalation from anything inside this container (#95).
+      - "no-new-privileges:true"
     ports:
       - "9428:9428" # HTTP API and Web UI (select/vmui)
     volumes:
@@ -107,6 +111,8 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      # No setuid/setgid/fscaps escalation from anything inside this container (#95).
+      - "no-new-privileges:true"
     labels:
       # Proven breaking-change history: the unattended 0.57 update shipped two
       # independent breaking changes — a crash loop from template confinement, then a
@@ -165,6 +171,8 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      # No setuid/setgid/fscaps escalation from anything inside this container (#95).
+      - "no-new-privileges:true"
     # :? not :-  — a default here is a guess at a per-host gid (996 vs 990) and
     # a wrong one silently costs telegraf its docker metrics (#94).
     user: telegraf:${DOCKER_GID:?}
@@ -214,6 +222,8 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      # No setuid/setgid/fscaps escalation from anything inside this container (#95).
+      - "no-new-privileges:true"
     ports:
       - "3000:3000" # Grafana Web UI
     volumes:
