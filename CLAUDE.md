@@ -152,10 +152,13 @@ Hard-won lessons — check here before debugging from scratch.
 - **Ansible variable precedence.** Inventory `group_vars` REPLACE role defaults (lists never
   merge). Role-critical packages go in `roles/<role>/vars/main.yml`, which outranks inventory.
   See [docs/solutions/security-issues/unattended-upgrades-silently-inert-fleet-wide.md](docs/solutions/security-issues/unattended-upgrades-silently-inert-fleet-wide.md).
-- **ISO/large downloads.** `get_url` can re-validate against the server even when the
-  file exists, failing if the upstream version was pulled. Guard downloads with an explicit
-  `stat` check and `when: not <stat>.stat.exists`. Pin versions in one place; bump
-  deliberately (e.g. TrueNAS ISO version lives in `proxmox_guests` + `n5pro` host_vars).
+- **ISO/large downloads.** Use `get_url` with a `checksum:` and NO stat-exists gate — the
+  module hashes the on-disk file, skips the fetch when it matches, and re-downloads on
+  mismatch. A `when: not <stat>.stat.exists` guard defeats that verification: a corrupt
+  file already on disk is trusted forever. Pin version + sha256 in ONE place and bump
+  deliberately (TrueNAS ISO: defined in `proxmox_guests/defaults/main.yml`; the filename is
+  consumed by `n5pro` host_vars' `ide2`). See
+  [docs/solutions/conventions/ansible-change-loop-pitfalls.md](docs/solutions/conventions/ansible-change-loop-pitfalls.md).
 - **macOS Local Network privacy (control machine).** On macOS, the Python that Ansible
   runs (e.g. the `uv`-managed `ansible-core`) needs Local Network permission to reach
   `192.168.x.x` Proxmox APIs — symptom is `[Errno 65] No route to host` from Ansible while
@@ -235,7 +238,6 @@ Hard-won lessons — check here before debugging from scratch.
 - **`proxmox_bridge` is required** in every Proxmox host's host_vars (no vmbr0
   fallback since #87) — guest `net`/`net0` definitions resolve their bridge from it.
 - **YAML style**: 2-space indent, `---` document start, quote strings only when required.
-- Architecture decisions: `docs/decisions.md`.
 
 ## Further Reading
 

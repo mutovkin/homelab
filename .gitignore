@@ -9,7 +9,7 @@
 # Ansible
 .vault_password
 *.retry
-ansible/.ansible/
+.ansible/
 
 # Rendered service secrets — templated onto hosts at deploy time, never committed
 *.env
@@ -21,13 +21,8 @@ ansible/.ansible/
 # OS
 .DS_Store
 
-# Portainer-era local residue: untracked plaintext .env files and DB dumps still
-# sit under containers/ on operator machines. All TRACKED content moved to
-# ansible/roles/services/*/ (#85); without this ignore the leftovers would surface
-# in git status one `git add -A` away from a public repo. Purging the files (and
-# then this line) is #92.
-/containers/
-
-# Database dump/backup directories never belong in the repo (was in the old
-# containers/.gitignore)
+# Database dumps/backups never belong in the repo (backups/ was in the old
+# containers/.gitignore; *.sql guards stray dumps — tracked SQL is templated
+# as .sql.j2, so plain .sql in the tree is always a secret-bearing dump)
 backups/
+*.sql
