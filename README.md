@@ -9,7 +9,7 @@ Multi-machine homelab configuration managed with **Ansible** and **Docker Compos
 | Machine                              | CPU                                 | RAM                           | Storage              | Role                                                              |
 | ------------------------------------ | ----------------------------------- | ----------------------------- | -------------------- | ----------------------------------------------------------------- |
 | [Beelink EQ12 Pro](docs/eq12.md)     | Intel N100, 4 cores                 | 16GB                          | 2TB NVMe (ZFS)       | Proxmox — Home Assistant, Docker services, Nginx Proxy Manager    |
-| [Minisforum N5 Pro](docs/n5pro.md)   | AMD Ryzen AI 9 HX PRO 370, 12c/24t  | 96GB (32GB GPU / 62GB system) | 8TB NVMe + 130TB HDD | Proxmox — TrueNAS, Immich, Frigate, NextCloud                     |
+| [Minisforum N5 Pro](docs/n5pro.md)   | AMD Ryzen AI 9 HX PRO 370, 12c/24t  | 96GB (32GB GPU / 62GB system) | 8TB NVMe + 130TB HDD | Proxmox — TrueNAS, Docker services (LMS), Portainer               |
 
 ## Architecture
 
@@ -58,13 +58,13 @@ task deploy:services  # 3. Deploy compose stacks
 ## Networking
 
 - **Cross-host:** Direct LAN (both machines on the same 192.168.x.x network)
-- **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20-25.x. N5 Pro: 172.30-35.x.
+- **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20–25.x pins (pool 172.20.0.0/14). N5 Pro: 172.26–29.x + .31 pins (pool 172.18.0.0/15 — fleet map in `host_vars/n5pro_docker`).
 - **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on EQ12
-- **NFS:** N5 Pro Docker LXC → TrueNAS VM for Frigate recordings, media storage, and Lyrion music library
+- **NFS:** N5 Pro Docker LXC → TrueNAS VM for the Lyrion music library today; Frigate recordings and other media once those stacks land (#91)
 
 ## Hardware Passthrough
 
-- **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Used via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 for Frigate and Immich.
+- **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Reserved for Frigate and Immich (both planned #91) via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 — no deployed workload uses it today.
 - **TrueNAS SATA** — JMicron JMB58x controller at c1:00.0 uses full PCI passthrough in VM-200 (requires VM, not LXC).
 - **TrueNAS NVMe** — 2× WD SN850X 2TB at c6:00.0 and c3:00.0 passed through to VM-200 for mirrored ZFS special vdev.
 
@@ -75,11 +75,13 @@ homelab/
 ├── docs/                  # Machine specs + architecture diagrams
 │   ├── eq12.md
 │   ├── n5pro.md
-│   └── architecture.md
+│   ├── ups.md
+│   ├── architecture.md
+│   └── solutions/         # Documented fixes to past problems, by category
 └── ansible/               # Ansible — host config, VM/LXC provisioning, service deployment
     ├── inventory/         # Hosts, group vars, host vars, vault
     ├── playbooks/         # Orchestration playbooks
-    └── roles/             # common, proxmox_host, proxmox_guests, docker_host,
+    └── roles/             # common, proxmox_host, proxmox_guests, docker_host, nut,
                            # services/* (compose.yaml + env.j2 per service)
 ```
 
@@ -105,11 +107,11 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 
 | Service                                 | Port             | Description                                          |
 | --------------------------------------- | ---------------- | ---------------------------------------------------- |
-| [PostgreSQL](ansible/roles/services/postgresql/) | 5432             | Database for Immich + NextCloud                      |
-| [Immich](ansible/roles/services/immich/)         | 2283             | Self-hosted photo/video management (GPU-accelerated) |
-| [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 | NVR with AI object detection (GPU-accelerated)       |
-| [NextCloud](ansible/roles/services/nextcloud/)   | 8080             | File sync and collaboration                          |
 | [LMS](ansible/roles/services/lms/)               | 9001, 9090, 3483 | Music server (Lyrion/Squeezebox) — NFS from TrueNAS   |
+| [PostgreSQL](ansible/roles/services/postgresql/) | 5432 (planned)   | _(planned #91)_ Database for Immich + NextCloud      |
+| [Immich](ansible/roles/services/immich/)         | 2283 (planned)   | _(planned #91)_ Self-hosted photo/video management (GPU-accelerated) |
+| [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 (planned) | _(planned #91)_ NVR with AI object detection (GPU-accelerated) |
+| [NextCloud](ansible/roles/services/nextcloud/)   | 8080 (planned)   | _(planned #91)_ File sync and collaboration          |
 | [Portainer](ansible/roles/services/portainer/)   | 9000 (allowlisted) | Container management UI                            |
 | [Watchtower](ansible/roles/services/watchtower/) | —                | Scheduled container updates (per-service policy: auto vs monitor-only) |
 
@@ -118,10 +120,8 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 - [docs/architecture.md](docs/architecture.md) — Network topology, orchestration flow, port map
 - [docs/eq12.md](docs/eq12.md) — EQ12 hardware, VM/LXC inventory, ZFS layout
 - [docs/n5pro.md](docs/n5pro.md) — N5 Pro hardware, GPU config, planned workloads
-
-```shell
-modinfo zfs | grep parm
-```
+- [docs/ups.md](docs/ups.md) — UPS / NUT power management
+- [docs/solutions/](docs/solutions/) — documented fixes to past problems, by category
 
 ### ZFS Pool Configuration Notes
 
@@ -129,6 +129,12 @@ modinfo zfs | grep parm
 - **Scrub Schedule**: Automated scrubbing enabled for data integrity verification
 - **Compression**: LZ4 compression enabled by default
 - **Snapshots**: Available for all datasets
+
+Inspect the pool's tunable module parameters with:
+
+```shell
+modinfo zfs | grep parm
+```
 
 ## License
 

@@ -132,36 +132,21 @@
 # --- Firewall: restrict upsd port to approved client IPs (defense in depth) ---
 # Self-contained nftables table that only governs the upsd port — cannot affect
 # SSH/Proxmox/NFS. Skipped entirely when nut_allowed_clients is empty.
+# INPUT hook (priority -10), deliberately not the prerouting variant the docker
+# services use: upsd is a HOST daemon, so its traffic really is delivered to the
+# host's own stack. The shared role owns the unit hardening (PartOf, best-effort
+# ExecStop) and the probe/reload/verify chain that makes a green play mean a
+# LOADED table (#112, #114).
 - name: Restrict upsd port to approved clients
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: nut
+    nft_fw_description: NUT upsd firewall (Ansible-managed nftables table inet nut_fw)
+    nft_fw_hook: input
+    nft_fw_scope_guard: none
+    nft_fw_before_docker: false
+    # dict([[k, v]]) rather than a `"{{ … }}": …` YAML key, which would make the
+    # port a STRING and fail the shared role's integer-port assert.
+    nft_fw_ports: "{{ dict([[nut_server.listen_port | int, nut_allowed_clients]]) }}"
   when: nut_allowed_clients | length > 0
-  block:
-    - name: Ensure nftables include dir exists
-      ansible.builtin.file:
-        path: /etc/nftables.d
-        state: directory
-        mode: "0755"
-
-    - name: Deploy NUT firewall ruleset
-      ansible.builtin.template:
-        src: nut-firewall.nft.j2
-        dest: /etc/nftables.d/nut-firewall.nft
-        mode: "0644"
-        validate: "/usr/sbin/nft -c -f %s"
-      notify: reload-nut-firewall
-
-    - name: Deploy NUT firewall systemd unit
-      ansible.builtin.template:
-        src: nut-firewall.service.j2
-        dest: /etc/systemd/system/nut-firewall.service
-        mode: "0644"
-      notify: reload-nut-firewall
-
-    - name: Enable and start NUT firewall
-      ansible.builtin.systemd:
-        name: nut-firewall.service
-        enabled: true
-        state: started
-        daemon_reload: true
-      # In --check the unit file isn't actually written, so enable/start can't
-      # find it. Skip this one task in check mode; a real run writes it first.
-      when: not ansible_check_mode

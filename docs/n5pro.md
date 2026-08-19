@@ -1,5 +1,7 @@
 # Minisforum N5 Pro
 
+> Hardware inventory below (CPU, memory, storage, ZFS) as enumerated 2026-08-18.
+
 ## System
 
 - **Model**: Micro Computer (HK) Tech Limited — N5 PRO ("NAS Series")
@@ -48,7 +50,8 @@
 
 ### ZFS
 
-- **Pool**: `rpool` on nvme0 (4 TB NVMe)
+- **Pool**: `rpool` on nvme2 (4 TB NVMe — the only NVMe the Proxmox host keeps, since
+  nvme0/nvme1 are PCI-passed-through to VM 200, so it enumerates as `nvme0n1` in `lsblk`)
 - **Total**: 3.59 TiB
 - **Used**: 4.23 GiB
 
@@ -120,7 +123,8 @@ them there after any hardware re-seat that changes a path or IOMMU group.
 
 ### CT 201: Docker Host
 
-- Immich, Frigate, NextCloud, PostgreSQL, Lyrion Music Server
+- Lyrion Music Server (LMS), Portainer, Watchtower
+  (planned #91: Immich, Frigate, NextCloud, PostgreSQL)
 - 8 cores, 24 GB RAM, Ubuntu 24.04
 - GPU access via `/dev/dri` + `/dev/kfd` bind-mount (VAAPI + ROCm)
 - ROCm userspace installed by `docker_host` role
@@ -304,5 +308,5 @@ Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
 
 | ID  | Type | Name          | Cores | RAM   | Storage                  | Notes                                                  |
 | --- | ---- | ------------- | ----- | ----- | ------------------------ | ------------------------------------------------------ |
-| 200 | VM   | truenas       | 4     | 16 GB | 32 GB boot               | UEFI/q35, SATA+NVMe PCI passthrough, dual NIC, boot=1  |
-| 201 | CT   | n5pro-docker  | 8     | 24 GB | 8 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU, NFS, dual NIC, boot=2      |
+| 200 | VM   | truenas       | 4     | 24 GB | 64 GB boot                | UEFI/q35, SATA+NVMe PCI passthrough, dual NIC, boot=1 |
+| 201 | CT   | n5pro-docker  | 8     | 24 GB | 64 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU, NFS, dual NIC, boot=2     |

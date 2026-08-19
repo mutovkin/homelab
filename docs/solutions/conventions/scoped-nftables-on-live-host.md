@@ -62,9 +62,10 @@ Why each choice removes lockout risk:
   own tables and won't clobber it; it won't clobber them.
 
 Load it via a systemd oneshot (`enabled`, `RemainAfterExit=yes`,
-`ExecStart=nft -f <file>`, `ExecStop=nft delete table ...`) so it persists across
+`ExecStart=nft -f <file>`, `ExecStop=-nft delete table ...`) so it persists across
 reboot. Template the ruleset with `validate: "/usr/sbin/nft -c -f %s"` so a
-malformed rule is caught before it's written.
+malformed rule is caught before it's written. The unit needs more than that to be
+trustworthy — see [Implementation of record](#implementation-of-record-rolesnft_scoped_fw) below.
 
 **Scope warning — docker-published ports.** This recipe's `hook input` chain only sees
 traffic delivered to the host's own stack. A **docker-published** port is DNAT'd in
@@ -74,6 +75,61 @@ scope with `fib daddr type != local accept` — see
 [nftables-input-hook-inert-for-docker-published-ports](../integration-issues/nftables-input-hook-inert-for-docker-published-ports.md),
 which also hardens this doc's oneshot loader against externally flushed tables
 (check-and-heal + `PartOf=nftables.service`).
+
+## Implementation of record: `roles/nft_scoped_fw`
+
+Since #114 this recipe is not copied per service — it is one shared role,
+included (never `roles:`-listed) by each consumer:
+
+```yaml
+- name: Restrict the Portainer UI port to approved sources
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: portainer          # → table inet portainer_fw,
+                                    #   /etc/nftables.d/portainer-firewall.nft,
+                                    #   portainer-firewall.service
+    nft_fw_ports:                   # per-port allowlist
+      9000: [192.168.25.20/32, 192.168.48.0/24]
+```
+
+Consumers today: `nut` (input variant), `services/portainer`,
+`services/vaultwarden`, `services/postgresql` (prerouting variant).
+
+Parameters that carry real decisions:
+
+| Parameter | Meaning |
+| --------- | ------- |
+| `nft_fw_hook` | `input` (priority -10) for a **host daemon** port — upsd; `prerouting` (-150) for a **docker-published** port. Getting this wrong is silent: an input hook never sees a DNAT'd flow. |
+| `nft_fw_ports` | `{port: [cidr, ...]}`. **Per-port**, deliberately: a source approved for pgAdmin's 10080 has no business on 5432. Asserted non-empty, integer keys, every source an IPv4 CIDR of prefix /1../32 — a structural check, so `0.0.0.0/0` and friends cannot sneak back in. |
+| `nft_fw_scope_guard` | `fib` → `fib daddr type != local accept` (default for prerouting); `host_addr` → `ip daddr != <addr> accept` plus a daddr-scoped final drop (postgres, whose host_addr is asserted to be a real address of the host — a drifted value makes the whole filter inert); `none` for the input variant. |
+| `nft_fw_lan_iface` | Adds the hairpin accept `iifname != <lan> ip saddr 172.16.0.0/12 accept`, so a container reaching the published port via the host address is admitted while a LAN packet with a **forged** 172.16/12 source still falls through to the drop. |
+| `nft_fw_drop_ipv6` | Needed when the final drop is IPv4-scoped (`scope_guard: host_addr`), which IPv6 would otherwise sail past. |
+
+### The loader hardening (#112)
+
+Four things the original recipe lacked, now in the shared unit + tasks:
+
+1. `PartOf=nftables.service` — a **runtime** restart of nftables.service runs
+   `flush ruleset` and deletes the table while the oneshot stays
+   `active (exited)`. PartOf propagates the restart; `After=` orders the reload
+   behind the flush.
+2. `ExecStop=-/usr/sbin/nft delete table …` — the leading `-` makes an
+   already-absent table a non-failure, so the stop half of a restart cannot
+   mark the unit `failed`.
+3. **Probe → inline reload → hard verify.** `state: started` is a no-op on an
+   already-active RemainAfterExit unit, so it can *never* heal a flushed table.
+   The role probes the kernel (`nft list table inet <name>_fw`,
+   `failed_when: false`, `changed_when: false`, `check_mode: false`), reloads
+   when the ruleset/unit changed **or** the table is missing, then re-lists and
+   fails unless the output contains `drop` — asserting the verdict, not mere
+   table existence, catches a half-loaded table. A green play now means a
+   LOADED table.
+4. **Registers, not handlers.** The reload is inline off those registers. A
+   handler notified mid-play is dropped if the play later aborts (the new
+   ruleset then sits on disk unloaded forever), and handler names are global to
+   a play — with the role included three times on one host they would collide
+   and dedupe into a single notification.
 
 ## Why This Matters
 
@@ -101,5 +157,7 @@ unless you have console/IPMI fallback and a deliberate full-firewall design.
 ## Related
 
 - Issue #28; builds on #9 (bind upsd to specific addresses, not 0.0.0.0).
+- Issues #112 (loader hardening) and #114 (shared role, per-port allowlists,
+  pg_hba templated from the same allowlist).
 - [[ansible-change-loop-pitfalls]] — check-mode safety.
 - [nftables-input-hook-inert-for-docker-published-ports](../integration-issues/nftables-input-hook-inert-for-docker-published-ports.md) — docker-published-port variant; self-healing loader hardening (#80, #112).

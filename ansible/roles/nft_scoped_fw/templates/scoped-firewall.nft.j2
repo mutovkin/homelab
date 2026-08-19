@@ -1,0 +1,68 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (roles/nft_scoped_fw) — restricts tcp/{{ nft_fw_ports.keys() | join(',') }} to approved sources.
+#
+# Self-contained FAIL-OPEN table: it only ever drops the ports listed above, and
+# every other packet exits on the first (terminal) rule. Unloading it — ExecStop,
+# a stray `nft flush ruleset`, a failed reload — leaves those ports OPEN, never
+# the host unreachable. See docs/solutions/conventions/scoped-nftables-on-live-host.md.
+{% if nft_fw_hook == 'prerouting' %}
+#
+# Hook choice: docker DNATs published ports in prerouting (its dstnat chain,
+# priority -100) and the flow then takes FORWARD — an input-hook chain never
+# sees it. Hooking prerouting at {{ nft_fw_priority }} (before dstnat) is the one place both
+# the DNAT/forward path and the docker-proxy input path are visible on the
+# ORIGINAL destination port.
+{% else %}
+#
+# Hook choice: input at priority {{ nft_fw_priority }} — this port belongs to a HOST daemon, so
+# the traffic really is delivered to the host's own stack. (A DOCKER-PUBLISHED
+# port would need the prerouting variant; an input hook is inert for those.)
+{% endif %}
+#
+# IPv4-only allowlist. {% if nft_fw_drop_ipv6 %}The final drop is IPv4-scoped, so IPv6 access to these
+# ports is dropped by its own rule below.{% else %}The final drop is family-agnostic, so IPv6
+# access to these ports is dropped there (::1 arrives via "lo" and is accepted).{% endif %}
+
+# Add-then-delete-then-create makes a reload idempotent and atomic.
+add table inet {{ nft_fw_name }}_fw
+delete table inet {{ nft_fw_name }}_fw
+table inet {{ nft_fw_name }}_fw {
+  chain {{ nft_fw_hook }} {
+    type filter hook {{ nft_fw_hook }} priority {{ nft_fw_priority }}; policy accept;
+    # FIRST + terminal: every TCP packet not aimed at a governed port exits here.
+    # nft gives this rule an implicit l4proto tcp dependency, so non-TCP simply
+    # falls through to `policy accept` — fail-open either way.
+    tcp dport != { {{ nft_fw_ports.keys() | join(', ') }} } accept
+{% if nft_fw_scope_guard == 'fib' %}
+    # In scope only when addressed to this host: at this priority daddr is still
+    # the host's own address (pre-DNAT), while container egress / east-west /
+    # other forwarded flows to some external :port are non-local and exit here.
+    fib daddr type != local accept
+{% elif nft_fw_scope_guard == 'host_addr' %}
+    # br_netfilter is enabled (docker), so bridged container<->container frames
+    # traverse this hook too — anything not addressed to the host's LAN address
+    # (e.g. joplin -> postgres on 172.21.0.0/24) is out of scope.
+    ip daddr != {{ nft_fw_host_addr }} accept
+{% endif %}
+    iif "lo" accept
+    ip saddr 127.0.0.1 accept
+{% if nft_fw_lan_iface %}
+    # Hairpin: a local container reaching a published port via the host address
+    # arrives on a docker bridge interface, never on the LAN iface. Scoping the
+    # accept by interface means a LAN packet with a FORGED 172.16/12 source
+    # arrives on {{ nft_fw_lan_iface }} and falls through to the allowlist/drop below.
+    iifname != "{{ nft_fw_lan_iface }}" ip saddr 172.16.0.0/12 accept
+{% endif %}
+    # Per-port allowlists: a source approved for one port has no access to the
+    # others (#114).
+{% for port, sources in nft_fw_ports.items() %}
+    tcp dport {{ port }} ip saddr { {{ sources | join(', ') }} } accept
+{% endfor %}
+{% if nft_fw_drop_ipv6 %}
+    # No IPv6 allowlist: drop the governed ports over IPv6 entirely.
+    meta nfproto ipv6 tcp dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+{% endif %}
+    # Any other source reaching a governed port is dropped.
+    {% if nft_fw_scope_guard == 'host_addr' %}ip daddr {{ nft_fw_host_addr }} {% endif %}tcp dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+  }
+}

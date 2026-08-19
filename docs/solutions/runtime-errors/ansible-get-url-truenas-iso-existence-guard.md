@@ -2,6 +2,7 @@
 title: "Ansible get_url fails on pulled TrueNAS BETA ISO; guard with stat existence check"
 date: 2026-06-20
 category: runtime-errors
+superseded_by: docs/solutions/conventions/ansible-change-loop-pitfalls.md
 module: proxmox_guests
 problem_type: runtime_error
 component: tooling
@@ -25,6 +26,13 @@ tags:
 ---
 
 # Ansible get_url fails on pulled TrueNAS BETA ISO; guard with stat existence check
+
+> **Superseded (#7 lineage, #103).** The stat-exists gate this doc prescribes was
+> later found to defeat `get_url`'s checksum verification and was removed. Current
+> convention: checksum-driven `get_url`, no existence gate — see
+> [ansible-change-loop-pitfalls.md §2](../conventions/ansible-change-loop-pitfalls.md#2-an-existence-gate-can-defeat-the-verification-it-precedes).
+> The diagnosis below (why a dead upstream URL breaks an already-converged host)
+> is still accurate and worth reading; only the prescribed fix changed.
 
 ## Problem
 
@@ -113,9 +121,12 @@ itself skipped (e.g. no truenas VM defined).
 
 ## Prevention
 
-- **Guard large/remote downloads with an explicit `stat`** and gate the fetch on
-  `not <stat>.stat.exists`, rather than relying on the module's built-in
-  idempotency — `get_url` still performs a network round-trip to validate.
+- ~~**Guard large/remote downloads with an explicit `stat`**~~ — **superseded, do not
+  do this.** Give `get_url` a `checksum:` and NO existence gate: the module hashes
+  the on-disk file, skips the fetch when it matches, re-downloads on mismatch, and
+  fails loudly if it is still bad. The gate prescribed in Solution above trades a
+  dead-URL failure for a worse one — a corrupt local file is trusted forever,
+  because verification never runs. See the banner at the top of this doc.
 - **Pin the version in one place.** The version string appears in the stat path,
   the get_url url/dest, and the VM `ide2` reference. Extract one variable
   (e.g. `truenas_iso_version`) and interpolate it everywhere so a bump is a

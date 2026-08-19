@@ -1,0 +1,7 @@
+---
+# The PostgreSQL wire port. Its entry in postgres_firewall.ports (host_vars) is
+# the single source of truth for BOTH the nftables allowlist and pg_hba.conf's
+# LAN host entries — templating them from one place is what removes the drift
+# class #114 is about. pgAdmin's published port (10080) is governed by the
+# firewall only; it is not a postgres protocol port and has no pg_hba meaning.
+postgres_hba_port: 5432

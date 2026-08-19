@@ -1,106 +1,37 @@
 ---
 # --- Firewall: restrict the published ports (5432/10080) to approved sources ---
-# Unlike the nut convention's input hook, docker-published ports must be
-# filtered in PREROUTING before Docker's dstnat — see the header comment in
-# templates/postgres-firewall.nft.j2 (#79). Same fail-open shape otherwise.
-# postgres_firewall (host_addr/ports/allowed_sources) comes from host_vars;
+# Unlike the nut role's input hook, docker-published ports must be filtered in
+# PREROUTING before Docker's dstnat (#79) — the shared nft_scoped_fw role's
+# prerouting variant, with the two postgres specifics kept: daddr scoping (it
+# runs where br_netfilter also shows bridged container<->container frames) and
+# an explicit IPv6 drop (its final drop is IPv4-scoped by that same daddr match).
+# postgres_firewall (host_addr/lan_iface/ports) comes from host_vars;
 # deliberately NO defaults — a host that deploys this role without defining it
-# must fail loudly, not silently deploy unprotected.
-- name: Assert postgres firewall allowlist is defined and scoped
+# must fail loudly, not silently deploy unprotected. The per-port allowlist is
+# also the single source of truth for pg_hba.conf's LAN entries below (#114).
+- name: Restrict the published PostgreSQL/pgAdmin ports to approved sources
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: postgres
+    nft_fw_description: PostgreSQL/pgAdmin published-port firewall (Ansible-managed nftables table inet postgres_fw)
+    nft_fw_ports: "{{ postgres_firewall.ports }}"
+    nft_fw_scope_guard: host_addr
+    nft_fw_host_addr: "{{ postgres_firewall.host_addr }}"
+    nft_fw_lan_iface: "{{ postgres_firewall.lan_iface }}"
+    nft_fw_drop_ipv6: true
+
+# pg_hba's LAN entries are generated from the 5432 allowlist (below), so a
+# missing key would silently render a pg_hba with NO LAN clients at all.
+- name: Assert the postgres wire port has a firewall allowlist
   ansible.builtin.assert:
     that:
-      - postgres_firewall.allowed_sources | length > 0
-      # Structural, not a spelling blocklist: a list of forbidden strings would
-      # wave through 192.168.0.0/0, 0/0 and 0.0.0.00/0. Every entry must be an
-      # IPv4 CIDR with a /1../32 prefix, which rejects /0, malformed and
-      # non-IPv4 entries. An out-of-range octet is caught downstream by the
-      # nft -c -f validate on the ruleset template.
-      - >-
-        postgres_firewall.allowed_sources
-        | reject('match', '^\d{1,3}(\.\d{1,3}){3}/([1-9]|[12]\d|3[0-2])$')
-        | list | length == 0
-      # A drifted host_addr silently no-ops the entire filter: every packet
-      # would exit early at the ruleset's `ip daddr != host_addr accept`.
-      - postgres_firewall.host_addr in ansible_all_ipv4_addresses
+      - postgres_hba_port in postgres_firewall.ports
     fail_msg: >-
-      postgres_firewall must be scoped: allowed_sources non-empty with every
-      entry an IPv4 CIDR of prefix /1../32 (a wildcard or empty list would
-      re-open the exposure #79 closes), and host_addr must be one of this
-      host's real IPv4 addresses — a drifted value makes the filter inert.
-    success_msg: "postgres firewall allowlist is scoped."
-
-- name: Install nftables
-  ansible.builtin.apt:
-    name: nftables
-    state: present
-
-- name: Ensure nftables include dir exists
-  ansible.builtin.file:
-    path: /etc/nftables.d
-    state: directory
-    mode: "0755"
-
-- name: Deploy postgres firewall ruleset
-  ansible.builtin.template:
-    src: postgres-firewall.nft.j2
-    dest: /etc/nftables.d/postgres-firewall.nft
-    mode: "0644"
-    validate: "/usr/sbin/nft -c -f %s"
-  register: postgres_fw_ruleset
-
-- name: Deploy postgres firewall systemd unit
-  ansible.builtin.template:
-    src: postgres-firewall.service.j2
-    dest: /etc/systemd/system/postgres-firewall.service
-    mode: "0644"
-  register: postgres_fw_unit
-
-- name: Enable and start postgres firewall
-  ansible.builtin.systemd:
-    name: postgres-firewall.service
-    enabled: true
-    state: started
-    daemon_reload: true
-  # In --check the unit file isn't actually written, so enable/start can't
-  # find it. Skip this one task in check mode; a real run writes it first.
-  when: not ansible_check_mode
-
-# `state: started` above is a no-op once the unit is active, and RemainAfterExit
-# keeps it "active" even after something else wiped the table — /etc/nftables.conf
-# opens with `flush ruleset`, so any restart of the enabled nftables.service (an
-# unattended-upgrades package upgrade, say) silently deletes inet postgres_fw.
-# The unit's PartOf=nftables.service re-applies it in that case; this probe is
-# the belt-and-braces check that a converged play means a LOADED table.
-# check_mode: false — a read-only probe is safe and its result drives the
-# decisions below, which would otherwise be undefined in --check.
-- name: Probe whether the postgres firewall table is loaded
-  ansible.builtin.command: nft list table inet postgres_fw
-  register: postgres_fw_probe
-  failed_when: false
-  changed_when: false
-  check_mode: false
-
-# Reloads on a template change AND self-heals an externally flushed table.
-# Deliberately NO default() filters: a renamed register must fail loudly
-# rather than silently skip the reload (the do-nothing failure mode of #78).
-- name: Reload postgres firewall
-  ansible.builtin.systemd:
-    name: postgres-firewall.service
-    state: restarted
-    daemon_reload: true
-  when:
-    - not ansible_check_mode
-    - postgres_fw_ruleset is changed or postgres_fw_unit is changed
-      or 'drop' not in postgres_fw_probe.stdout
-
-# A green play must mean a loaded firewall. Asserting on the drop verdict
-# rather than mere table existence catches a half-loaded/truncated table.
-- name: Verify postgres firewall table is loaded
-  ansible.builtin.command: nft list table inet postgres_fw
-  register: postgres_fw_loaded
-  changed_when: false
-  failed_when: "'drop' not in postgres_fw_loaded.stdout"
-  when: not ansible_check_mode
+      postgres_firewall.ports has no {{ postgres_hba_port }} key, so pg_hba.conf
+      would be templated with no LAN host entries at all. The wire port's
+      allowlist is the single source of truth for both (#114).
+    quiet: true
 
 # Pre-create the shared network as EXTERNAL so it persists independent of this
 # compose project — when watchtower recreates postgres/pgadmin they reattach to
@@ -152,15 +83,24 @@
 # (the Vector gotcha; #73, #78). postgresql.conf pins hba_file to the mounted
 # pg_hba.conf, so both files are really read by the server; changes are paired
 # with the explicit restart below (compose ignores bind-mount content changes).
-- name: Deploy PostgreSQL server configs
+# BOTH this copy and the pg_hba template feed the restart decision below — a
+# change to either is a change the running server only reads at startup.
+- name: Deploy PostgreSQL server config
   ansible.builtin.copy:
-    src: "config/{{ item }}"
-    dest: "{{ data_mount }}/postgresql/config/{{ item }}"
+    src: config/postgresql.conf
+    dest: "{{ data_mount }}/postgresql/config/postgresql.conf"
     mode: "0644"
-  loop:
-    - postgresql.conf
-    - pg_hba.conf
-  register: postgres_configs
+  register: postgres_conf
+
+# Templated, not copied: its LAN host entries are generated from the same
+# per-port firewall allowlist the nftables table is built from, so the two
+# cannot drift (#114). hba_file stays pinned to this path by postgresql.conf.
+- name: Deploy PostgreSQL client authentication config (pg_hba.conf)
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ data_mount }}/postgresql/config/pg_hba.conf"
+    mode: "0644"
+  register: postgres_hba
 
 # servers.json is imported by the image only on first pgAdmin launch (a fresh
 # /var/lib/pgadmin) or with PGADMIN_REPLACE_SERVERS_ON_STARTUP=True (we do not
@@ -196,7 +136,7 @@
 - name: Determine containers to restart for changed config
   ansible.builtin.set_fact:
     postgres_restart_targets: >-
-      {{ ['postgres'] if (postgres_configs.results | selectattr('changed') | list | length > 0
+      {{ ['postgres'] if ((postgres_conf is changed or postgres_hba is changed)
           and postgres_container_info.exists) else [] }}
 
 # --check must surface the outage the restart NOTE below warns about; the

@@ -66,10 +66,11 @@ These are the controls the role actually enforces, not aspirations:
   hooks `prerouting` at priority -150, before Docker's DNAT at -100, because an input-hook
   rule is *invisible* to docker-published ports; see
   [docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md](../../../../docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md).
-  Port and allowlist come from `defaults/main.yml`. Every real (non-check) deploy probes
-  the kernel for the table, heals a missing one via handler, and hard-asserts — a
-  `RemainAfterExit` oneshot reports "active" even after an external `flush ruleset`, so
-  unit state proves nothing.
+  The table is built by the shared `roles/nft_scoped_fw` (#114) from the per-port
+  allowlist `vaultwarden_fw_ports` in `defaults/main.yml`. Every real (non-check) deploy
+  probes the kernel for the table, reloads inline when it is missing or the ruleset
+  changed, and hard-asserts — a `RemainAfterExit` oneshot reports "active" even after an
+  external `flush ruleset`, so unit state proves nothing.
 - **Pre-upgrade backups are gated on the vault data, not the container (#107).** Whenever
   `/data/vaultwarden` holds data and the deploy would hand it to a different image —
   including a container-absent start after a `docker rm` — the role stops the container
