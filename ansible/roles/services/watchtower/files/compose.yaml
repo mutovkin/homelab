@@ -4,11 +4,12 @@ services:
     # Pinned deliberately (#83): the update orchestrator holds docker.sock read-write
     # and is a third-party fork of an archived upstream, so it must not execute a new
     # `latest` unattended. Bump by editing this tag in git, where it is reviewable.
-    # Digest at pin time: sha256:bee77696862e09521c49e5ab4904a4179accece6d561a2ef334c7589b84a2438
-    image: nickfedor/watchtower:1.20.3
+    # Digest at pin time: sha256:d76a95a54ab636968f77cb1780fb597b3e28511b535a86e3af212a290ef4d743
+    image: nickfedor/watchtower:1.21.0
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # WATCHTOWER_LABEL_ENABLE=true means only containers carrying this label are
       # scanned at all. Without it here, Watchtower kept the other labeled
@@ -16,10 +17,11 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
       # Socket-holding ⇒ monitor-only: it stays counted in `scanned=N` and never
       # self-updates. This guards the one residual unattended path the tag pin leaves
-      # open — a re-pushed `1.20.3`. Note it does NOT give us release notifications:
+      # open — a re-pushed `1.21.0`. Note it does NOT give us release notifications:
       # Watchtower only checks the reference it runs, so with the tag pinned a new
-      # 1.20.4 is never seen. Checking the fork's releases is a deliberate, manual
-      # step — see README "Update Posture" (#83).
+      # 1.21.1 is never seen. That is what the scheduled release-watch workflow
+      # (.github/workflows/watchtower-release-watch.yml) exists to catch — see README
+      # "Update Posture" (#83, #121).
       - "com.centurylinklabs.watchtower.monitor-only=true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,128 @@
+---
+# Shared implementation of the scoped fail-open nftables allowlist (#114).
+# Included (never `roles:`-listed) once per governed service — several times per
+# play on the same host — so it uses REGISTERS + an inline reload rather than
+# handlers: handler names are global to a play, so four inclusions would collide
+# and dedupe into one notification. The inline shape also kills the lost-handler
+# class outright (a handler notified mid-play is dropped if the play later
+# aborts, leaving the new ruleset on disk unloaded forever — #112).
+
+- name: Assert the scoped firewall parameters are sane
+  ansible.builtin.assert:
+    that:
+      - nft_fw_name is match('^[a-z][a-z0-9_]*$')
+      - nft_fw_hook in ['input', 'prerouting']
+      - nft_fw_scope_guard in ['fib', 'host_addr', 'none']
+      # An empty list would render a chain with NO terminal accept and NO drop —
+      # a table that governs nothing while still reporting green.
+      - nft_fw_protocols | length > 0
+      - nft_fw_protocols | reject('in', ['tcp', 'udp']) | list | length == 0
+      - nft_fw_ports | length > 0
+      # Every key an integer port. A quoted "5432" would render fine into nft
+      # but break every consumer that looks the port up as a number.
+      - nft_fw_ports.keys() | reject('integer') | list | length == 0
+      - nft_fw_ports.keys() | select('lt', 1) | list | length == 0
+      - nft_fw_ports.keys() | select('gt', 65535) | list | length == 0
+      # An empty source list for a port would render `ip saddr { }` — nft
+      # rejects it, but fail here with a readable message instead.
+      - nft_fw_ports.values() | map('length') | select('eq', 0) | list | length == 0
+      # Structural, not a spelling blocklist: a list of forbidden strings would
+      # wave through 192.168.0.0/0, 0/0 and 0.0.0.00/0. Every entry must be an
+      # IPv4 CIDR with a /1../32 prefix, which rejects /0, malformed and
+      # non-IPv4 entries. An out-of-range octet is caught downstream by the
+      # `nft -c -f` validate on the ruleset template.
+      - >-
+        nft_fw_ports.values() | flatten
+        | reject('match', '^\d{1,3}(\.\d{1,3}){3}/([1-9]|[12]\d|3[0-2])$')
+        | list | length == 0
+      # A drifted host_addr silently no-ops the entire filter: every packet
+      # would exit early at the ruleset's `ip daddr != host_addr accept`.
+      - >-
+        nft_fw_scope_guard != 'host_addr'
+        or nft_fw_host_addr in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      nft_scoped_fw parameters for '{{ nft_fw_name | default('') }}' are not
+      scoped: nft_fw_protocols must be a non-empty subset of [tcp, udp], and
+      nft_fw_ports must be a non-empty {port: [source, ...]} mapping with
+      integer ports and every source an IPv4 CIDR of prefix /1../32 (a wildcard
+      or empty list would re-open the exposure this table closes), and with
+      scope_guard host_addr, nft_fw_host_addr must be one of this host's real
+      IPv4 addresses — a drifted value makes the filter inert.
+    success_msg: "{{ nft_fw_name }} firewall allowlist is scoped."
+    quiet: true
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure nftables include dir exists
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy the scoped firewall ruleset for {{ nft_fw_name }}
+  ansible.builtin.template:
+    src: scoped-firewall.nft.j2
+    dest: "/etc/nftables.d/{{ nft_fw_name }}-firewall.nft"
+    mode: "0644"
+    # A malformed rule is caught before it is written, never after it is loaded.
+    validate: "/usr/sbin/nft -c -f %s"
+  register: nft_fw_ruleset
+
+- name: Deploy the scoped firewall systemd unit for {{ nft_fw_name }}
+  ansible.builtin.template:
+    src: scoped-firewall.service.j2
+    dest: "/etc/systemd/system/{{ nft_fw_name }}-firewall.service"
+    mode: "0644"
+  register: nft_fw_unit
+
+- name: Enable and start the scoped firewall for {{ nft_fw_name }}
+  ansible.builtin.systemd:
+    name: "{{ nft_fw_name }}-firewall.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  # In --check the unit file isn't actually written, so enable/start can't find
+  # it. Skip this one task in check mode; a real run writes it first.
+  when: not ansible_check_mode
+
+# `state: started` above is a no-op once the unit is active, and RemainAfterExit
+# keeps it "active" even after something else wiped the table — /etc/nftables.conf
+# opens with `flush ruleset`, so any restart of the enabled nftables.service (an
+# unattended-upgrades package upgrade, say) silently deletes the table. The
+# unit's PartOf=nftables.service re-applies it in that case; this probe is the
+# belt-and-braces check that a converged play means a LOADED table.
+# check_mode: false — a read-only probe is safe and its result drives the
+# decision below, which would otherwise be undefined in --check.
+- name: Probe whether the kernel has the firewall table for {{ nft_fw_name }}
+  ansible.builtin.command: "nft list table inet {{ nft_fw_name }}_fw"
+  register: nft_fw_probe
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+# Reloads on a template change AND self-heals an externally flushed table.
+# Deliberately NO default() filters: a renamed register must fail loudly rather
+# than silently skip the reload (the do-nothing failure mode of #78).
+- name: Reload the scoped firewall for {{ nft_fw_name }}
+  ansible.builtin.systemd:
+    name: "{{ nft_fw_name }}-firewall.service"
+    state: restarted
+    daemon_reload: true
+  when:
+    - not ansible_check_mode
+    - nft_fw_ruleset is changed or nft_fw_unit is changed
+      or 'drop' not in nft_fw_probe.stdout
+
+# A green play must mean a loaded firewall. Asserting on the drop verdict rather
+# than mere table existence catches a half-loaded/truncated table.
+- name: Verify the kernel has the firewall table for {{ nft_fw_name }}
+  ansible.builtin.command: "nft list table inet {{ nft_fw_name }}_fw"
+  register: nft_fw_loaded
+  changed_when: false
+  failed_when: "'drop' not in nft_fw_loaded.stdout"
+  when: not ansible_check_mode

@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Stateful and schema-migrating: the recordings/events SQLite DB migrates forward
       # on start, and releases regularly change config.yml schema (a rejected config
@@ -22,8 +23,15 @@ services:
       FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD}
       TZ: ${TIMEZONE:-America/Los_Angeles}
     volumes:
+      # config.yml here is Ansible-owned (roles/services/frigate/templates/config.yml.j2)
+      # and rewritten on every deploy — do not edit it on the host or via Frigate's
+      # config editor (#91).
       - ${FRIGATE_CONFIG_DIR}:/config
-      - ${FRIGATE_RECORDINGS_DIR}:/media/frigate  # NFS mount from TrueNAS
+      # Local disk on the docker host — FRIGATE_RECORDINGS_DIR resolves to
+      # <data_mount>/frigate/recordings in templates/env.j2. NOT an NFS mount: the
+      # old comment here claimed TrueNAS and never matched the template (#91).
+      # Moving recordings to TrueNAS would be a change to env.j2 plus a real mount.
+      - ${FRIGATE_RECORDINGS_DIR}:/media/frigate
       - type: tmpfs    # Reduce SSD writes for cache
         target: /tmp/cache
         tmpfs:

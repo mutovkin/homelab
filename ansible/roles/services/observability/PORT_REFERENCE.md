@@ -80,11 +80,14 @@ curl 'http://localhost:9428/select/logsql/query' \
 
 ### Vector (Log Collection Agent)
 
-| Port     | Protocol | Purpose           | Used By                              |
-| -------- | -------- | ----------------- | ------------------------------------ |
-| **8686** | HTTP     | **GraphQL API**   | Monitoring, debugging, metrics export |
+Vector publishes **no ports**. Its GraphQL API (8686) is not enabled — `vector.yaml`
+declares no `api:` block — so the published port was removed in #94 rather than left
+open on 0.0.0.0 serving nothing.
 
-#### Port 8686 - GraphQL API
+#### Enabling the API (8686), if ever needed
+
+Add an `api:` block to `vector.yaml` AND republish the port in `compose.yaml`; one
+without the other does nothing. Only then do these become reachable:
 
 - **Health Check**: http://localhost:8686/health
 - **GraphQL Playground**: http://localhost:8686/playground
@@ -130,7 +133,7 @@ curl 'http://localhost:9428/select/logsql/query' \
 | ------------------- | --------------------------------- | ----------- | ----------------------------------- |
 | **VictoriaMetrics** | http://localhost:8428/vmui        | :8428       | http://localhost:8428/health        |
 | **VictoriaLogs**    | http://localhost:9428/select/vmui | :9428       | http://localhost:9428/health        |
-| **Vector**          | http://localhost:8686/playground  | :8686       | http://localhost:8686/health        |
+| **Vector**          | _none — API not enabled_          | _none_      | `docker logs vector`                |
 | **Grafana**         | http://localhost:3000             | :3000       | http://localhost:3000/api/health    |
 
 ---
@@ -190,8 +193,7 @@ ports:
    - ⚠️  Enable HTTPS for internet access
 
 4. **Vector API (8686)**:
-   - ℹ️  Optional - only for debugging
-   - ℹ️  Can be removed from exposed ports if not needed
+   - ✅ Not enabled and not published (removed in #94) — no exposure
 
 ---
 
@@ -233,7 +235,7 @@ ports:
            ▼                         │
 ┌─────────────────────┐              │
 │      Vector         │              │
-│  :8686 (GraphQL)    │              │
+│   (no ports)        │              │
 └──────────┬──────────┘              │
            │                         │
            │ JSONLine                │
@@ -268,8 +270,8 @@ echo "test_metric value=42" | nc localhost 8089
 # Test VictoriaLogs
 curl http://localhost:9428/health
 
-# Test Vector GraphQL
-curl http://localhost:8686/health
+# Test Vector (no API port — check the container instead)
+docker logs --tail 20 vector
 
 # Test Grafana
 curl http://localhost:3000/api/health

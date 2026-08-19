@@ -22,11 +22,7 @@
     state: restarted
   listen: restart-nut-monitor
 
-- name: Reload NUT firewall
-  ansible.builtin.systemd:
-    name: nut-firewall.service
-    state: restarted
-    daemon_reload: true
-  # In --check the unit file isn't written, so a restart can't find it.
-  when: not ansible_check_mode
-  listen: reload-nut-firewall
+# NOTE: there is deliberately no reload-nut-firewall handler — the shared
+# nft_scoped_fw role reloads inline off a register (#112/#114). A handler
+# notified mid-play is dropped if the play later aborts, which left the new
+# ruleset on disk unloaded forever.

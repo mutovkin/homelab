@@ -1,0 +1,13 @@
+---
+# Grafana's HOST-side published port, as written in files/compose.yaml
+# (`3000:3000`). Used only by the post-restart readiness gate, which probes
+# /api/health on the published port. Change both together.
+grafana_web_port: 3000
+
+# How long a restarted vector/telegraf must stay up before the play accepts it.
+# Neither exposes an HTTP surface to probe, so "still running after N seconds" is
+# the gate. Vector exits about a second after a malformed vector.yaml, so this
+# only has to be comfortably longer than that (and than docker's first restart
+# backoff) — not long enough to prove steady-state health, which is watchtower's
+# and the ingest-health alert's job.
+observability_settle_seconds: 15

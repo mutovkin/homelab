@@ -9,7 +9,10 @@
 
 - name: Add Docker GPG key
   ansible.builtin.get_url:
-    url: https://download.docker.com/linux/debian/gpg
+    # Keep the key path in step with the distribution-derived repo line below.
+    # Both distros serve the byte-identical key today — this is not a live bug —
+    # but that is Docker's choice to change, not an assumption to hardcode (#94).
+    url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
     dest: /etc/apt/keyrings/docker.asc
     mode: "0644"
 
@@ -70,6 +73,58 @@
     name: docker
     state: started
     enabled: true
+
+# --- Delivered-config gate for the address pools (#129) ------------------------
+# Writing daemon.json is not the same as dockerd RUNNING that config: the file
+# change only notifies a handler, and handlers fire at the END of the play — so
+# every task after this point (and the whole services deploy that follows) used to
+# run against a daemon still using the OLD pools, with the run reporting green.
+# Flush first, then ask the DAEMON what it is actually using, the way CLAUDE.md's
+# "verify with the app's own introspection" rule requires. A dockerd that silently
+# ignored or partially parsed the file fails here instead of surfacing months later
+# as an ordering-dependent "Pool overlaps with other one on this address space".
+- name: Restart Docker now if its configuration changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the address pools Docker is actually running with
+  ansible.builtin.command:
+    argv:
+      - docker
+      - info
+      - --format
+      # Go template braces, not Jinja: {% raw %} stops Ansible templating them.
+      - "{% raw %}{{json .DefaultAddressPools}}{% endraw %}"
+  register: docker_delivered_pools
+  changed_when: false
+  check_mode: false
+  # In --check nothing was written or restarted, so the daemon legitimately still
+  # reports the old pools (and on a first-ever run docker may not exist at all).
+  when: not ansible_check_mode
+
+- name: Assert Docker delivered the declared default address pools
+  ansible.builtin.assert:
+    that:
+      # `docker info` prints the literal `null` when no pool is configured, so the
+      # default([], true) is load-bearing: without it a daemon that ignored the file
+      # would compare None against the declared list and raise a Jinja error instead
+      # of this message.
+      - >-
+        (docker_delivered_pools.stdout | from_json | default([], true))
+        | map(attribute='Base') | list
+        == docker_default_address_pools | map(attribute='base') | list
+      - >-
+        (docker_delivered_pools.stdout | from_json | default([], true))
+        | map(attribute='Size') | map('int') | list
+        == docker_default_address_pools | map(attribute='size') | map('int') | list
+    fail_msg: >-
+      dockerd is running with default address pools
+      {{ docker_delivered_pools.stdout | default('(unread)') }}, not the declared
+      {{ docker_default_address_pools }}. /etc/docker/daemon.json was written but the
+      daemon did not adopt it — check `journalctl -u docker` for a parse error and
+      whether something outside Ansible is managing daemon.json.
+    success_msg: "dockerd is running the declared default address pools."
+    quiet: true
+  when: not ansible_check_mode
 
 # community.docker's API modules (docker_network, docker_container,
 # docker_container_info, docker_image_pull, docker_container_exec) talk to the

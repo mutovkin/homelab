@@ -1,0 +1,26 @@
+[Unit]
+Description={{ nft_fw_description }}
+# Boot: load after the stock nftables.service (its `flush ruleset` would wipe us).
+After=nftables.service network-pre.target
+Wants=network-pre.target
+# A RUNTIME restart of nftables.service also flushes this table while this
+# RemainAfterExit oneshot stays `active (exited)` — protection silently gone
+# until reboot. PartOf makes that restart re-run this unit, and the After=
+# above orders us behind the flush, so the table is re-applied (#112).
+PartOf=nftables.service
+{% if nft_fw_before_docker %}
+# Ordering only, not a dependency (fail-open): if this unit fails, docker still
+# starts and the ports are open — never the host unreachable.
+Before=docker.service
+{% endif %}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/{{ nft_fw_name }}-firewall.nft
+# Best-effort (leading `-`): an already-absent table must not fail the stop half
+# of a restart — e.g. when nftables.service just flushed the ruleset (#112).
+ExecStop=-/usr/sbin/nft delete table inet {{ nft_fw_name }}_fw
+
+[Install]
+WantedBy=multi-user.target

@@ -30,6 +30,33 @@ sudo chmod -R 755 /data/joplin
 
 The container uses filesystem storage for better performance, storing note data and attachments in the mounted volume. Ensure the directory is writable and has sufficient disk space for your notes and attachments.
 
+## Pre-deploy database backup (#121a)
+
+joplin-server is `monitor-only` (#83), so a new release only ever arrives through a
+deliberate `task deploy:service -- --tags joplin`, whose `pull: always` hands the live
+schema to a possibly newer image that runs **one-way migrations** on start. The role
+therefore takes a `pg_dumpall` of the shared postgres cluster first, writes it to
+`{{ data_mount }}/backups/joplin-pgdump-<ts>.sql`, and keeps `joplin_backup_retention`
+of them.
+
+**The gate is on the DATA, not on the container.** It fires when the joplin-server
+container exists **OR** the `joplin` database exists in the cluster — the second half is
+what covers a container-absent start after a `docker rm`, a `compose down`, or a failed
+prior deploy, which is exactly the hole #107 fell through. Only the genuinely greenfield
+case (no container *and* no database) skips, and it says so in a `debug` rather than
+skipping silently. The database is probed with
+`docker exec -u postgres postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='joplin'"`;
+`-u postgres` is required — the cluster's local connections are `peer` authenticated and a
+root invocation fails with `role "root" does not exist`. The verdict is stdout (`1` /
+empty), never the exit code, which is 0 either way.
+
+Dumps are written to `<name>.sql.partial` and renamed only after the tail check proves
+`pg_dumpall` finished, so a truncated file can never be mistaken for a good backup. A
+trap removes the partial on error and on the catchable termination signals; **SIGKILL
+cannot be trapped**, so the role also sweeps stale `joplin-pgdump-*.sql.partial` files at
+the start of every run — before taking the new dump, since a full volume is the likeliest
+reason one was stranded, and the retention prune's `*.sql` glob does not match them.
+
 ## Configuration
 
 Before starting the service:

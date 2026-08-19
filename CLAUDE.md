@@ -37,10 +37,9 @@ Everything deploys via `task deploy:full` (= `ansible-playbook playbooks/site.ym
 homelab/
 ├── CLAUDE.md / AGENTS.md   # this file (AGENTS.md is a symlink)
 ├── README.md               # human-facing overview, service tables
-├── ONBOARDING.md           # bring existing infra under Ansible safely
 ├── CONCEPTS.md             # shared domain vocabulary (entities, processes, status concepts)
 ├── Taskfile.yml            # task runner — see Key Commands
-├── docs/                   # architecture.md, eq12.md, n5pro.md, ups.md
+├── docs/                   # architecture.md, onboarding.md, eq12.md, n5pro.md, ups.md
 │   └── solutions/          # documented fixes to past problems, by category, with YAML frontmatter (module, tags, problem_type)
 └── ansible/
     ├── inventory/          # hosts.yml, group_vars/, host_vars/ (+ vault.yml)
@@ -96,7 +95,19 @@ Hard-won lessons — check here before debugging from scratch.
   kernel and tries to load its `docker-default` profile, failing with
   `apparmor_parser: Access denied`. Fixes (both applied): the `docker_host` role masks
   AppArmor *before* configuring/starting Docker, and every compose service sets
-  `security_opt: ["apparmor:unconfined"]`. New services must include this.
+  `security_opt: ["apparmor:unconfined"]`. New services must include this. The **mask**
+  is the privileged-CT half of the fix and is applied only where `docker_lxc: true`
+  (n5pro_docker, CT 201); unprivileged CT 101 does not see the host's AppArmor and
+  needs no mask — don't "fix" eq12 by adding one. The per-service `security_opt` is
+  fleet-wide regardless, and #95 added `no-new-privileges:true` alongside it (in-container
+  escalation defense matters more here precisely because AppArmor is unconfined) — new
+  services need both lines. **One documented exception, and it is the shape of the trap:**
+  `no_new_privs` strips setuid/fscaps at `execve`, so telegraf silently lost `/usr/bin/ping`
+  — eight ping metrics went to NO DATA while the container stayed healthy. Any container
+  whose function depends on a setuid binary needs the same carve-out (record the failed
+  alternatives beside it; for telegraf, `ping_group_range` cannot work under the LXC userns
+  map and its native pinger still needs raw sockets). After adding the line, verify the
+  app's own OUTPUT, not just that it started.
 - **AppArmor 4.1 / PVE 9 ABI regression (host profiles).** PVE 9's AppArmor 4.1 default
   ABI enforces fine-grained `AF_UNIX` mediation that older bundled profiles (e.g.
   `dhclient`) predate, so unix sockets are denied (`failed protocol match`) — flooding the
@@ -183,10 +194,15 @@ Hard-won lessons — check here before debugging from scratch.
   exactly `mount, nesting, keyctl, fuse, mknod, force_rw_sys` (PVE `$features_desc`); "may mount
   NFS" is spelled `mount=nfs`. The features task asked for `nfs=1` for the deployment's whole
   life — `pct set` rejected it every run, and the script (no `set -e`) swallowed the error and
-  echoed "changed": a silent-green no-op. Also compare against `pct config` (live view), never the
-  raw `/etc/pve/lxc/<id>.conf` — snapshot sections carry their own `features:` lines and
-  false-match greps.
-  See [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md).
+  echoed "changed": a silent-green no-op. Also compare against `pct config` — never the raw
+  `/etc/pve/lxc/<id>.conf`, whose snapshot sections carry their own `features:` lines and
+  false-match greps. But `pct config` is **not** the "live view": it prints the PENDING-merged
+  config, so any "is it actually applied?" question needs `pct config <vmid> --current` (CT 201
+  reads `mount=nfs,nesting=1` plain vs `nesting=1` under `--current`). And never `lineinfile`
+  /`replace` into those raw files — a regexp matches the **last** occurrence, which is a
+  snapshot's stale copy, not the live section (#98).
+  See [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md)
+  and [docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md](docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md).
 - **Create-time-only guest fields are REBUILD declarations — write them in the
   syntax a fresh create needs.** With provisioning pinned `update: false` (#86),
   `mounts`/`scsi`/`efidisk0`/`usb`/etc. in host_vars never touch an existing guest;
@@ -242,6 +258,6 @@ Hard-won lessons — check here before debugging from scratch.
 ## Further Reading
 
 - **[README.md](README.md)** — service inventory, ports, secrets strategy.
-- **[ONBOARDING.md](ONBOARDING.md)** — migrating live infra under Ansible without downtime;
-  Ansible glossary for newcomers.
+- **[docs/onboarding.md](docs/onboarding.md)** — migrating live infra under Ansible without
+  downtime; Ansible glossary for newcomers. (Its Portainer-migration step is historical.)
 - **[docs/architecture.md](docs/architecture.md)** — full network/port/topology reference.

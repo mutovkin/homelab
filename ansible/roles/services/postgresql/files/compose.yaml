@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # The tag is pinned to major 18, so Watchtower could only ever deliver an 18.x
       # minor — not a major migration. It is monitor-only anyway because this is the
@@ -57,11 +58,27 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      # MUST stay set, and MUST stay >= 1024, for as long as no-new-privileges is
+      # on this service (#95). dpage/pgadmin4 runs as non-root uid 5050 and binds
+      # the default port 80 only via a FILE CAPABILITY (cap_net_bind_service on
+      # /usr/local/bin/python3-cap). no_new_privs makes the kernel ignore file
+      # capabilities at execve, so the image's entrypoint detects
+      # `NoNewPrivs: 1` in /proc/self/status, falls back to the un-capped
+      # interpreter and — only when PGADMIN_LISTEN_PORT is unset — defaults itself
+      # to 8080. Leaving it unset would mean the container's listen port is decided
+      # by whether nnp happens to be applied: the publish and the healthcheck below
+      # would both point at a dead :80, the container would sit Up (unhealthy),
+      # `restart: unless-stopped` does NOT restart on unhealthy, and the deploy
+      # would report green. Pinning it makes the port deterministic under both
+      # security contexts. The HOST port stays 10080 (NPM upstream and
+      # postgres_firewall.ports are unaffected).
+      PGADMIN_LISTEN_PORT: 8080
       TZ: ${TIMEZONE:-UTC}
     volumes:
       - /data/postgresql/pgadmin:/var/lib/pgadmin
@@ -70,14 +87,15 @@ services:
     ports:
       # Published on the host; LAN access is restricted to the postgres_fw
       # nftables allowlist (#79). Plaintext HTTP — TLS fronting deferred.
-      - "10080:80"
+      # Container side is 8080, not 80 — see PGADMIN_LISTEN_PORT above.
+      - "10080:8080"
     networks:
       - postgres_network
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/misc/ping"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/misc/ping"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -93,8 +111,10 @@ networks:
   # Ansible role (community.docker.docker_network, subnet 172.21.0.0/24). It is
   # decoupled from this compose project's lifecycle so that when watchtower
   # recreates postgres/pgadmin, they reattach to the still-present network
-  # (the recreate-detach bug, #45). joplin/immich/nextcloud also attach as
-  # external. For standalone use, create it first:
+  # (the recreate-detach bug, #45). joplin and nextcloud also attach as external
+  # consumers; immich does NOT — it runs its own VectorChord postgres sidecar
+  # (#91), because this server is vanilla postgres:18. For standalone use,
+  # create it first:
   #   docker network create --subnet 172.21.0.0/24 postgres_network
   postgres_network:
     external: true

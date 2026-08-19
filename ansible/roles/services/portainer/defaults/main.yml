@@ -1,8 +1,10 @@
 ---
-# Firewall scoping for the Portainer UI port (see templates/portainer-firewall.nft.j2).
+# Firewall scoping for the Portainer UI port (shared role: roles/nft_scoped_fw).
 # The UI is plaintext HTTP in front of a read-write docker.sock — LAN exposure is
 # root-equivalent exposure, so only these sources may reach it.
-portainer_fw_port: 9000
-portainer_fw_allowed_sources:
-  - 192.168.25.20 # NPM LXC (CT 104) — reverse-proxy upstream reach
-  - 192.168.48.0/24 # operator workstation subnet
+# Per-port shape ({port: [source, ...]}, #114): sources are approved for THIS
+# port only. Entries must be IPv4 CIDRs of prefix /1../32 (asserted).
+portainer_fw_ports:
+  9000:
+    - 192.168.25.20/32 # NPM LXC (CT 104) — reverse-proxy upstream reach
+    - 192.168.48.0/24 # operator workstation subnet

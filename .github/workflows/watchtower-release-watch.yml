@@ -1,0 +1,104 @@
+---
+# Watchtower release watch (#121b)
+#
+# Watchtower is pinned to an immutable tag (`nickfedor/watchtower:1.21.0`) because it
+# holds docker.sock read-write on every host. That pin has a cost: Watchtower compares
+# digests for the EXACT reference a container runs, so it can only ever report a re-push
+# of `1.21.0` — a published `1.21.1` is invisible to it, and the one container nothing
+# else watches is the one that watches everything else.
+#
+# This comment names the current pin only as an illustration; the JOB never reads it —
+# it extracts the tag from the compose file, so the check cannot drift even if this
+# paragraph does.
+#
+# The bump procedure in ansible/roles/services/watchtower/README.md therefore starts with
+# a manual releases-page check. A doc sentence is not a reminder; this job is. When the
+# pin falls behind upstream the run FAILS, and a failing scheduled workflow is a
+# recurring, visible signal instead of a line nobody re-reads.
+#
+# Deliberately a failing check rather than an auto-bump PR: adopting a new image for the
+# fleet's most privileged container is a decision to make with release notes open, which
+# is exactly the property the pin exists to preserve.
+
+name: Watchtower release watch
+
+"on":
+  schedule:
+    # Mondays 15:00 UTC. GitHub disables scheduled workflows on a repo with 60 days of
+    # no activity — if this stops running, that is why, and re-enabling it is manual.
+    - cron: "0 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-pin:
+    name: pinned tag vs latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Reads the tag out of the compose file itself, so the check can never drift
+      # from what is actually deployed the way a second copy of the version would.
+      - name: Read the pinned Watchtower tag
+        id: pinned
+        run: |
+          set -euo pipefail
+          compose=ansible/roles/services/watchtower/files/compose.yaml
+          # `|| true`: under `set -euo pipefail` a failing command substitution aborts
+          # the step at the assignment, which would make the guard below unreachable —
+          # and "the image reference was renamed" is the single likeliest failure and
+          # the whole reason the guard exists. Let it fail into an empty string instead.
+          tag="$(grep -oE '^\s*image:\s*nickfedor/watchtower:[^[:space:]]+' "$compose" \
+                 | head -1 | sed 's|.*nickfedor/watchtower:||' || true)"
+          if [ -z "$tag" ]; then
+            echo "::error::No nickfedor/watchtower image tag found in $compose — has the" \
+                 "image reference been renamed? Fix this check together with it."
+            exit 1
+          fi
+          echo "pinned=$tag" >> "$GITHUB_OUTPUT"
+          echo "Pinned tag: $tag"
+
+      # NOTE the namespace mismatch, and do not "correct" it: the Docker Hub namespace is
+      # `nickfedor`, the GitHub org is `nicholas-fedor`, and github.com/nickfedor/watchtower
+      # 404s on an unclaimed name sitting next to a supply-chain-sensitive image.
+      # `releases/latest` excludes pre-releases, which is what we want to be told about.
+      - name: Read the latest upstream release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # `|| true` for the same reason as the step above: a rate-limited or failing
+          # API call must reach the guard's message, not die at the assignment.
+          tag="$(gh api repos/nicholas-fedor/watchtower/releases/latest --jq .tag_name || true)"
+          if [ -z "$tag" ]; then
+            echo "::error::Could not read the latest release of nicholas-fedor/watchtower" \
+                 "(API error or rate limit). Re-run the job; if it persists, check the repo" \
+                 "still exists under that org."
+            exit 1
+          fi
+          echo "latest=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Latest release: $tag"
+
+      - name: Fail if the pin is behind
+        env:
+          PINNED: ${{ steps.pinned.outputs.pinned }}
+          LATEST: ${{ steps.latest.outputs.latest }}
+        run: |
+          set -euo pipefail
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "Watchtower pin $PINNED is current."
+            exit 0
+          fi
+          echo "::error::Watchtower is pinned to $PINNED but $LATEST is released." \
+               "Review https://github.com/nicholas-fedor/watchtower/releases/tag/v$LATEST" \
+               "and follow the bump procedure in" \
+               "ansible/roles/services/watchtower/README.md (edit the tag, refresh the" \
+               "digest comment, deploy, confirm the next scanned=N)."
+          exit 1

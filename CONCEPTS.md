@@ -234,6 +234,23 @@ specifically for the *effective* configuration, or for the pending set, is the o
 tell the two apart. The project accepts the gap rather than restarting guests to close it,
 so a staged value can remain queued indefinitely.
 
+### Snapshot section
+A complete copy of a Guest's configuration that the hypervisor appends to that guest's
+config file when a snapshot is taken, carrying its own duplicate of every key the live
+configuration holds.
+
+The live configuration sits first in the file and each snapshot's copy follows it, which
+makes the file a multi-section document wearing the costume of a flat key/value list.
+Line-oriented tooling has no notion of those boundaries, so it answers questions about
+*some* section rather than the live one — and a matcher that resolves to the last
+occurrence will pick a snapshot's copy deterministically, not by chance. That failure is
+silent in both directions: a read reports converged against a stale duplicate, and a write
+edits the snapshot while leaving the running guest untouched. The hypervisor's rendered
+config views never expose these sections, which is what makes them the safe way to read
+state; editing the file safely means confining changes to the region ahead of the first
+section header. Distinct from a Pending guest config, which is staged future state rather
+than a frozen past copy, though both are sections in the same file.
+
 ### Create-time-only field
 A Guest attribute the role sets when it creates the guest and then never reconciles,
 because converging it on a live guest would be destructive, guest-visible, or both.

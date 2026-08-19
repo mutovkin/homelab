@@ -1,4 +1,242 @@
 ---
+# --- Pre-deploy database backup (#121a) -------------------------------------
+# joplin-server is monitor-only (#83): Watchtower never applies its updates, so a
+# new release arrives exactly here, through `task deploy:service -- --tags joplin`
+# with pull: always. Joplin runs one-way schema migrations on start, and until now
+# the only thing standing between a routine deploy and an unrecoverable migration
+# was the operator remembering to dump first. Vaultwarden's data-gated pre-upgrade
+# backup (#81/#107) is the model; this is its postgres-backed equivalent.
+#
+# NOT generalised into services/_deploy: that would need a per-service backup-hook
+# contract (what to dump, how to verify it, where retention lives) and every caller
+# audited for it. Deliberately out of scope here — see the note on #121.
+#
+# Gated on the DATA, not on the container (the vaultwarden precedent this cites is,
+# and its README says the gate must cover "a container-absent start after a
+# `docker rm`"). A container-only gate has a hole big enough to drive #107 through:
+# `docker rm joplin-server`, a failed prior deploy, or a `compose down` leaves the
+# joplin SCHEMA present and the container absent, the whole backup block skips
+# SILENTLY, `_deploy` runs with `pull: always`, and joplin-server performs a one-way
+# schema migration against the live database with no dump. So the gate is
+# "container exists OR the joplin database exists", and the genuinely greenfield
+# case (neither) skips with a message rather than in silence.
+#
+# Scope: this dumps the DATABASE (notes metadata, users, sessions — STORAGE_DRIVER
+# is Filesystem, so attachment blobs live in {{ data_mount }}/joplin and are NOT in
+# this dump). It protects against a bad schema migration, not against data loss on
+# that volume, which is the backup story's job.
+
+- name: Check whether the Joplin container pre-exists
+  community.docker.docker_container_info:
+    name: joplin-server
+  register: joplin_container
+  check_mode: false
+
+# The dump comes out of the shared postgres container on this same host. If Joplin
+# is live but postgres is not running we cannot take the backup — and a deploy that
+# continued anyway is precisely the unbacked migration this task exists to prevent.
+- name: Check whether the postgres container is running
+  community.docker.docker_container_info:
+    name: postgres
+  register: joplin_postgres_container
+  check_mode: false
+
+# The DATA probe. `-u postgres` is required, not stylistic: the cluster's local
+# connections are `peer` authenticated and a root invocation fails outright with
+# `role "root" does not exist` (rc 2). psql exits 0 whether or not the database
+# is there — present prints "1", absent prints nothing — so the verdict is the
+# STDOUT, never the return code. check_mode: false because a --check run whose
+# gate is derived from a skipped probe is worse than no gate.
+# until/retries: on a first-ever host postgres may still be running initdb when
+# this role's turn comes; a transient connection failure must not be read as
+# "no database", and after a minute it fails loudly instead.
+- name: Check whether the Joplin database already exists
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -u
+      - postgres
+      - postgres
+      - psql
+      - -tAc
+      - "SELECT 1 FROM pg_database WHERE datname='{{ joplin_database_name }}'"
+  register: joplin_db_probe
+  until: joplin_db_probe.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when:
+    - joplin_postgres_container.exists
+    - joplin_postgres_container.container.State.Running | default(false)
+
+- name: Determine whether Joplin has data at risk
+  ansible.builtin.set_fact:
+    # Skipped probe (postgres absent/stopped) ⇒ stdout undefined ⇒ false. That is
+    # correct: the assert below then fires on the container-exists path, and on the
+    # no-container path there is nothing running that could migrate anything.
+    joplin_db_exists: "{{ (joplin_db_probe.stdout | default('') | trim) == '1' }}"
+
+- name: Report the pre-deploy backup gate verdict
+  ansible.builtin.debug:
+    msg: >-
+      Joplin pre-deploy backup:
+      {{ 'WILL BACK UP — container exists: ' ~ joplin_container.exists
+         ~ ', joplin database exists: ' ~ joplin_db_exists
+         if (joplin_container.exists or joplin_db_exists)
+         else 'SKIPPED — greenfield: no joplin-server container AND no '
+              ~ joplin_database_name ~ ' database in the postgres cluster, so there '
+              ~ 'is no schema to migrate and no data to lose. If this is NOT a first '
+              ~ 'deploy, stop and find out what happened to the database before '
+              ~ 'letting joplin-server start against it.' }}
+
+- name: Assert postgres is available to back Joplin up
+  ansible.builtin.assert:
+    that:
+      - joplin_postgres_container.exists
+      - joplin_postgres_container.container.State.Running | default(false)
+    fail_msg: >-
+      Joplin has data at risk (container exists: {{ joplin_container.exists }},
+      {{ joplin_database_name }} database exists: {{ joplin_db_exists }}) but the
+      postgres container is not running, so no pre-deploy dump can be taken.
+      Deploying would hand the Joplin schema to a possibly newer image with no
+      backup (#121). Start postgres and re-run.
+    quiet: true
+  when: joplin_container.exists or joplin_db_exists
+
+# Checked before anything is written: a retention of 0 would slice [0:] and delete
+# every dump, including the one just taken, right before the upgrade is applied.
+- name: Assert Joplin backup retention keeps at least one dump
+  ansible.builtin.assert:
+    that:
+      - joplin_backup_retention | int >= 1
+    fail_msg: "joplin_backup_retention must be >= 1, got {{ joplin_backup_retention }}"
+    quiet: true
+
+- name: Back up the Joplin database before the deploy
+  when: joplin_container.exists or joplin_db_exists
+  block:
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ data_mount }}/backups"
+        state: directory
+        mode: "0700"
+
+    # Swept BEFORE the dump, deliberately: a `.partial` survives only when the dump
+    # was killed outright, and the likeliest reason for that is the volume filling
+    # up — so reclaiming the space is a precondition for this run's dump, not
+    # tidying after it. Nothing else can be mid-write here (Ansible runs the role
+    # serially per host), and this run's own partial does not exist yet.
+    #
+    # The retention prune below globs `joplin-pgdump-*.sql`, which does NOT fnmatch
+    # `joplin-pgdump-<ts>.sql.partial`, so without this sweep aborted attempts
+    # accumulate multi-GB files that nothing ever lists or deletes.
+    - name: Find orphaned partial Joplin dumps
+      ansible.builtin.find:
+        paths: "{{ data_mount }}/backups"
+        patterns: "joplin-pgdump-*.sql.partial"
+      register: joplin_partial_dumps
+      when: not ansible_check_mode
+
+    - name: Report orphaned partial Joplin dumps
+      ansible.builtin.debug:
+        msg: >-
+          Removing {{ joplin_partial_dumps.files | length }} orphaned partial
+          dump(s) left by a killed pg_dumpall — a sign a previous run died
+          mid-stream (OOM, disk full, dropped connection):
+          {{ joplin_partial_dumps.files | map(attribute='path') | join(', ') }}
+      when:
+        - not ansible_check_mode
+        - joplin_partial_dumps.files | default([]) | length > 0
+
+    - name: Remove orphaned partial Joplin dumps
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ joplin_partial_dumps.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    # --check must surface that a real apply takes a dump here; the shell task
+    # below is necessarily skipped in check mode.
+    - name: Preview the pre-deploy dump (check mode)
+      ansible.builtin.debug:
+        msg: >-
+          A real apply WILL write a pg_dumpall of the postgres cluster to
+          {{ data_mount }}/backups/joplin-pgdump-<timestamp>.sql before deploying.
+      when: ansible_check_mode
+
+    # `-u postgres`, not root: the cluster's local connections are `peer`
+    # authenticated, so a dump run as root fails auth outright (#79).
+    #
+    # Written straight to a host file rather than through Ansible: the dump is the
+    # whole cluster and carries credentials/session tokens — capturing it as a
+    # register would copy it to the controller and put it in play output.
+    #
+    # `.partial` + trap: a dump that dies mid-stream (disk full, killed process)
+    # leaves a truncated file the retention prune cannot tell from a good backup,
+    # and it would then age out a real one (the lesson from #107's archive rescue).
+    # The rename happens only after the tail check proves pg_dumpall finished.
+    #
+    # The trap covers ERR (which `pipefail` makes the tail|grep check trip) AND the
+    # ordinary exit/termination signals, then is cleared right after the successful
+    # `mv` so the finished dump is never removed. Note what a trap CANNOT cover:
+    # SIGKILL — the OOM killer, `kill -9` — is undeliverable to a handler by
+    # definition, and that is the case most likely to strand a multi-GB `.partial`.
+    # The sweep above, not this trap, is what actually cleans that up; the trap is
+    # the cheap half of a two-part fix, not the whole of it.
+    - name: Dump the postgres cluster before deploying Joplin
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          umask 077
+          dest="{{ data_mount }}/backups/joplin-pgdump-{{ ansible_date_time.iso8601_basic_short }}.sql"
+          trap 'rm -f "${dest}.partial"' ERR EXIT HUP INT TERM
+          docker exec -u postgres postgres pg_dumpall > "${dest}.partial"
+          tail -n 20 "${dest}.partial" | grep -q 'PostgreSQL database cluster dump complete'
+          mv "${dest}.partial" "$dest"
+          trap - ERR EXIT HUP INT TERM
+          echo "$dest"
+        executable: /bin/bash
+      register: joplin_pg_dump
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Report where the pre-deploy dump was written
+      ansible.builtin.debug:
+        msg: "Joplin pre-deploy dump: {{ joplin_pg_dump.stdout | trim }}"
+      when: not ansible_check_mode
+
+    - name: Find existing Joplin dumps
+      ansible.builtin.find:
+        paths: "{{ data_mount }}/backups"
+        patterns: "joplin-pgdump-*.sql"
+      register: joplin_backups
+      when: not ansible_check_mode
+
+    - name: Prune Joplin dumps beyond the retention limit
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: >-
+        {{ (joplin_backups.files | default([]) | sort(attribute='mtime', reverse=true))
+           [joplin_backup_retention | default(7) | int :] }}
+      loop_control:
+        label: "{{ item.path }}"
+
+  rescue:
+    # Never let a failed backup take the running service with it: joplin-server was
+    # not touched above, so there is nothing to restore — just refuse to deploy.
+    - name: Fail because the pre-deploy backup did not complete
+      ansible.builtin.fail:
+        msg: >-
+          Pre-deploy backup of the Joplin database failed at task
+          '{{ ansible_failed_task.name }}':
+          {{ ansible_failed_result.msg | default('see the error above') }}.
+          Joplin was NOT deployed and is still running its current image. Resolve
+          the backup failure (disk space, postgres health) and re-run.
+
 - name: Deploy Joplin via the shared service pipeline
   ansible.builtin.include_role:
     name: services/_deploy

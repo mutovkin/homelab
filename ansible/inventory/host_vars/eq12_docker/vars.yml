@@ -17,6 +17,9 @@ services:
 
 # Docker network subnets (must match compose files)
 docker_networks:
+  # Renumbering observability? telegraf.conf's http_response probe hardcodes THIS
+  # network's gateway (172.20.0.1) to reach searxng across compose projects —
+  # update it there too or the probe silently goes red (#94).
   observability: "172.20.0.0/24"
   searxng: "172.22.0.0/24"
   portainer: "172.23.0.0/24"
@@ -24,13 +27,36 @@ docker_networks:
   watchtower: "172.25.0.0/24"
 
 # Scoped fail-open nftables allowlist for the postgresql role's published
-# ports (#79). Sources NOT listed are dropped for these ports only; loopback
-# and the docker bridges (172.16.0.0/12) are always allowed. Keep in parity
-# with the LAN entries in roles/services/postgresql/files/config/pg_hba.conf.
+# ports (#79, per-port since #114). Sources NOT listed for a port are dropped
+# for THAT port; loopback and the docker bridges (172.16.0.0/12) are always
+# allowed. This is also the single source of truth for pg_hba.conf's LAN
+# entries, which the role templates from the 5432 list — the two can no longer
+# drift, so grant a new LAN database client here and nowhere else.
 postgres_firewall:
   host_addr: 192.168.25.15
   lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
-  ports: [5432, 10080]
-  allowed_sources:
-    - 192.168.25.20/32  # NPM LXC (CT 104)
-    - 192.168.48.0/24   # operator workstation subnet
+  ports:
+    # PostgreSQL wire protocol. NPM is deliberately absent: it only reverse-
+    # proxies pgAdmin's HTTP port, never the database (#114). Verified before
+    # tightening — pg_stat_activity showed no 192.168.25.20 client.
+    5432:
+      - 192.168.48.0/24   # operator workstation subnet
+    # pgAdmin HTTP (proxied by NPM).
+    10080:
+      - 192.168.25.20/32  # NPM LXC (CT 104)
+      - 192.168.48.0/24   # operator workstation subnet
+
+# Scoped fail-open nftables allowlist for VictoriaMetrics' InfluxDB ingest port
+# (#122). :8089 is an UNAUTHENTICATED write endpoint on tcp AND udp —
+# --httpAuth.username/password guard :8428 only, never the --influxListenAddr
+# listener. Its one intended client is the Home Assistant VM. Sources NOT listed
+# are dropped for this port only; loopback and the docker bridges (172.16.0.0/12,
+# accepted only when they do NOT arrive on lan_iface) are always allowed. The read
+# ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately NOT in this list —
+# NPM and operator workstations must keep reaching them.
+observability_firewall:
+  lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
+  ports:
+    # InfluxDB line protocol, tcp AND udp (nft_fw_protocols: [tcp, udp] in the role).
+    8089:
+      - 192.168.25.10/32  # Home Assistant VM (VM 100, MAC 02:ab:9f:1f:cd:8c)

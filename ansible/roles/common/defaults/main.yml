@@ -2,6 +2,19 @@
 # defaults for common role
 timezone: UTC
 apt_dist_upgrade: false
+# Mass-upgrade gate (#97). Default false: unattended-upgrades owns nightly
+# security patching (#77); applying every pending upgrade as a side effect of
+# an unrelated deploy restarts daemons (a pending docker-ce bounces every
+# container). Opt in deliberately: -e apt_apply_pending_upgrades=true
+apt_apply_pending_upgrades: false
+
+# unattended-upgrades autoremove posture (#99). True runs a full autoremove of
+# every unused package at ~06:00 unattended. Left on for guests (where the blast
+# radius is a container), overridden to false for proxmox_hosts in
+# group_vars/proxmox_hosts.yml: on a hypervisor an unattended autoremove can take
+# out kernels/ZFS modules the running host still needs, with nobody watching.
+# A defaults-level var so inventory can override it (role vars could not be).
+unattended_upgrades_remove_unused_dependencies: true
 
 # Operator extras. Overriding this from inventory REPLACES the whole list —
 # Ansible does not merge — so add packages here rather than in group_vars. The

@@ -187,6 +187,9 @@
   register: hostonly_bridge_json
   failed_when: false
   changed_when: false
+  # Read-only probe: must run under --check too, or the facts below are derived
+  # from an empty stdout and every downstream task reports phantom drift (#125).
+  check_mode: false
   when: hostonly_bridge is defined
 
 - name: Set fact for bridge existence and current IP
@@ -197,13 +200,29 @@
     # hostonly_host_ip (e.g. "10.99.99.1"). Without this the comparison never
     # matches and the network is reconfigured on every run.
     # `default('{}', true)` also substitutes when stdout is an empty string —
-    # e.g. in --check mode the pvesh command is skipped and stdout is '' rather
-    # than undefined, which would otherwise make from_json fail.
+    # the probe above runs with failed_when: false, so a missing bridge (rc != 0)
+    # leaves stdout '' rather than undefined, which would otherwise make
+    # from_json fail. (It no longer guards --check: the probe is check_mode:
+    # false since #125 and always runs.)
     _bridge_cfg: "{{ hostonly_bridge_json.stdout | default('{}', true) | from_json }}"
     _bridge_addr: "{{ _bridge_cfg.address | default(_bridge_cfg.cidr | default('')) }}"
   ansible.builtin.set_fact:
     hostonly_bridge_exists: "{{ hostonly_bridge_json.rc == 0 }}"
     hostonly_bridge_current_ip: "{{ _bridge_addr | regex_replace('/.*$', '') }}"
+  when: hostonly_bridge is defined
+
+# Says out loud what the apply tasks below would do, so a --check run reports a
+# verdict instead of leaving the reader to infer it from skipped tasks (#125).
+- name: Report host-only bridge drift verdict
+  ansible.builtin.debug:
+    msg: >-
+      {{ hostonly_bridge }}:
+      {{ 'MISSING — a live run would create it and reload networking'
+         if not hostonly_bridge_exists
+         else ('IP drift ' ~ hostonly_bridge_current_ip ~ ' -> ' ~ hostonly_host_ip ~
+               ' — a live run would reassign and reload networking'
+               if hostonly_bridge_current_ip != hostonly_host_ip
+               else 'present and converged (' ~ hostonly_bridge_current_ip ~ ')') }}
   when: hostonly_bridge is defined
 
 - name: Backup /etc/network/interfaces before making changes
