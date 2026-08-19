@@ -3,3 +3,10 @@
 # Same shape and directory as the Vaultwarden pre-upgrade archives (#107); the two
 # use different filename patterns so their retentions never prune each other.
 joplin_backup_retention: 7
+
+# The database joplin-server owns inside the shared postgres cluster. Created by
+# the postgresql role's init script (CREATE DATABASE joplin) and consumed by
+# templates/env.j2 — and, since #121a's fix, by the pre-deploy backup's
+# data-existence probe. One name in one place so the probe cannot drift away from
+# the database it is supposed to be protecting.
+joplin_database_name: joplin

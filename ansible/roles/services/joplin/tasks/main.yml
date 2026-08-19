@@ -11,8 +11,15 @@
 # contract (what to dump, how to verify it, where retention lives) and every caller
 # audited for it. Deliberately out of scope here — see the note on #121.
 #
-# Gated on the joplin-server container existing: on a first deploy there is no
-# schema to migrate and no data to lose, and postgres may not even be up yet.
+# Gated on the DATA, not on the container (the vaultwarden precedent this cites is,
+# and its README says the gate must cover "a container-absent start after a
+# `docker rm`"). A container-only gate has a hole big enough to drive #107 through:
+# `docker rm joplin-server`, a failed prior deploy, or a `compose down` leaves the
+# joplin SCHEMA present and the container absent, the whole backup block skips
+# SILENTLY, `_deploy` runs with `pull: always`, and joplin-server performs a one-way
+# schema migration against the live database with no dump. So the gate is
+# "container exists OR the joplin database exists", and the genuinely greenfield
+# case (neither) skips with a message rather than in silence.
 #
 # Scope: this dumps the DATABASE (notes metadata, users, sessions — STORAGE_DRIVER
 # is Filesystem, so attachment blobs live in {{ data_mount }}/joplin and are NOT in
@@ -34,17 +41,69 @@
   register: joplin_postgres_container
   check_mode: false
 
+# The DATA probe. `-u postgres` is required, not stylistic: the cluster's local
+# connections are `peer` authenticated and a root invocation fails outright with
+# `role "root" does not exist` (rc 2). psql exits 0 whether or not the database
+# is there — present prints "1", absent prints nothing — so the verdict is the
+# STDOUT, never the return code. check_mode: false because a --check run whose
+# gate is derived from a skipped probe is worse than no gate.
+# until/retries: on a first-ever host postgres may still be running initdb when
+# this role's turn comes; a transient connection failure must not be read as
+# "no database", and after a minute it fails loudly instead.
+- name: Check whether the Joplin database already exists
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -u
+      - postgres
+      - postgres
+      - psql
+      - -tAc
+      - "SELECT 1 FROM pg_database WHERE datname='{{ joplin_database_name }}'"
+  register: joplin_db_probe
+  until: joplin_db_probe.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  check_mode: false
+  when:
+    - joplin_postgres_container.exists
+    - joplin_postgres_container.container.State.Running | default(false)
+
+- name: Determine whether Joplin has data at risk
+  ansible.builtin.set_fact:
+    # Skipped probe (postgres absent/stopped) ⇒ stdout undefined ⇒ false. That is
+    # correct: the assert below then fires on the container-exists path, and on the
+    # no-container path there is nothing running that could migrate anything.
+    joplin_db_exists: "{{ (joplin_db_probe.stdout | default('') | trim) == '1' }}"
+
+- name: Report the pre-deploy backup gate verdict
+  ansible.builtin.debug:
+    msg: >-
+      Joplin pre-deploy backup:
+      {{ 'WILL BACK UP — container exists: ' ~ joplin_container.exists
+         ~ ', joplin database exists: ' ~ joplin_db_exists
+         if (joplin_container.exists or joplin_db_exists)
+         else 'SKIPPED — greenfield: no joplin-server container AND no '
+              ~ joplin_database_name ~ ' database in the postgres cluster, so there '
+              ~ 'is no schema to migrate and no data to lose. If this is NOT a first '
+              ~ 'deploy, stop and find out what happened to the database before '
+              ~ 'letting joplin-server start against it.' }}
+
 - name: Assert postgres is available to back Joplin up
   ansible.builtin.assert:
     that:
       - joplin_postgres_container.exists
       - joplin_postgres_container.container.State.Running | default(false)
     fail_msg: >-
-      joplin-server exists but the postgres container is not running, so no
-      pre-deploy dump can be taken. Deploying would hand the Joplin schema to a
-      possibly newer image with no backup (#121). Start postgres and re-run.
+      Joplin has data at risk (container exists: {{ joplin_container.exists }},
+      {{ joplin_database_name }} database exists: {{ joplin_db_exists }}) but the
+      postgres container is not running, so no pre-deploy dump can be taken.
+      Deploying would hand the Joplin schema to a possibly newer image with no
+      backup (#121). Start postgres and re-run.
     quiet: true
-  when: joplin_container.exists
+  when: joplin_container.exists or joplin_db_exists
 
 # Checked before anything is written: a retention of 0 would slice [0:] and delete
 # every dump, including the one just taken, right before the upgrade is applied.
@@ -56,13 +115,48 @@
     quiet: true
 
 - name: Back up the Joplin database before the deploy
-  when: joplin_container.exists
+  when: joplin_container.exists or joplin_db_exists
   block:
     - name: Create backup directory
       ansible.builtin.file:
         path: "{{ data_mount }}/backups"
         state: directory
         mode: "0700"
+
+    # Swept BEFORE the dump, deliberately: a `.partial` survives only when the dump
+    # was killed outright, and the likeliest reason for that is the volume filling
+    # up — so reclaiming the space is a precondition for this run's dump, not
+    # tidying after it. Nothing else can be mid-write here (Ansible runs the role
+    # serially per host), and this run's own partial does not exist yet.
+    #
+    # The retention prune below globs `joplin-pgdump-*.sql`, which does NOT fnmatch
+    # `joplin-pgdump-<ts>.sql.partial`, so without this sweep aborted attempts
+    # accumulate multi-GB files that nothing ever lists or deletes.
+    - name: Find orphaned partial Joplin dumps
+      ansible.builtin.find:
+        paths: "{{ data_mount }}/backups"
+        patterns: "joplin-pgdump-*.sql.partial"
+      register: joplin_partial_dumps
+      when: not ansible_check_mode
+
+    - name: Report orphaned partial Joplin dumps
+      ansible.builtin.debug:
+        msg: >-
+          Removing {{ joplin_partial_dumps.files | length }} orphaned partial
+          dump(s) left by a killed pg_dumpall — a sign a previous run died
+          mid-stream (OOM, disk full, dropped connection):
+          {{ joplin_partial_dumps.files | map(attribute='path') | join(', ') }}
+      when:
+        - not ansible_check_mode
+        - joplin_partial_dumps.files | default([]) | length > 0
+
+    - name: Remove orphaned partial Joplin dumps
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ joplin_partial_dumps.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
 
     # --check must surface that a real apply takes a dump here; the shell task
     # below is necessarily skipped in check mode.
@@ -84,16 +178,25 @@
     # leaves a truncated file the retention prune cannot tell from a good backup,
     # and it would then age out a real one (the lesson from #107's archive rescue).
     # The rename happens only after the tail check proves pg_dumpall finished.
+    #
+    # The trap covers ERR (which `pipefail` makes the tail|grep check trip) AND the
+    # ordinary exit/termination signals, then is cleared right after the successful
+    # `mv` so the finished dump is never removed. Note what a trap CANNOT cover:
+    # SIGKILL — the OOM killer, `kill -9` — is undeliverable to a handler by
+    # definition, and that is the case most likely to strand a multi-GB `.partial`.
+    # The sweep above, not this trap, is what actually cleans that up; the trap is
+    # the cheap half of a two-part fix, not the whole of it.
     - name: Dump the postgres cluster before deploying Joplin
       ansible.builtin.shell:
         cmd: |
           set -euo pipefail
           umask 077
           dest="{{ data_mount }}/backups/joplin-pgdump-{{ ansible_date_time.iso8601_basic_short }}.sql"
-          trap 'rm -f "${dest}.partial"' ERR
+          trap 'rm -f "${dest}.partial"' ERR EXIT HUP INT TERM
           docker exec -u postgres postgres pg_dumpall > "${dest}.partial"
           tail -n 20 "${dest}.partial" | grep -q 'PostgreSQL database cluster dump complete'
           mv "${dest}.partial" "$dest"
+          trap - ERR EXIT HUP INT TERM
           echo "$dest"
         executable: /bin/bash
       register: joplin_pg_dump
