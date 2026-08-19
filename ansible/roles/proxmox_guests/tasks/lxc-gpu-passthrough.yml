@@ -26,6 +26,24 @@
     path: /dev/kfd
   register: dev_kfd
 
+# A guest declaring `gpu_sharing: true` and a host with no /dev/kfd is a
+# combination worth saying out loud. The desired-line set below silently shrinks
+# to the two /dev/dri lines, both drift sets come back empty, and the verdict
+# would otherwise print a bare "converged" over a CT that has just lost ROCm —
+# positive false reassurance, which is worse than the old task's silence. The
+# usual cause is amdgpu failing to load after a kernel upgrade. NOT an assert:
+# VAAPI via /dev/dri still works without it, and failing the whole host run over
+# a missing compute device would be disproportionate.
+- name: "Warn that /dev/kfd is absent so ROCm is not passed through — CT {{ item.vmid }}"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: /dev/kfd does not exist on {{ inventory_hostname }}, so ROCm
+      compute is NOT being shared into CT {{ item.vmid }} and the drift verdict
+      below covers the two /dev/dri lines ONLY. Check `lsmod | grep amdgpu` and
+      `dmesg | grep -i amdgpu` — a kernel upgrade that left the module unloaded
+      looks exactly like this.
+  when: not dev_kfd.stat.exists
+
 - name: "Get /dev/kfd major:minor numbers in decimal — CT {{ item.vmid }}"
   ansible.builtin.shell: "read -r major minor < <(stat -c '%t %T' /dev/kfd) && printf '%d:%d' \"0x$major\" \"0x$minor\""
   args:
@@ -97,7 +115,8 @@
 - name: "Report GPU passthrough drift verdict — CT {{ item.vmid }}"
   ansible.builtin.debug:
     msg: >-
-      CT {{ item.vmid }} GPU passthrough:
+      CT {{ item.vmid }} GPU passthrough
+      ({{ 'dri+kfd' if dev_kfd.stat.exists else 'dri ONLY — /dev/kfd absent, no ROCm' }}):
       {{ 'converged (' ~ (lxc_gpu_desired | length) ~ ' lines applied, no foreign allow rules)'
          if (lxc_gpu_missing | length == 0 and lxc_gpu_extras | length == 0)
          else 'WOULD CHANGE — missing: [' ~ (lxc_gpu_missing | join('; ')) ~ ']'
