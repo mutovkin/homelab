@@ -50,10 +50,7 @@ if the stat is undefined and compose uses `${DOCKER_GID:?}`.
 roles/services/observability/
 ├── tasks/main.yml                  firewall → data dirs → configs → deploy → restarts
 ├── tasks/vector-buffer-reset.yml   opt-in, destructive; tagged `never` (see below)
-├── handlers/main.yml               reload-observability-firewall
 ├── templates/env.j2                the .env, templated from vault + host_vars
-├── templates/observability-firewall.nft.j2      nftables ruleset for :8089
-├── templates/observability-firewall.service.j2  oneshot unit that loads it
 ├── files/compose.yaml              the five services
 └── files/data/                     bind-mounted config, rsync'd to {{ data_mount }}
     ├── vector/vector.yaml
@@ -145,7 +142,15 @@ identities: changing one re-points every dashboard and alert that uses it.
 UDP — `--httpAuth.username/password` guards `:8428` only. Its one intended client is
 the Home Assistant VM, so the role installs a scoped nftables table
 (`inet observability_fw`) that drops :8089 from every source outside
-`observability_firewall.allowed_sources` in host_vars (#122).
+`observability_firewall.ports[8089]` in host_vars (#122).
+
+The table is built by the **shared `roles/nft_scoped_fw`** role (#114), included with
+`nft_fw_name: observability` — which yields exactly these identifiers: table
+`inet observability_fw`, file `/etc/nftables.d/observability-firewall.nft`, unit
+`observability-firewall.service`. This consumer is the reason that role takes
+`nft_fw_protocols`: :8089 is governed over **`[tcp, udp]`**, and the terminal
+`<proto> dport != {…} accept` rules are emitted one per protocol, all ahead of the
+scope guard, so a packet of neither protocol still falls through to `policy accept`.
 
 Shape (identical to the postgres/vaultwarden precedent, see
 [docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md](../../../../docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md)):
@@ -177,7 +182,7 @@ automatically.
 ## Home Assistant integration
 
 HA writes over the InfluxDB v1 line protocol to `192.168.25.15:8089` (no database,
-user or token needed). It must be in `observability_firewall.allowed_sources` —
+user or token needed). It must be listed under `observability_firewall.ports[8089]` —
 it is, as `192.168.25.10/32`.
 
 ## Troubleshooting

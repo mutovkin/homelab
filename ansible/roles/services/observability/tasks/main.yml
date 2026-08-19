@@ -41,106 +41,31 @@
 # --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
 # --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
 # (--httpAuth.* guards :8428 only), published on tcp AND udp, on 0.0.0.0/[::]. Its
-# only intended client is the Home Assistant VM. Fail-open nftables table, prerouting
-# hook — see the header in templates/observability-firewall.nft.j2 and
+# only intended client is the Home Assistant VM. Hence nft_fw_protocols: [tcp, udp] —
+# governing only TCP would leave the UDP half of the same unauthenticated write port
+# wide open. The read ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately not
+# governed: NPM and operator workstations must keep reaching them.
+#
+# Implemented by the shared nft_scoped_fw role (#114) rather than a fork of it — the
+# fail-open table, prerouting hook, drift probe and self-heal all live there. See
 # docs/solutions/conventions/scoped-nftables-on-live-host.md.
 #
-# observability_firewall (host_addr/lan_iface/ports/allowed_sources) comes from
-# host_vars; deliberately NO role defaults — a host that deploys this role without
-# defining it must fail loudly, not silently publish an open write port.
-- name: Assert observability firewall allowlist is defined and scoped
-  ansible.builtin.assert:
-    that:
-      - observability_firewall.allowed_sources | length > 0
-      # Structural, not a spelling blocklist: a list of forbidden strings would wave
-      # through 192.168.0.0/0, 0/0 and 0.0.0.00/0. Every entry must be an IPv4 CIDR
-      # with a /1../32 prefix, which rejects /0, malformed and non-IPv4 entries. An
-      # out-of-range octet is caught downstream by the nft -c -f validate below.
-      - >-
-        observability_firewall.allowed_sources
-        | reject('match', '^\d{1,3}(\.\d{1,3}){3}/([1-9]|[12]\d|3[0-2])$')
-        | list | length == 0
-      # A drifted host_addr does not silently no-op this ruleset (it scopes with
-      # `fib daddr type != local`, not a literal address), but it does mean the
-      # documented model no longer matches the host — catch it here.
-      - observability_firewall.host_addr in ansible_all_ipv4_addresses
-      - observability_firewall.ports | length > 0
-      # lan_iface is the only thing making the docker-bridge accept safe: the rule
-      # is `iifname != "<lan_iface>" ip saddr 172.16.0.0/12 accept`. A name that is
-      # not a real interface can never match iifname, so the negation is always
-      # true and a LAN packet with a FORGED 172.16/12 source is accepted — the
-      # ruleset still loads, so only this assert catches the typo.
-      - observability_firewall.lan_iface in ansible_interfaces
-    fail_msg: >-
-      observability_firewall must be scoped: allowed_sources non-empty with every
-      entry an IPv4 CIDR of prefix /1../32 (a wildcard or empty list would re-open
-      the unauthenticated :8089 write exposure #122 closes), ports non-empty,
-      host_addr must be one of this host's real IPv4 addresses, and lan_iface must
-      be one of this host's real interfaces — a lan_iface that does not exist makes
-      the forged-source guard in the nft template inert, since `iifname !=
-      "<lan_iface>"` then matches every packet and accepts any spoofed
-      172.16.0.0/12 source arriving from the LAN.
-    success_msg: "observability firewall allowlist is scoped."
-
-- name: Install nftables
-  ansible.builtin.apt:
-    name: nftables
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-
-- name: Ensure nftables include dir exists
-  ansible.builtin.file:
-    path: /etc/nftables.d
-    state: directory
-    mode: "0755"
-
-- name: Deploy observability firewall ruleset
-  ansible.builtin.template:
-    src: observability-firewall.nft.j2
-    dest: /etc/nftables.d/observability-firewall.nft
-    mode: "0644"
-    validate: "/usr/sbin/nft -c -f %s"
-  notify: reload-observability-firewall
-
-- name: Deploy observability firewall systemd unit
-  ansible.builtin.template:
-    src: observability-firewall.service.j2
-    dest: /etc/systemd/system/observability-firewall.service
-    mode: "0644"
-  notify: reload-observability-firewall
-
-- name: Enable and start observability firewall
-  ansible.builtin.systemd:
-    name: observability-firewall.service
-    enabled: true
-    state: started
-    daemon_reload: true
-  # In --check the unit file may not have been written yet, so enable/start can't
-  # find it. Skip this one task in check mode; a real run writes it first.
-  when: not ansible_check_mode
-
-- name: Flush handlers so firewall changes are live before the compose deploy
-  ansible.builtin.meta: flush_handlers
-
-# A RemainAfterExit oneshot stays "active" even if the table was externally flushed
-# (a restart of the stock nftables.service opens with `flush ruleset`), so
-# state: started can never heal it. Probe the KERNEL and notify on drift.
-- name: Check observability firewall table is live
-  ansible.builtin.command: /usr/sbin/nft list table inet observability_fw
-  register: observability_fw_check
-  changed_when: observability_fw_check.rc != 0
-  failed_when: false
-  notify: reload-observability-firewall
-  when: not ansible_check_mode
-
-- name: Heal a missing firewall table immediately
-  ansible.builtin.meta: flush_handlers
-
-- name: Assert observability firewall table is live
-  ansible.builtin.command: /usr/sbin/nft list table inet observability_fw
-  changed_when: false
-  when: not ansible_check_mode
+# observability_firewall (lan_iface/ports) comes from host_vars; deliberately NO role
+# defaults — a host that deploys this role without defining it must fail loudly, not
+# silently publish an open write port.
+- name: Restrict the unauthenticated InfluxDB ingest port to its writer
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: observability
+    nft_fw_description: Observability ingest firewall (Ansible-managed nftables table inet observability_fw)
+    nft_fw_ports: "{{ observability_firewall.ports }}"
+    nft_fw_protocols: [tcp, udp]
+    # Default for the prerouting hook anyway; stated because the choice matters —
+    # at -150 daddr is still pre-DNAT, so container egress to some external :8089
+    # is non-local and exits before the drop.
+    nft_fw_scope_guard: fib
+    nft_fw_lan_iface: "{{ observability_firewall.lan_iface }}"
 
 - name: Stat Docker socket
   ansible.builtin.stat:

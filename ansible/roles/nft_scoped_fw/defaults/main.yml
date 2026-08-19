@@ -19,6 +19,21 @@ nft_fw_description: "{{ nft_fw_name }} scoped firewall (Ansible-managed nftables
 # gets NO access to the others — that per-port scoping is the point (#114).
 nft_fw_ports: {}
 
+# Transports the ports above are governed over. `tcp` covers every consumer whose
+# port is TCP-only; a consumer whose port ALSO listens on UDP must pass
+# [tcp, udp] — governing only TCP there leaves the UDP half of the same port wide
+# open, which for an unauthenticated write endpoint is the whole exposure back
+# (observability's :8089 InfluxDB line protocol, #122).
+#
+# Fail-open is preserved per protocol, not globally: the template emits one
+# terminal `<proto> dport != {...} accept` per protocol, and ALL of them come
+# first, before the scope guard and every other accept. Each rule carries an
+# implicit l4proto dependency, so a packet of a protocol NOT in this list matches
+# none of them, falls through every rule in the chain and lands on `policy
+# accept`. Adding a protocol therefore only ever narrows the governed set; it can
+# never make the table fail closed for traffic it does not govern.
+nft_fw_protocols: [tcp]
+
 # `input` (priority -10) for a HOST daemon's port; `prerouting` (priority -150,
 # i.e. before docker's dstnat at -100) for a DOCKER-PUBLISHED port — an input
 # hook is silently inert for those. See
