@@ -126,21 +126,23 @@ Verified by reading the fork's source at tag `v1.20.3` (not the docs alone):
 
 So the pull traffic and the bounded image accumulation are the **price of the
 notification**, not an incidental cost that a label could remove. Checked 2026-08-18
-against v1.20.3; re-verify only if the fork changes its staleness path.
+against v1.20.3, and re-checked at **v1.21.0** during that bump — `pkg/container/image.go`
+still carries the `IsNoPull` gate on both entry points, ahead of
+`digest.CompareDigestWithRemote`. Re-verify only if the fork changes its staleness path.
 
 ### Watchtower's own image is pinned
 
-`image: nickfedor/watchtower:1.20.3` — not `:latest`. This container holds
+`image: nickfedor/watchtower:1.21.0` — not `:latest`. This container holds
 `/var/run/docker.sock` read-write and can restart every other container on the host, and
 it is a community fork of an upstream archived in 2025-12. Letting it pull and execute
 its own new `latest` unattended makes the whole fleet trust an unreviewed image. Pinned,
 a version bump is a compose edit in git.
 
-`1.20.3` is an immutable release tag, so — unlike every other monitor-only service —
+`1.21.0` is an immutable release tag, so — unlike every other monitor-only service —
 **Watchtower will not email us about its own new releases.** It only ever checks
-`nickfedor/watchtower:1.20.3`; a published `1.20.4` is invisible to it. Its
+`nickfedor/watchtower:1.21.0`; a published `1.21.1` is invisible to it. Its
 `monitor-only` label is there to cover the one residual unattended path the pin leaves
-open (a re-pushed `1.20.3`), not to provide notifications.
+open (a re-pushed `1.21.0`), not to provide notifications.
 
 Checking for a new version is therefore a deliberate step against
 <https://github.com/nicholas-fedor/watchtower/releases> — automated as a reminder by
@@ -158,7 +160,13 @@ To bump (the release-watch job above tells you when): edit the tag in
 `task deploy:service -- --tags watchtower` and confirm the next session still reports the
 expected `scanned=N`. (Digest-pinning instead of a tag was considered and not taken: it
 costs readability and `monitor-only` already prevents the unattended path. A deliberate
-deploy would still adopt a re-pushed `1.20.3`.)
+deploy would still adopt a re-pushed `1.21.0`.)
+
+#### Bump log
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-08-19 | 1.20.3 → 1.21.0 | First bump driven by the release-watch job, which went red the day it landed. Release delta is fixes plus one behavioural change worth knowing: **logging moved from logrus to zerolog** (#2128), so log *format* changed — the `Update session completed … scanned=N` line survives it (re-verified by probe on both hosts), but anything parsing watchtower logs by shape should be re-checked. Notification field validation was tightened (#2124) and shoutrrr went to v0.17.1; our `smtp://` URL still starts clean. No change to `enable` / `monitor-only` / `WATCHTOWER_LABEL_ENABLE` semantics, so the posture model above is untouched. |
 
 ### Verification
 
@@ -187,7 +195,7 @@ This is the check to use right after a label change:
 docker run --rm \
   --security-opt apparmor=unconfined \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  nickfedor/watchtower:1.20.3 \
+  nickfedor/watchtower:1.21.0 \
   --run-once --monitor-only --label-enable --no-startup-message 2>&1 \
   | grep 'Update session completed'
 ```
