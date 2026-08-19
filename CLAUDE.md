@@ -180,10 +180,15 @@ Hard-won lessons — check here before debugging from scratch.
   exactly `mount, nesting, keyctl, fuse, mknod, force_rw_sys` (PVE `$features_desc`); "may mount
   NFS" is spelled `mount=nfs`. The features task asked for `nfs=1` for the deployment's whole
   life — `pct set` rejected it every run, and the script (no `set -e`) swallowed the error and
-  echoed "changed": a silent-green no-op. Also compare against `pct config` (live view), never the
-  raw `/etc/pve/lxc/<id>.conf` — snapshot sections carry their own `features:` lines and
-  false-match greps.
-  See [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md).
+  echoed "changed": a silent-green no-op. Also compare against `pct config` — never the raw
+  `/etc/pve/lxc/<id>.conf`, whose snapshot sections carry their own `features:` lines and
+  false-match greps. But `pct config` is **not** the "live view": it prints the PENDING-merged
+  config, so any "is it actually applied?" question needs `pct config <vmid> --current` (CT 201
+  reads `mount=nfs,nesting=1` plain vs `nesting=1` under `--current`). And never `lineinfile`
+  /`replace` into those raw files — a regexp matches the **last** occurrence, which is a
+  snapshot's stale copy, not the live section (#98).
+  See [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md)
+  and [docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md](docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md).
 - **Create-time-only guest fields are REBUILD declarations — write them in the
   syntax a fresh create needs.** With provisioning pinned `update: false` (#86),
   `mounts`/`scsi`/`efidisk0`/`usb`/etc. in host_vars never touch an existing guest;
