@@ -788,6 +788,13 @@
     # reconcile task. `state: started` below is unaffected — that dispatch
     # branch never reads `update`.
     update: false
+  # Registered for the fresh-allocation restore gate (#127): a per-item `changed`
+  # here is the ONLY signal that this run created the container, and therefore
+  # allocated it a brand-new empty /data. `no_log` censors the DISPLAY of each
+  # result, not the registered structure — `.changed` and `.item` read back fine
+  # (verified) — and everything downstream only ever prints vmid / hostname /
+  # mount path, never a module arg.
+  register: lxc_provision
   delegate_to: localhost
   loop: "{{ proxmox_lxcs }}"
   loop_control:
@@ -1059,6 +1066,83 @@
     + proxmox_lxcs | rejectattr('started', 'defined') | list }}
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+# --- Fresh-allocation restore gate: the marker (#127) ---
+#
+# `mounts` is create-time-only (provisioning is pinned update:false, #86) and is
+# written in ALLOCATION form (`local-zfs:110,mp=/data`) so a from-scratch rebuild
+# succeeds (#87). Succeeding is the problem: the old named-subvol form failed the
+# create loudly, which was an accidental tripwire. Now a rebuild runs green,
+# hands the CT a FRESH EMPTY /data, and `deploy-services` initialises brand-new
+# databases and app state on top of it — the vzdump restore that was supposed to
+# happen in between lived only in a host_vars comment.
+#
+# So the create path drops a marker file on every mount it just allocated, and
+# playbooks/deploy-services.yml refuses to run while one exists. `.changed` on the
+# provisioning result is the only honest "this run created it" signal available;
+# an already-existing CT exits changed=false through the `elif not force:` branch
+# and gets no marker. Under --check the module is skipped entirely, so nothing
+# below runs — the gate cannot fire spuriously in a dry run.
+- name: Compute fresh-allocation marker targets
+  ansible.builtin.set_fact:
+    lxc_fresh_markers: "{{ markers_json | from_json }}"
+    lxc_started_vmids: >-
+      {{ (proxmox_lxcs | selectattr('started', 'defined')
+      | selectattr('started', 'equalto', true) | list
+      + proxmox_lxcs | rejectattr('started', 'defined') | list)
+      | map(attribute='vmid') | list }}
+  vars:
+    markers_json: >-
+      {%- set out = [] -%}
+      {%- for r in lxc_provision.results | default([]) -%}
+      {%- if r.changed | default(false) -%}
+      {%- for mp_key, mp_val in (r.item.mounts | default({})).items() -%}
+      {%- set mp_path = (mp_val.split(',') | select('match', 'mp=') | list
+      | first | default('')) | replace('mp=', '', 1) -%}
+      {%- if mp_path | length > 0 -%}
+      {%- set _ = out.append({'vmid': r.item.vmid, 'hostname': r.item.hostname,
+      'key': mp_key, 'path': mp_path}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{- out | to_json -}}
+
+# The marker is written with `pct exec`, which needs the container RUNNING. A
+# freshly created mount-bearing CT declared `started: false` would therefore be
+# skipped — and a silent skip is worse than no gate at all, because the operator
+# would believe the tripwire is armed. Refuse instead. Membership is computed from
+# the same expression the `Start LXC containers` loop uses, so the two cannot
+# drift apart.
+- name: Refuse to leave a freshly allocated mount unmarked
+  ansible.builtin.fail:
+    msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}) was created by this run with a
+      freshly allocated mount at {{ item.path }} ({{ item.key }}), but it is
+      declared `started: false` so it is not running and the
+      {{ item.path }}/.fresh-allocation marker cannot be written. That marker is
+      what stops playbooks/deploy-services.yml from initialising services on an
+      empty, un-restored volume (#127). Set `started: true` for this container,
+      or drop its `mounts` declaration.
+  loop: "{{ lxc_fresh_markers | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.path }}"
+  when: item.vmid not in (lxc_started_vmids | default([]))
+
+- name: Mark freshly allocated LXC mounts as un-restored
+  become: true
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - touch
+      - "{{ item.path }}/.fresh-allocation"
+  changed_when: true
+  loop: "{{ lxc_fresh_markers | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.path }}/.fresh-allocation"
 
 - name: Ensure LXC root disk is resized
   become: true
