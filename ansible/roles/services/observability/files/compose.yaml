@@ -171,8 +171,32 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
-      # No setuid/setgid/fscaps escalation from anything inside this container (#95).
-      - "no-new-privileges:true"
+      # DELIBERATELY NO `no-new-privileges:true` here — the other four services in
+      # this stack all have it (#95); telegraf is the documented exception.
+      #
+      # [[inputs.ping]] in the default "exec" mode shells out to /usr/bin/ping,
+      # which is non-root-usable only because the image ships it with the
+      # cap_net_raw file capability. no_new_privs makes the kernel ignore file
+      # capabilities on exec, so adding it here breaks the ping input: eight of
+      # the nine ping_* fields stop reporting and ping_result_code pins at 2
+      # ("fatal error") while the container stays up and every deploy stays green.
+      # That is exactly what happened when it was added, and why it is off again.
+      #
+      # Neither escape works, both measured on eq12_docker rather than assumed:
+      #   * cap_add: [NET_RAW] — the container runs as the non-root telegraf user,
+      #     and a capability added by docker lands only in the BOUNDING set for a
+      #     non-root process (measured: CapPrm/CapEff 0, CapBnd a80425fb). Docker
+      #     sets no ambient capabilities, so nothing reaches the process.
+      #   * method = "native" + net.ipv4.ping_group_range — telegraf 1.39's native
+      #     pinger opens a PRIVILEGED raw socket (there is no privileged/
+      #     unprivileged option on the plugin), so it fails with "enable CAP_NET_RAW
+      #     capabilities" no matter what the ping group range is. The unprivileged
+      #     ICMP-datagram path the sysctl unlocks is never taken.
+      # A non-root telegraf therefore cannot ping without the setuid/fscaps binary,
+      # and keeping the ping input is worth more than no_new_privs on this one
+      # container: internet-reachability data is the whole point of the input, and
+      # the container is already constrained by its non-root user and its resource
+      # limit. Revisit if telegraf ever exposes an unprivileged native pinger.
     # :? not :-  — a default here is a guess at a per-host gid (996 vs 990) and
     # a wrong one silently costs telegraf its docker metrics (#94).
     user: telegraf:${DOCKER_GID:?}
