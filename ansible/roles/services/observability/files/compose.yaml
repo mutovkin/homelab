@@ -233,9 +233,12 @@ services:
       # is not set anywhere either, so nothing else re-derives an /etc path.
       # What it cost: the whole host /etc — directory listing plus every
       # world-readable file in it — exposed to a floating `telegraf:latest` that
-      # Watchtower scans, for zero consumers. (The container already runs as
-      # telegraf:996 with no-new-privileges, so /etc/shadow was never readable;
-      # the rest of /etc was.) If a future input genuinely needs platform tagging,
+      # Watchtower scans, for zero consumers. (The container runs as the non-root
+      # telegraf user — see `user:` above — so /etc/shadow was never readable; the
+      # rest of /etc was. Note this service is the documented no-new-privileges
+      # carve-out, explained in security_opt above: the non-root uid is the ONLY
+      # thing that was bounding this mount, which is the argument for removing it
+      # rather than for keeping it.) If a future input genuinely needs platform tagging,
       # mount the single file it needs, not the tree:
       #   - /etc/os-release:/host/etc/os-release:ro
       TZ: ${TIMEZONE:-UTC}

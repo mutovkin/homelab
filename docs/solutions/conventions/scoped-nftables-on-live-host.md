@@ -94,7 +94,8 @@ included (never `roles:`-listed) by each consumer:
 ```
 
 Consumers today: `nut` (input variant), `services/portainer`,
-`services/vaultwarden`, `services/postgresql` (prerouting variant).
+`services/vaultwarden`, `services/postgresql`, `services/observability`
+(prerouting variant).
 
 Parameters that carry real decisions:
 
@@ -102,6 +103,7 @@ Parameters that carry real decisions:
 | --------- | ------- |
 | `nft_fw_hook` | `input` (priority -10) for a **host daemon** port — upsd; `prerouting` (-150) for a **docker-published** port. Getting this wrong is silent: an input hook never sees a DNAT'd flow. |
 | `nft_fw_ports` | `{port: [cidr, ...]}`. **Per-port**, deliberately: a source approved for pgAdmin's 10080 has no business on 5432. Asserted non-empty, integer keys, every source an IPv4 CIDR of prefix /1../32 — a structural check, so `0.0.0.0/0` and friends cannot sneak back in. |
+| `nft_fw_protocols` | Transports the ports are governed over; default `[tcp]`. A port that ALSO listens on UDP must pass `[tcp, udp]` — governing only TCP leaves the UDP half of the same port wide open, which for an unauthenticated write endpoint is the whole exposure back (observability's `:8089` InfluxDB line protocol, #122). Fail-open is preserved per protocol: the template emits one terminal `<proto> dport != {...} accept` per protocol and all of them come first, so a packet of a protocol NOT listed matches none of them, falls through and lands on `policy accept`. Adding a protocol can only ever narrow the governed set. |
 | `nft_fw_scope_guard` | `fib` → `fib daddr type != local accept` (default for prerouting); `host_addr` → `ip daddr != <addr> accept` plus a daddr-scoped final drop (postgres, whose host_addr is asserted to be a real address of the host — a drifted value makes the whole filter inert); `none` for the input variant. |
 | `nft_fw_lan_iface` | Adds the hairpin accept `iifname != <lan> ip saddr 172.16.0.0/12 accept`, so a container reaching the published port via the host address is admitted while a LAN packet with a **forged** 172.16/12 source still falls through to the drop. |
 | `nft_fw_drop_ipv6` | Needed when the final drop is IPv4-scoped (`scope_guard: host_addr`), which IPv6 would otherwise sail past. |
