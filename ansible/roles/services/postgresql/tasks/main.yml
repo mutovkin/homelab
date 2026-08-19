@@ -196,3 +196,26 @@
   when:
     - not ansible_check_mode
     - "'postgres' in postgres_restart_targets"
+
+# pgAdmin's listen port depends on its security context (no_new_privs strips the
+# cap_net_bind_service file capability its interpreter uses to bind :80, so the
+# entrypoint falls back to a high port) — see PGADMIN_LISTEN_PORT in
+# files/compose.yaml. Get that wrong and the container comes up listening where
+# nothing is published: it sits Up (unhealthy), `restart: unless-stopped` does not
+# restart on unhealthy, and the play still reports green. So prove the PUBLISHED
+# host port actually answers. Unconditional (not gated on a config change) because
+# what this guards is the publish/listen mapping itself, which every deploy
+# re-applies. localhost is correct: this task runs on the docker host.
+# 24 retries, not the sibling roles' 12 — pgAdmin's first-run/after-recreate boot
+# (setup.py schema check + gunicorn) is slower than postgres/frigate/lms, and its
+# own healthcheck allows a 30s start_period before even trying.
+- name: Wait for pgAdmin to answer on its published port
+  ansible.builtin.uri:
+    url: "http://localhost:{{ pgadmin_published_port }}/misc/ping"
+    status_code: 200
+  register: pgadmin_ready
+  until: pgadmin_ready is succeeded
+  retries: 24
+  delay: 5
+  changed_when: false
+  when: not ansible_check_mode

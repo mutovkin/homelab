@@ -158,6 +158,19 @@ misspelled (`PGL…`) and therefore inert, so live pgAdmin has always run in its
 desktop mode and *removed* authentication from a LAN-reachable UI, the opposite of what
 this change is for. Deleting the line freezes the correct live behavior.
 
+**`PGADMIN_LISTEN_PORT: 8080` is load-bearing under `no-new-privileges`.** `dpage/pgadmin4`
+runs as non-root uid 5050 and reaches the default port 80 only through a file capability
+(`cap_net_bind_service` on `/usr/local/bin/python3-cap`). `no_new_privs` makes the kernel
+ignore file capabilities at `execve`, and the image's entrypoint reacts by dropping to the
+un-capped interpreter and — *only if `PGADMIN_LISTEN_PORT` is unset* — defaulting itself to
+8080. Left unset, the container's listen port would silently depend on whether nnp is
+applied, while the publish and the healthcheck stayed pinned to `:80`: `Up (unhealthy)`,
+no restart (`unless-stopped` ignores unhealthy) and a green deploy. Pinning it makes the
+port deterministic under either security context. The HOST port is unchanged (`10080`), so
+NPM's upstream and `postgres_firewall.ports` need no edit — but the role now probes
+`http://localhost:10080/misc/ping` after every deploy so a broken publish/listen mapping
+fails the play instead of reporting green.
+
 **Deliberately deferred:** fronting pgAdmin with NPM/TLS. `10080` is still plaintext
 HTTP, now reachable only from the allowlisted sources.
 
