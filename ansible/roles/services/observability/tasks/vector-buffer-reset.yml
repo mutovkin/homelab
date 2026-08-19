@@ -62,6 +62,18 @@
 # docker_container returns on issuance, not on service: a container that starts and
 # immediately crash-loops on a malformed vector.yaml would still leave the task green.
 # Re-read the live state and assert it.
+#
+# The wait is not padding. Vector exits about a second after a malformed
+# vector.yaml, so an inspect issued immediately after `state: started` lands inside
+# that window as often as not and reads `Running: true` on a container that is
+# already dying — the assert below would then catch the crash-loop only by luck.
+# Sleeping past the crash window (and past docker's first restart backoff) is what
+# turns "sometimes" into "always". Shares observability_settle_seconds with the
+# config-change gate in main.yml so there is one number, not two.
+- name: Let Vector run long enough to crash on a bad config
+  ansible.builtin.wait_for:
+    timeout: "{{ observability_settle_seconds }}"
+
 - name: Re-inspect Vector after the reset
   community.docker.docker_container_info:
     name: vector
@@ -73,7 +85,7 @@
       - vector_after_reset.exists
       - vector_after_reset.container.State.Running
     fail_msg: >-
-      Vector is not running after the buffer reset — the buffer was cleared but the
-      container did not come back up. Check `docker logs vector`; the wedge may not
-      have been the buffer.
+      Vector is not running {{ observability_settle_seconds }}s after the buffer
+      reset — the buffer was cleared but the container did not stay up. Check
+      `docker logs vector`; the wedge may not have been the buffer.
     success_msg: "Vector restarted on an empty disk buffer."
