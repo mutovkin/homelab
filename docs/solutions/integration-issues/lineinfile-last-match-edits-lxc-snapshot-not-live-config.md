@@ -305,6 +305,34 @@ backup catches everything else after it does. And because the reboot keys off th
 - **`ansible-lint` cannot parse Jinja `{% %}` inside a freeform `ansible.builtin.shell: |`.**
   Use the `shell:` → `cmd:` sub-key form whenever a shell body templates control flow.
 
+## The sibling that was missed
+
+The first pass migrated only `lxc-gpu-passthrough.yml`. The same role carried a second
+`lineinfile` against the same files — *"Disable AppArmor for privileged LXC containers
+(required for Docker)"*, keyed `^lxc\.apparmor\.profile:` — and it is a strictly worse
+instance of the trap, because its failure is not "the CT loses a GPU" but "Docker will not
+start at all": the live section stays confined and `apparmor_parser: Access denied` comes
+back. Its guest set is `unprivileged: false`, which today is CT 201 alone — the very
+container whose `[preissue77]` / `[pve:pending]` sections make the last-match rewrite real.
+
+It is now `lxc-apparmor-unconfined.yml`, with the same six fixtures. Two deliberate
+differences from the GPU file:
+
+- **Not folded into the GPU reconcile's `desired` array.** That file loops over
+  `gpu_sharing: true` guests; this one over `unprivileged: false` guests. They coincide on
+  CT 201 today, and folding would have silently meant that a future privileged CT without a
+  GPU never gets unconfined — the same "applies to a different guest set" bug in a new place.
+- **No `pct reboot`.** `lxc.apparmor.profile` is single-valued, so a stale line is
+  unambiguously replaced rather than counted as a possibly-deliberate extra; but it is read
+  at container *start*, and the task runs immediately before "Start LXC containers". A
+  stopped CT picks it up there; for a running one the task prints an explicit
+  "still confined until `pct reboot`" warning instead of bouncing the fleet's Docker host
+  mid-play.
+
+**Generalised rule:** when a pattern is disqualified, grep the whole repo for it in the same
+change. `grep -rn "lineinfile" ansible/roles/proxmox_guests/` was a five-second check that
+would have caught this a batch earlier.
+
 ## Related Issues
 
 - #98 — GPU passthrough keying; this fix. #94 — the correctness batch it rode in on. Item 5 of
