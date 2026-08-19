@@ -99,9 +99,15 @@ Hard-won lessons — check here before debugging from scratch.
   is the privileged-CT half of the fix and is applied only where `docker_lxc: true`
   (n5pro_docker, CT 201); unprivileged CT 101 does not see the host's AppArmor and
   needs no mask — don't "fix" eq12 by adding one. The per-service `security_opt` is
-  fleet-wide regardless, and #95 added `no-new-privileges:true` alongside it on every
-  service (in-container escalation defense matters more here precisely because AppArmor
-  is unconfined) — new services need both lines.
+  fleet-wide regardless, and #95 added `no-new-privileges:true` alongside it (in-container
+  escalation defense matters more here precisely because AppArmor is unconfined) — new
+  services need both lines. **One documented exception, and it is the shape of the trap:**
+  `no_new_privs` strips setuid/fscaps at `execve`, so telegraf silently lost `/usr/bin/ping`
+  — eight ping metrics went to NO DATA while the container stayed healthy. Any container
+  whose function depends on a setuid binary needs the same carve-out (record the failed
+  alternatives beside it; for telegraf, `ping_group_range` cannot work under the LXC userns
+  map and its native pinger still needs raw sockets). After adding the line, verify the
+  app's own OUTPUT, not just that it started.
 - **AppArmor 4.1 / PVE 9 ABI regression (host profiles).** PVE 9's AppArmor 4.1 default
   ABI enforces fine-grained `AF_UNIX` mediation that older bundled profiles (e.g.
   `dhclient`) predate, so unix sockets are denied (`failed protocol match`) — flooding the
