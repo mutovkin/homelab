@@ -37,10 +37,9 @@ Everything deploys via `task deploy:full` (= `ansible-playbook playbooks/site.ym
 homelab/
 ├── CLAUDE.md / AGENTS.md   # this file (AGENTS.md is a symlink)
 ├── README.md               # human-facing overview, service tables
-├── ONBOARDING.md           # bring existing infra under Ansible safely
 ├── CONCEPTS.md             # shared domain vocabulary (entities, processes, status concepts)
 ├── Taskfile.yml            # task runner — see Key Commands
-├── docs/                   # architecture.md, eq12.md, n5pro.md, ups.md
+├── docs/                   # architecture.md, onboarding.md, eq12.md, n5pro.md, ups.md
 │   └── solutions/          # documented fixes to past problems, by category, with YAML frontmatter (module, tags, problem_type)
 └── ansible/
     ├── inventory/          # hosts.yml, group_vars/, host_vars/ (+ vault.yml)
@@ -96,7 +95,13 @@ Hard-won lessons — check here before debugging from scratch.
   kernel and tries to load its `docker-default` profile, failing with
   `apparmor_parser: Access denied`. Fixes (both applied): the `docker_host` role masks
   AppArmor *before* configuring/starting Docker, and every compose service sets
-  `security_opt: ["apparmor:unconfined"]`. New services must include this.
+  `security_opt: ["apparmor:unconfined"]`. New services must include this. The **mask**
+  is the privileged-CT half of the fix and is applied only where `docker_lxc: true`
+  (n5pro_docker, CT 201); unprivileged CT 101 does not see the host's AppArmor and
+  needs no mask — don't "fix" eq12 by adding one. The per-service `security_opt` is
+  fleet-wide regardless, and since #95 every service carries `no-new-privileges:true`
+  alongside it (in-container escalation defense matters more here precisely because
+  AppArmor is unconfined).
 - **AppArmor 4.1 / PVE 9 ABI regression (host profiles).** PVE 9's AppArmor 4.1 default
   ABI enforces fine-grained `AF_UNIX` mediation that older bundled profiles (e.g.
   `dhclient`) predate, so unix sockets are denied (`failed protocol match`) — flooding the
@@ -247,6 +252,6 @@ Hard-won lessons — check here before debugging from scratch.
 ## Further Reading
 
 - **[README.md](README.md)** — service inventory, ports, secrets strategy.
-- **[ONBOARDING.md](ONBOARDING.md)** — migrating live infra under Ansible without downtime;
-  Ansible glossary for newcomers.
+- **[docs/onboarding.md](docs/onboarding.md)** — migrating live infra under Ansible without
+  downtime; Ansible glossary for newcomers. (Its Portainer-migration step is historical.)
 - **[docs/architecture.md](docs/architecture.md)** — full network/port/topology reference.
