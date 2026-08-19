@@ -16,12 +16,21 @@
 # role's files/ is removed from the host (this is what retires portainer.sh,
 # sample.ini and the old <svc>.yml compose filenames). Excluded files (.env and
 # README.md) are protected from deletion by rsync's exclude rules.
+#
+# verify_host/use_ssh_args: synchronize defaults verify_host=false, which injects
+# -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null and ignores our
+# ansible.cfg ssh_args entirely — so the rsync channel accepted any host key even
+# after #94 pinned the main connection (TOFU). These two options put rsync on the
+# same footing. The play's normal ssh connection has already run by this point, so
+# the key is pinned in known_hosts before rsync ever dials (#94).
 - name: Synchronize deploy payload for {{ svc }}
   become: false
   ansible.posix.synchronize:
     src: "{{ role_path | dirname }}/{{ svc }}/files/"
     dest: "{{ svc_deploy_dir }}/"
     delete: true
+    verify_host: true
+    use_ssh_args: true
     rsync_opts: "{{ ['--exclude=.env', '--exclude=README.md'] + svc_rsync_extra }}"
 
 - name: Template .env for {{ svc }}

@@ -89,6 +89,9 @@
     dest: "{{ data_mount }}/grafana/provisioning/"
     delete: true
     times: false
+    # Pin the rsync channel's host key too — see _deploy's synchronize (#94).
+    verify_host: true
+    use_ssh_args: true
     rsync_opts:
       - "--checksum"
   register: grafana_provisioning
@@ -103,6 +106,9 @@
     dest: "{{ data_mount }}/grafana/dashboards/"
     delete: true
     times: false
+    # Pin the rsync channel's host key too — see _deploy's synchronize (#94).
+    verify_host: true
+    use_ssh_args: true
     rsync_opts:
       - "--checksum"
 
