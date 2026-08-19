@@ -187,6 +187,9 @@
   register: hostonly_bridge_json
   failed_when: false
   changed_when: false
+  # Read-only probe: must run under --check too, or the facts below are derived
+  # from an empty stdout and every downstream task reports phantom drift (#125).
+  check_mode: false
   when: hostonly_bridge is defined
 
 - name: Set fact for bridge existence and current IP
@@ -204,6 +207,20 @@
   ansible.builtin.set_fact:
     hostonly_bridge_exists: "{{ hostonly_bridge_json.rc == 0 }}"
     hostonly_bridge_current_ip: "{{ _bridge_addr | regex_replace('/.*$', '') }}"
+  when: hostonly_bridge is defined
+
+# Says out loud what the apply tasks below would do, so a --check run reports a
+# verdict instead of leaving the reader to infer it from skipped tasks (#125).
+- name: Report host-only bridge drift verdict
+  ansible.builtin.debug:
+    msg: >-
+      {{ hostonly_bridge }}:
+      {{ 'MISSING — a live run would create it and reload networking'
+         if not hostonly_bridge_exists
+         else ('IP drift ' ~ hostonly_bridge_current_ip ~ ' -> ' ~ hostonly_host_ip ~
+               ' — a live run would reassign and reload networking'
+               if hostonly_bridge_current_ip != hostonly_host_ip
+               else 'present and converged (' ~ hostonly_bridge_current_ip ~ ')') }}
   when: hostonly_bridge is defined
 
 - name: Backup /etc/network/interfaces before making changes
