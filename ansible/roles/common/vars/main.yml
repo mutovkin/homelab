@@ -17,6 +17,10 @@ common_role_required_packages:
   # sent. Kept here so enabling mail is a one-line config change, not a
   # rediscovery that the package was missing.
   - apt-listchanges
+  # Writes /var/log/syslog (and auth.log/kern.log) from /dev/log. Without it the
+  # host is journald-only and Unattended-Upgrade::SyslogEnable — plus the whole
+  # Vector host_logs file source — has no file to land in (#99).
+  - rsyslog
   # Only a hard requirement for community.docker's `definition:` mode, which
   # this repo does not use (all 11 docker_compose_v2 calls pass `project_src:`).
   # Kept as insurance so switching to inline definitions cannot break a deploy.
