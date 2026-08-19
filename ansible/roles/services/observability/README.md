@@ -61,7 +61,7 @@ After evaluating various solutions, the VictoriaMetrics ecosystem was chosen for
 | -------------------- | ----------------------------------------------------------------- | ----------------------------------------------- |
 | **VictoriaMetrics**  | 8428 (HTTP/UI)<br>8089 (InfluxDB)<br>2003 (Graphite)<br>4242 (OpenTSDB) | Time-series database for metrics storage        |
 | **VictoriaLogs**     | 9428 (HTTP/UI)                                                    | High-performance log aggregation and storage    |
-| **Vector**           | 8686 (GraphQL API)                                                | High-performance log collection and routing     |
+| **Vector**           | none (API not enabled)                                            | High-performance log collection and routing     |
 | **Telegraf**         | -                                                                 | Metrics collection (SNMP, Docker, system)       |
 | **Grafana**          | 3000 (Web UI)                                                     | Unified visualization dashboard                 |
 

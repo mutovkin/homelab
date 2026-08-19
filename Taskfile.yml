@@ -108,8 +108,11 @@ tasks:
     cmds:
       # Both docker hosts — the task claimed "across hosts" while only ever
       # showing eq12's, so n5pro-docker's containers were invisible here (#94).
+      # ignore_error so a host that is down still lets the other one print —
+      # covering both hosts was the whole point of the fix.
       - for: ["deb-docker.lan", "n5pro-docker.lan"]
         cmd: echo "=== {{.ITEM}} ===" && ssh root@{{.ITEM}} 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'
+        ignore_error: true
 
   # === Vault ===
   vault:edit:
