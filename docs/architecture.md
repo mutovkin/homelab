@@ -102,6 +102,14 @@ eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
     recordings and other media once those stacks land (#91)
 - **Configuration**: LAN IPs templated into `.env` files by Ansible using inventory variables
 
+### LAN Address Ranges
+
+| Range | Role | Notes |
+| ----- | ---- | ----- |
+| 192.168.25.0/24 | EQ12 infrastructure | `pve` .5, deb-docker (CT 101) .15, NPM (CT 104) .20 |
+| 192.168.30.0/24 | N5 Pro infrastructure | `n5pro` .5, n5pro-docker (CT 201) .15 |
+| 192.168.48.0/24 | Operator workstations | Static/infra range, **not** a DHCP pool. Permanent grant in every scoped nftables allowlist (postgres/portainer/vaultwarden) and in PostgreSQL's `pg_hba.conf`, so an operator can reach the admin surfaces directly (#79, #114). |
+
 ## GPU Device Passthrough (N5 Pro)
 
 The N5 Pro Docker LXC (CT-201) has `/dev/dri` device passthrough configured via the
