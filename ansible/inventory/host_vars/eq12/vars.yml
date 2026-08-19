@@ -16,7 +16,6 @@ nut_client:
 
 # Proxmox
 proxmox_node: pve
-proxmox_api_url: "https://{{ ansible_host }}:8006"
 
 # Hardware
 total_ram_gb: 16

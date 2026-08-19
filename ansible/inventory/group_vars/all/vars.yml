@@ -4,23 +4,10 @@
 # Timezone
 timezone: America/Los_Angeles
 
-# DNS
-dns_servers:
-  - 1.1.1.1
-  - 8.8.8.8
-
-# NTP
-ntp_servers:
-  - 0.pool.ntp.org
-  - 1.pool.ntp.org
-
 # `common_packages` lives in roles/common/defaults/main.yml. Setting it here
 # REPLACES the whole list (this is how #77 happened) — edit the role default
 # instead. Role-required packages are in roles/common/vars/main.yml and cannot
 # be overridden from inventory.
-
-# Docker network defaults
-docker_network_base: "172.20.0.0" # All Docker networks use 172.x.x.x
 
 # Watchtower schedule
 watchtower_schedule: "0 30 4 * * *" # Daily at 4:30 AM

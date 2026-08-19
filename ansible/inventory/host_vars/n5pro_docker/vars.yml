@@ -60,11 +60,6 @@ docker_default_address_pools:
   - base: "172.18.0.0/15"
     size: 24
 
-# NFS mount from TrueNAS (for Frigate recordings, media storage)
-truenas_nfs_server: "192.168.30.200"  # TrueNAS IP — update once assigned
-truenas_media_share: "/mnt/pool/media"
-truenas_frigate_share: "/mnt/pool/frigate"
-
 # Host-only NFS (vmbr2) — dedicated path for container NFS volumes
 truenas_hostonly_ip: "10.99.99.2"  # TrueNAS IP on vmbr2 (manual config in TrueNAS)
 truenas_music_share: "/mnt/vault/media/music/lossless"

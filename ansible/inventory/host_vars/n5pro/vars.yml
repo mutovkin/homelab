@@ -7,7 +7,6 @@
 
 # Proxmox
 proxmox_node: n5pro
-proxmox_api_url: "https://{{ ansible_host }}:8006"
 
 # Hardware
 total_ram_gb: 96
@@ -112,7 +111,6 @@ kernel_cmdline_extra:
 
 # Network
 proxmox_bridge: vmbr1 # 10GbE (Aquantia AQC113) — primary management
-proxmox_bridge_secondary: vmbr0 # 5GbE (Realtek RTL8126) — DHCP internet
 
 # Host-only bridge for NFS traffic (TrueNAS <-> Docker LXC)
 # No physical NIC attached — traffic stays in RAM, never hits the network
