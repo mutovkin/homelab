@@ -181,7 +181,7 @@ git push
 
 All `*.pub` files in `ansible/files/ssh_keys/` are deployed to every managed host's
 `~root/.ssh/authorized_keys` on the next playbook run. See
-[ansible/files/ssh_keys/README.md](ansible/files/ssh_keys/README.md) for details.
+[ansible/files/ssh_keys/README.md](../ansible/files/ssh_keys/README.md) for details.
 
 > **Tip:** Run this on both your Mac and your Omarchy PC, then `git pull` on the
 > other machine so both keys are in the repo before the first Ansible run.
@@ -456,6 +456,15 @@ something you're currently using, stop and investigate before proceeding.
 ---
 
 ## Step 6 — Migrate Stacks from Portainer to Ansible
+
+> **HISTORICAL — this migration is done.** Every stack in this repo is deployed by
+> Ansible today (`ansible/roles/services/*`, via `task deploy:services`); Portainer
+> runs as a read-mostly UI, not as the deployer. Nothing below needs doing on the
+> current fleet. It is kept because it is the runbook for the *shape* of the problem —
+> adopting containers some other tool is managing without losing their volumes — and
+> for the record of how these services came under Ansible. Skip to
+> [Step 7](#step-7--dry-run-service-deployment) unless you are onboarding a stack that
+> is still Portainer-managed.
 
 Your Docker containers are currently managed via Portainer's "Stacks" feature.
 Portainer stores its compose files inside the `portainer_data` Docker volume and

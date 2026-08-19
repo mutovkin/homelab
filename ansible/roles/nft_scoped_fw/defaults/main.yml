@@ -1,0 +1,69 @@
+---
+# Shared scoped fail-open nftables allowlist (#114).
+# One table per consumer; every parameter is passed by the including role via
+# `include_role: … vars:` so nothing here is host-specific.
+# See docs/solutions/conventions/scoped-nftables-on-live-host.md.
+
+# Short name — the whole identity of the instance derives from it:
+#   table  inet <name>_fw
+#   file   /etc/nftables.d/<name>-firewall.nft
+#   unit   <name>-firewall.service
+# No default: an unset name must fail the assert, not silently manage a table
+# called `_fw`.
+nft_fw_name: ""
+
+# systemd unit Description.
+nft_fw_description: "{{ nft_fw_name }} scoped firewall (Ansible-managed nftables table inet {{ nft_fw_name }}_fw)"
+
+# Per-port allowlist: {port: [ipv4 cidr, ...]}. A source listed under one port
+# gets NO access to the others — that per-port scoping is the point (#114).
+nft_fw_ports: {}
+
+# Transports the ports above are governed over. `tcp` covers every consumer whose
+# port is TCP-only; a consumer whose port ALSO listens on UDP must pass
+# [tcp, udp] — governing only TCP there leaves the UDP half of the same port wide
+# open, which for an unauthenticated write endpoint is the whole exposure back
+# (observability's :8089 InfluxDB line protocol, #122).
+#
+# Fail-open is preserved per protocol, not globally: the template emits one
+# terminal `<proto> dport != {...} accept` per protocol, and ALL of them come
+# first, before the scope guard and every other accept. Each rule carries an
+# implicit l4proto dependency, so a packet of a protocol NOT in this list matches
+# none of them, falls through every rule in the chain and lands on `policy
+# accept`. Adding a protocol therefore only ever narrows the governed set; it can
+# never make the table fail closed for traffic it does not govern.
+nft_fw_protocols: [tcp]
+
+# `input` (priority -10) for a HOST daemon's port; `prerouting` (priority -150,
+# i.e. before docker's dstnat at -100) for a DOCKER-PUBLISHED port — an input
+# hook is silently inert for those. See
+# docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md
+nft_fw_hook: prerouting
+nft_fw_priority: "{{ -150 if nft_fw_hook == 'prerouting' else -10 }}"
+
+# How the chain decides a packet is "addressed to this host":
+#   fib       — `fib daddr type != local accept` (portainer/vaultwarden)
+#   host_addr — `ip daddr != <nft_fw_host_addr> accept`, and the final drop is
+#               scoped to that address too (postgres)
+#   none      — no scoping (input hook: the kernel already delivered it to us)
+nft_fw_scope_guard: "{{ 'fib' if nft_fw_hook == 'prerouting' else 'none' }}"
+
+# Required by, and only used by, scope_guard: host_addr. Asserted to be a real
+# address of this host — a drifted value makes the whole filter inert.
+nft_fw_host_addr: ""
+
+# When set, adds the hairpin accept: a local container reaching a published port
+# via the host address arrives on a docker bridge, never on the LAN iface, so
+# `iifname != <lan_iface> ip saddr 172.16.0.0/12 accept` admits it while a LAN
+# packet carrying a FORGED 172.16/12 source still falls through to the drop.
+nft_fw_lan_iface: ""
+
+# Drop the governed ports over IPv6 wholesale (the allowlists are IPv4-only).
+# The `fib`/plain variants already drop IPv6 via their final family-agnostic
+# drop rule; set this where the final drop is IPv4-scoped (scope_guard:
+# host_addr) and IPv6 would otherwise sail past it.
+nft_fw_drop_ipv6: false
+
+# Ordering only, never a dependency (fail-open): publish the rules before docker
+# starts exposing ports.
+nft_fw_before_docker: "{{ nft_fw_hook == 'prerouting' }}"

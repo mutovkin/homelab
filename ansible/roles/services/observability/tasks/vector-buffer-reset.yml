@@ -1,0 +1,91 @@
+---
+# Opt-in, DESTRUCTIVE: discards Vector's on-disk buffer and file checkpoints (#108).
+#
+# Reached only via `--tags vector_buffer_reset` (the include in main.yml carries the
+# `never` tag). Every ordinary deploy skips this file entirely.
+#
+# What it costs: whatever is still queued in the buffer is lost, and the file source
+# checkpoints go with it — vector re-reads /var/log/* from wherever its `read_from`
+# setting says to start, so a window of host logs is duplicated or skipped. That is
+# the price of unwedging; do not run it as routine maintenance.
+#
+# Why the CONTENTS and never the directory itself: /data/vector/data is bind-mounted
+# into the container. Removing the directory would leave the mount pointing at a
+# deleted inode until the container is recreated — and Ansible would recreate it
+# root-owned with a fresh mode, which is exactly the "never chown /data/vector"
+# footgun #109 documents. Delete what is inside it and leave the mountpoint alone.
+
+- name: Assert the Vector data directory exists before wiping its contents
+  ansible.builtin.stat:
+    path: "{{ data_mount }}/vector/data"
+  register: vector_buffer_dir
+
+- name: Fail if the Vector data directory is missing
+  ansible.builtin.assert:
+    that:
+      - vector_buffer_dir.stat.exists
+      - vector_buffer_dir.stat.isdir
+    fail_msg: >-
+      {{ data_mount }}/vector/data does not exist (or is not a directory), so there
+      is no buffer to reset. Deploy the observability stack normally first.
+    quiet: true
+
+# Stopped, not restarted-after: vector holds the buffer's data files open and
+# rewrites its checkpoint on shutdown. Deleting underneath a running process leaves
+# it writing to unlinked inodes and re-creating the exact state we are clearing.
+- name: Stop Vector so its buffer files are not held open
+  community.docker.docker_container:
+    name: vector
+    state: stopped
+
+- name: Find the Vector buffer contents
+  ansible.builtin.find:
+    paths: "{{ data_mount }}/vector/data"
+    file_type: any
+    hidden: true
+    recurse: false
+  register: vector_buffer_contents
+
+- name: Remove the Vector buffer contents
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ vector_buffer_contents.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Start Vector on the empty buffer
+  community.docker.docker_container:
+    name: vector
+    state: started
+
+# docker_container returns on issuance, not on service: a container that starts and
+# immediately crash-loops on a malformed vector.yaml would still leave the task green.
+# Re-read the live state and assert it.
+#
+# The wait is not padding. Vector exits about a second after a malformed
+# vector.yaml, so an inspect issued immediately after `state: started` lands inside
+# that window as often as not and reads `Running: true` on a container that is
+# already dying — the assert below would then catch the crash-loop only by luck.
+# Sleeping past the crash window (and past docker's first restart backoff) is what
+# turns "sometimes" into "always". Shares observability_settle_seconds with the
+# config-change gate in main.yml so there is one number, not two.
+- name: Let Vector run long enough to crash on a bad config
+  ansible.builtin.wait_for:
+    timeout: "{{ observability_settle_seconds }}"
+
+- name: Re-inspect Vector after the reset
+  community.docker.docker_container_info:
+    name: vector
+  register: vector_after_reset
+
+- name: Assert Vector is running after the buffer reset
+  ansible.builtin.assert:
+    that:
+      - vector_after_reset.exists
+      - vector_after_reset.container.State.Running
+    fail_msg: >-
+      Vector is not running {{ observability_settle_seconds }}s after the buffer
+      reset — the buffer was cleared but the container did not stay up. Check
+      `docker logs vector`; the wedge may not have been the buffer.
+    success_msg: "Vector restarted on an empty disk buffer."

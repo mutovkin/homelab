@@ -95,37 +95,78 @@ Two honest caveats on the deliberate-update story:
   only removes the old image after an update it actually performed. Superseded pulls
   become dangling and are reclaimed by a periodic `docker image prune -f`; what remains
   is at most one pending tagged image per monitor-only service, which is bounded and
-  disappears the moment the update is deployed. (Suppressing the pull with a no-pull
-  label was considered and rejected — it would also suppress the digest comparison,
-  i.e. the notification, which is the entire point of the class.)
+  disappears the moment the update is deployed. Suppressing the pull with a no-pull
+  label stays **rejected**, and this is now verified rather than assumed — see below.
+
+#### `no-pull` verified against the fork's source at v1.20.3 (#121c)
+
+`com.centurylinklabs.watchtower.no-pull` (equivalently `--no-pull` /
+`WATCHTOWER_NO_PULL`) suppresses **all registry contact** for the staleness check. It
+does not fall back to a registry-side manifest/HEAD digest comparison, so a
+`monitor-only` + `no-pull` container would be scanned, found "not stale", and produce
+**no notification** — the exact silent-staleness failure the monitor-only class exists
+to prevent. Rejected, permanently.
+
+Verified by reading the fork's source at tag `v1.20.3` (not the docs alone):
+
+- `pkg/container/image.go` — both staleness entry points gate on the same check.
+  `IsContainerStale`: `if sourceContainer.IsNoPull(params) { return
+  c.checkLocalImageStaleness(ctx, sourceContainer, clog) }` *before* `PullImage`. The
+  newer registry-HEAD path `CheckContainerUpdate` carries the **identical** gate ahead
+  of `digest.CompareDigestWithRemote`, so no code path reaches a remote digest
+  comparison with no-pull set.
+- `checkLocalImageStaleness` → `HasNewImage`, whose only lookup is
+  `c.api.ImageInspect(ctx, sourceContainer.ImageName())` — the local daemon's image
+  cache. With nothing else pulling on the host it can only ever return "no new image".
+- Fork docs, *Update Behavior → Disable Image Pulling*: "Prevents pulling new images
+  from registries, monitoring only local image cache changes… The HTTP API `/v1/check`
+  endpoint also respects no-pull and inspects the local cache only."
+  (<https://nicholas-fedor.github.io/watchtower/>, source at
+  `docs/configuration/update-behavior/index.md` on the `v1.20.3` tag.)
+
+So the pull traffic and the bounded image accumulation are the **price of the
+notification**, not an incidental cost that a label could remove. Checked 2026-08-18
+against v1.20.3, and re-checked at **v1.21.0** during that bump — `pkg/container/image.go`
+still carries the `IsNoPull` gate on both entry points, ahead of
+`digest.CompareDigestWithRemote`. Re-verify only if the fork changes its staleness path.
 
 ### Watchtower's own image is pinned
 
-`image: nickfedor/watchtower:1.20.3` — not `:latest`. This container holds
+`image: nickfedor/watchtower:1.21.0` — not `:latest`. This container holds
 `/var/run/docker.sock` read-write and can restart every other container on the host, and
 it is a community fork of an upstream archived in 2025-12. Letting it pull and execute
 its own new `latest` unattended makes the whole fleet trust an unreviewed image. Pinned,
 a version bump is a compose edit in git.
 
-`1.20.3` is an immutable release tag, so — unlike every other monitor-only service —
+`1.21.0` is an immutable release tag, so — unlike every other monitor-only service —
 **Watchtower will not email us about its own new releases.** It only ever checks
-`nickfedor/watchtower:1.20.3`; a published `1.20.4` is invisible to it. Its
+`nickfedor/watchtower:1.21.0`; a published `1.21.1` is invisible to it. Its
 `monitor-only` label is there to cover the one residual unattended path the pin leaves
-open (a re-pushed `1.20.3`), not to provide notifications.
+open (a re-pushed `1.21.0`), not to provide notifications.
 
-Checking for a new version is therefore a deliberate, manual step against
-<https://github.com/nicholas-fedor/watchtower/releases>. **That URL is correct as
+Checking for a new version is therefore a deliberate step against
+<https://github.com/nicholas-fedor/watchtower/releases> — automated as a reminder by
+`.github/workflows/watchtower-release-watch.yml` (#121b), which reads the pinned tag
+straight out of `files/compose.yaml` every Monday and **fails** the run while it is
+behind the latest upstream release. The failing check is the reminder; the bump itself
+stays a human decision made with the release notes open. **That URL is correct as
 written** — the fork's GitHub org is `nicholas-fedor` while its Docker Hub namespace is
 `nickfedor`. The two do not match, `https://github.com/nickfedor/...` 404s, and an
 unclaimed namespace next to a supply-chain-sensitive image is precisely what this posture
 exists to defend against. Do not "correct" it to match the image reference.
 
-To bump: edit the tag in `files/compose.yaml`, update the digest in the comment above it,
-then
+To bump (the release-watch job above tells you when): edit the tag in
+`files/compose.yaml`, update the digest in the comment above it, then
 `task deploy:service -- --tags watchtower` and confirm the next session still reports the
 expected `scanned=N`. (Digest-pinning instead of a tag was considered and not taken: it
 costs readability and `monitor-only` already prevents the unattended path. A deliberate
-deploy would still adopt a re-pushed `1.20.3`.)
+deploy would still adopt a re-pushed `1.21.0`.)
+
+#### Bump log
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-08-19 | 1.20.3 → 1.21.0 | First bump driven by the release-watch job, which went red the day it landed. Release delta is fixes plus one behavioural change worth knowing: **logging moved from logrus to zerolog** (#2128), so log *format* changed — the `Update session completed … scanned=N` line survives it (re-verified by probe on both hosts), but anything parsing watchtower logs by shape should be re-checked. Notification field validation was tightened (#2124) and shoutrrr went to v0.17.1; our `smtp://` URL still starts clean. No change to `enable` / `monitor-only` / `WATCHTOWER_LABEL_ENABLE` semantics, so the posture model above is untouched. |
 
 ### Verification
 
@@ -154,7 +195,7 @@ This is the check to use right after a label change:
 docker run --rm \
   --security-opt apparmor=unconfined \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  nickfedor/watchtower:1.20.3 \
+  nickfedor/watchtower:1.21.0 \
   --run-once --monitor-only --label-enable --no-startup-message 2>&1 \
   | grep 'Update session completed'
 ```

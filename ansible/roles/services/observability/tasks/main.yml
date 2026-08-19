@@ -38,6 +38,35 @@
     - vault_grafana_user
     - vault_grafana_password
 
+# --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
+# --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
+# (--httpAuth.* guards :8428 only), published on tcp AND udp, on 0.0.0.0/[::]. Its
+# only intended client is the Home Assistant VM. Hence nft_fw_protocols: [tcp, udp] —
+# governing only TCP would leave the UDP half of the same unauthenticated write port
+# wide open. The read ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately not
+# governed: NPM and operator workstations must keep reaching them.
+#
+# Implemented by the shared nft_scoped_fw role (#114) rather than a fork of it — the
+# fail-open table, prerouting hook, drift probe and self-heal all live there. See
+# docs/solutions/conventions/scoped-nftables-on-live-host.md.
+#
+# observability_firewall (lan_iface/ports) comes from host_vars; deliberately NO role
+# defaults — a host that deploys this role without defining it must fail loudly, not
+# silently publish an open write port.
+- name: Restrict the unauthenticated InfluxDB ingest port to its writer
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: observability
+    nft_fw_description: Observability ingest firewall (Ansible-managed nftables table inet observability_fw)
+    nft_fw_ports: "{{ observability_firewall.ports }}"
+    nft_fw_protocols: [tcp, udp]
+    # Default for the prerouting hook anyway; stated because the choice matters —
+    # at -150 daddr is still pre-DNAT, so container egress to some external :8089
+    # is non-local and exits before the drop.
+    nft_fw_scope_guard: fib
+    nft_fw_lan_iface: "{{ observability_firewall.lan_iface }}"
+
 - name: Stat Docker socket
   ansible.builtin.stat:
     path: /var/run/docker.sock
@@ -89,6 +118,9 @@
     dest: "{{ data_mount }}/grafana/provisioning/"
     delete: true
     times: false
+    # Pin the rsync channel's host key too — see _deploy's synchronize (#94).
+    verify_host: true
+    use_ssh_args: true
     rsync_opts:
       - "--checksum"
   register: grafana_provisioning
@@ -103,6 +135,9 @@
     dest: "{{ data_mount }}/grafana/dashboards/"
     delete: true
     times: false
+    # Pin the rsync channel's host key too — see _deploy's synchronize (#94).
+    verify_host: true
+    use_ssh_args: true
     rsync_opts:
       - "--checksum"
 
@@ -112,6 +147,35 @@
   vars:
     svc: observability
 
+# Single source of truth for the restart decision, shared by the check-mode
+# preview, the restart itself and the readiness gates (postgresql/lms/frigate
+# precedent). Deliberately NO default() on grafana_provisioning.changed: if that
+# register is renamed this must fail loudly rather than silently decide Grafana
+# needs no restart — provisioning would then never load and the play would still
+# report converged, the do-nothing failure mode #78 is about. (The `default([])`
+# on observability_configs.results guards a different thing: a legitimately
+# skipped copy loop, not a typo'd name.)
+- name: Determine observability containers to restart for changed config
+  vars:
+    _targets: >-
+      {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
+          + (['grafana'] if grafana_provisioning.changed else [])) | unique }}
+  ansible.builtin.set_fact:
+    observability_restart_targets: "{{ _targets }}"
+    # grafana has its own HTTP gate below; these two are gated on staying alive.
+    observability_settle_targets: "{{ _targets | reject('equalto', 'grafana') | list }}"
+
+# --check must surface the restart; the restart task itself is necessarily
+# skipped in check mode.
+- name: Preview config-change restart (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      Config change WILL RESTART on real apply: {{ observability_restart_targets }}
+      (brief gap in metrics/logs ingestion and, for grafana, in the UI).
+  when:
+    - ansible_check_mode
+    - observability_restart_targets | length > 0
+
 # Compose does not track the contents of bind-mounted files, so a config change on
 # its own never restarts the container. Restart the affected services explicitly,
 # after the stack exists so this also works on a first deploy.
@@ -120,9 +184,96 @@
     name: "{{ item }}"
     state: started
     restart: true
-  loop: >-
-    {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
-        + (['grafana'] if grafana_provisioning.changed | default(false) else [])) | unique }}
+  loop: "{{ observability_restart_targets }}"
   # Skipped in check mode: on a host that has never been deployed the containers do
   # not exist yet, and docker_container would fail rather than preview anything.
   when: not ansible_check_mode
+
+# docker_container returns on ISSUANCE, not on service — the same wording the
+# postgresql, lms and frigate roles use for their own gates in this branch, and
+# the reason all three added one. It matters most here: Grafana's file provisioner
+# treats a rejected provisioning document as a FATAL STARTUP ERROR, so a mistyped
+# alert rule in files/data/grafana/provisioning/alerting/ restarts Grafana into a
+# crash loop — the file that exists to make silent pipeline death visible would be
+# installed by a mechanism that silently kills the reporter. /api/health is
+# unauthenticated and returns 200 only once Grafana has finished provisioning.
+- name: Wait for Grafana to serve its health endpoint after the restart
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_web_port }}/api/health"
+    status_code: 200
+  register: grafana_health
+  until: grafana_health is succeeded
+  retries: 12
+  delay: 5
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - "'grafana' in observability_restart_targets"
+
+# vector and telegraf expose no HTTP surface to probe, so the gate is "still up
+# after a settle period". The wait is the load-bearing part: vector exits ~1s
+# after a malformed vector.yaml, so an inspect issued immediately after the
+# restart lands inside the crash window about as often as not, and `Running: true`
+# there means nothing. 15s is comfortably past that window and past docker's
+# first restart backoff, so a crash-looping container is caught between attempts
+# or in `restarting`.
+- name: Let restarted vector/telegraf run long enough to crash on a bad config
+  ansible.builtin.wait_for:
+    timeout: "{{ observability_settle_seconds }}"
+  when:
+    - not ansible_check_mode
+    - observability_settle_targets | length > 0
+
+- name: Re-inspect the restarted vector/telegraf containers
+  community.docker.docker_container_info:
+    name: "{{ item }}"
+  register: observability_settled
+  loop: "{{ observability_settle_targets }}"
+  when: not ansible_check_mode
+
+- name: Assert restarted vector/telegraf are still running
+  ansible.builtin.assert:
+    that:
+      - item.exists
+      - item.container.State.Running | default(false)
+    fail_msg: >-
+      {{ item.item }} is not running {{ observability_settle_seconds }}s after its
+      config-change restart — the new config was deployed but the container did not
+      stay up. Check `docker logs {{ item.item }}`; a malformed
+      {{ item.item }} config makes it exit within about a second of start.
+    quiet: true
+  loop: "{{ observability_settled.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not ansible_check_mode
+
+# --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------
+# `never` keeps these tasks out of every ordinary run; they execute ONLY when the
+# operator asks for them by tag. Included (not inlined) so the tag lives on one
+# statement and the whole file inherits it.
+#   ansible-playbook playbooks/deploy-services.yml \
+#     --limit eq12_docker --tags vector_buffer_reset
+# Runbook (symptoms, when this is the right answer, what it costs):
+# docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
+#
+# The `when` is NOT redundant with `never`. deploy-services.yml includes each role
+# with `apply: tags: "{{ service }}"`, so every task in this role also carries the
+# tag `observability` — and `never` only suppresses a task while none of ITS tags is
+# explicitly requested. `--tags observability`, the documented way to deploy this one
+# service, therefore requests a tag this task has, and the destructive reset would
+# run on an ordinary single-service deploy. Verified, not theorised: a check-mode run
+# with `--tags observability` executed "Stop Vector" before this guard was added.
+# ansible_run_tags is exactly what the operator typed, so this distinguishes "asked
+# for the reset" from "asked for the service".
+# `apply:` is required, not decoration: on a DYNAMIC include, bare `tags:` tag only
+# the include statement — the included tasks do not inherit them, so they would carry
+# only the playbook's `observability` tag and `--tags vector_buffer_reset` would
+# include the file and then filter every task inside it out (an opt-in path that
+# silently does nothing). Also verified by running it.
+- name: Reset the Vector disk buffer (opt-in, destructive)
+  ansible.builtin.include_tasks:
+    file: vector-buffer-reset.yml
+    apply:
+      tags: [vector_buffer_reset]
+  when: "'vector_buffer_reset' in ansible_run_tags"
+  tags: [never, vector_buffer_reset]

@@ -38,9 +38,10 @@ Unattended (nightly) security updates were dead on every host in the fleet, and 
 entire life of the `common` role. Two independent defects sat on top of each other, and **fixing
 only the first one would have left the system just as unpatched, and just as green.**
 
-(Patching was not literally zero: the same role ends with an unconditional
-`apt: upgrade: safe`, so packages moved whenever someone ran the playbook. That task is its own
-problem — see #97 — and it is not automatic patching; between runs, nothing happened.)
+(Patching was not literally zero: the same role ended with an unconditional
+`apt: upgrade: safe`, so packages moved whenever someone ran the playbook. That task is now gated
+behind `apt_apply_pending_upgrades` (default false) — #97 — and it was never automatic patching;
+between runs, nothing happened.)
 
 1. Inventory `group_vars` replaced the role's package list, so `unattended-upgrades` was never
    installed — while the role kept deploying its config files.
@@ -180,9 +181,11 @@ host — the check that would have caught layer 2 automatically. `unattended-upg
 --debug` prints the origins it resolved and is the obvious candidate, but this fix does not
 automate it.
 
-**Still open in this role:** the unconditional `apt: upgrade: safe` that ends it (#97), and the
-complete absence of failure signalling for unattended-upgrades (#99) — a failed nightly run is
-still invisible. This is a restored control, not a finished one.
+**Since closed:** the unconditional `apt: upgrade: safe` that ended this role is now gated behind
+`apt_apply_pending_upgrades` (default false), so it runs only as a deliberate maintenance action
+(#97). **Still open in this role:** the complete absence of failure signalling for
+unattended-upgrades (#99) — a failed nightly run is still invisible. This is a restored control,
+not a finished one.
 
 ## Why This Works
 
@@ -249,8 +252,9 @@ spot-checking one host would have missed the bug.
 ## Related Issues
 
 - #77 — this fix (`common` role; fleet-wide unattended security updates).
-- #97 — the same role's unconditional `Apply pending security upgrades` task mass-upgrades the
-  fleet on every run; discovered while deploying this fix.
+- #97 — the same role's unconditional `Apply pending security upgrades` task mass-upgraded the
+  fleet on every run; discovered while deploying this fix. Since fixed: the task is gated behind
+  `apt_apply_pending_upgrades` (default false) and renamed to say what it actually does.
 - #99 — unattended-upgrades still has no failure signalling (no Mail/MTA, logs not shipped), so a
   failed nightly run remains invisible.
 - #100 — `proxmox_guests` always-changed tasks break the idempotency signal.

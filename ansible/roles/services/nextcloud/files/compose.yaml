@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Stateful and schema-migrating: `occ upgrade` runs one-way DB migrations on
       # start, and Nextcloud refuses to skip a major. "enable" keeps it in scan scope
@@ -50,6 +51,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Auto-update class: pinned to major 7, cache-only state, recreate-from-image is
       # the recovery path anyway. The label is also what puts it in scan scope at all —

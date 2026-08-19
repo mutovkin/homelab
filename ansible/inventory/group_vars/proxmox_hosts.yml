@@ -2,3 +2,9 @@
 # Proxmox host group defaults
 proxmox_enterprise_repo: false # Use community (no-subscription) repo
 proxmox_zfs_scrub_schedule: "monthly"
+
+# No unattended autoremove on the hypervisors (#99): a nightly unattended
+# `apt autoremove` on a host running VMs/LXCs can pull kernels or ZFS modules
+# out from under a live system at 06:00 with nobody watching. Security upgrades
+# themselves stay on — only the cleanup half is opted out.
+unattended_upgrades_remove_unused_dependencies: false

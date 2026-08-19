@@ -25,6 +25,19 @@
       fi
     dest: "{{ data_mount }}/lyrion/config/custom-init.sh"
     mode: "0755"
+  register: lms_custom_init
+
+# Captured BEFORE the deploy, for the restart pairing below. custom-init.sh is
+# bind-mounted, so compose does not track its content — an edit is inert until
+# the container restarts (the bind-mount gotcha, #95). Two things must be true
+# before we bounce it: the container already existed (never restart a container
+# this run created — it would race the very init script we just deployed), and
+# the deploy did not itself recreate it (a recreate already ran the new script).
+- name: Check whether the LMS container pre-exists
+  community.docker.docker_container_info:
+    name: lms
+  register: lms_container_before
+  check_mode: false
 
 # Self-heal: if the LXC boots before TrueNAS NFS is serving (boot-order race,
 # #36), the NFS-backed /music volume fails to mount and the stack stays down.
@@ -72,3 +85,64 @@
   vars:
     svc: lms
     svc_deploy_dir: "{{ data_mount }}/deploy/lyrion"
+
+# Container identity after the deploy. A new Id means compose created or
+# recreated the container in THIS run, so it already started with the current
+# custom-init.sh and an extra restart would be pure churn (and, on a first
+# deploy, a race against the script's own apt-get install).
+- name: Re-read the LMS container after the deploy
+  community.docker.docker_container_info:
+    name: lms
+  register: lms_container_after
+  check_mode: false
+
+# Single source of truth for the restart decision, shared by the check-mode
+# preview and the restart itself. Deliberately NO default() filters on the
+# registers: a rename must fail loudly rather than silently skip the restart
+# (the do-nothing failure mode of #78).
+- name: Determine whether LMS must be restarted for a changed custom-init.sh
+  ansible.builtin.set_fact:
+    lms_restart_needed: >-
+      {{ lms_custom_init is changed
+         and lms_container_before.exists
+         and lms_container_after.exists
+         and lms_container_before.container.Id == lms_container_after.container.Id }}
+
+# --check must surface the bounce a real apply would perform. The restart task
+# itself is necessarily skipped in check mode (the copy is not really written,
+# so the container could not pick it up anyway).
+- name: Preview the custom-init.sh restart (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      custom-init.sh changed: a real apply WILL restart the lms container
+      (brief player-visible outage) so the new script runs.
+  when:
+    - ansible_check_mode
+    - lms_restart_needed | bool
+
+- name: Restart LMS so the edited custom-init.sh actually runs
+  community.docker.docker_container:
+    name: lms
+    state: started
+    restart: true
+  when:
+    - not ansible_check_mode
+    - lms_restart_needed | bool
+
+# A green play must mean a serving LMS: custom-init.sh runs as the container
+# starts, and a broken script (bad apt source, failed install) can leave the web
+# UI down while docker still reports the container "started" — the module returns
+# on issuance, not on service. localhost is correct here: the task runs on the
+# docker host and lms uses network_mode: host. Default mirrors templates/env.j2.
+- name: Wait for the LMS web UI after the restart
+  ansible.builtin.uri:
+    url: "http://localhost:{{ lms_web_port | default('9001') }}/"
+    status_code: 200
+  register: lms_ui_ready
+  until: lms_ui_ready is succeeded
+  retries: 12
+  delay: 5
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - lms_restart_needed | bool

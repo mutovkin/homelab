@@ -6,6 +6,13 @@ apiVersion: 1
 datasources:
   # VictoriaMetrics - Time-series metrics database (MetricsQL-enabled)
   - name: VictoriaMetrics
+    # Explicit uid, pinned to the value this datasource ALREADY has on eq12 (#108):
+    # alert rules reference a datasource by uid, never by name, so the uid has to be
+    # declared in version control to be referenceable from provisioning/alerting/.
+    # Left implicit, Grafana derives it and it is only discoverable via the API.
+    # Changing this string re-points every dashboard/alert that references the old
+    # one — treat it as an identity, not a setting.
+    uid: P4169E866C3094E38
     type: victoriametrics-metrics-datasource            # VictoriaMetrics native datasource plugin
     access: proxy                                       # Grafana backend proxies requests
     url: http://victoriametrics:8428                    # VictoriaMetrics service URL
@@ -22,6 +29,9 @@ datasources:
 
   # VictoriaLogs - Log aggregation database
   - name: VictoriaLogs
+    # Pinned to the live uid — see the note on VictoriaMetrics above. The
+    # ingest-recency alert in provisioning/alerting/ingest-health.yaml queries this uid.
+    uid: PD775F2863313E6C7
     type: victoriametrics-logs-datasource               # VictoriaLogs plugin type
     access: proxy                                       # Grafana backend proxies requests
     url: http://victorialogs:9428                       # VictoriaLogs base URL

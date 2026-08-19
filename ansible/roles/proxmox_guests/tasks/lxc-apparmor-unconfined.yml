@@ -1,0 +1,148 @@
+---
+# Force `lxc.apparmor.profile: unconfined` on a PRIVILEGED LXC container.
+#
+# Why the container needs it: Docker inside a privileged LXC sees the host's
+# AppArmor in the kernel and tries to load its `docker-default` profile, which the
+# CT's own confinement denies (`apparmor_parser: Access denied`). Unconfining the
+# container is the privileged-CT half of the fix; the other half is the AppArmor
+# mask the docker_host role applies inside the guest. See CLAUDE.md § Gotchas.
+#
+# Why this file exists instead of a one-line `lineinfile` (#98):
+# /etc/pve/lxc/<id>.conf stores the LIVE config first, then snapshot sections
+# ([preissue77], [pve:pending], …) that carry their own copies of these same lxc.*
+# lines. `lineinfile` with a regexp rewrites the LAST match in the file — a
+# SNAPSHOT copy, not the live one — and with no match at all it appends at EOF,
+# i.e. INSIDE a snapshot section, corrupting snapshot metadata while never
+# touching the live guest. CT 201 (the only privileged container in the fleet)
+# has exactly those sections, so both failure modes were live: a green "ok" over a
+# container that boots AppArmor-confined and a Docker daemon that will not start.
+# Documented in
+# docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md,
+# which disqualifies these files for lineinfile outright.
+#
+# Deliberately a SEPARATE file from lxc-gpu-passthrough.yml even though the
+# machinery is the same: that one runs for `gpu_sharing: true` guests, this one for
+# `unprivileged: false` guests. They coincide on CT 201 today, but folding this
+# line into the GPU role's `desired` array would silently mean a future privileged
+# CT without a GPU never gets unconfined — the same class of "applies to a
+# different guest set" bug this change is fixing.
+#
+# `--current` matters: plain `pct config` prints the PENDING-merged view, so a
+# value staged in [pve:pending] reads back as if it were already in force.
+# `--current` is the applied config, which is what "converged" has to mean.
+# Neither form ever prints snapshot sections.
+
+- name: "Read applied AppArmor profile config — CT {{ item.vmid }}"
+  ansible.builtin.command: "pct config {{ item.vmid }} --current"
+  register: lxc_aa_live
+  changed_when: false
+  # Read-only, so --check must run it or the drift verdict is derived from nothing.
+  check_mode: false
+
+- name: "Determine AppArmor profile drift — CT {{ item.vmid }}"
+  ansible.builtin.set_fact:
+    lxc_aa_desired: "{{ lxc_aa_want }}"
+    # Any applied lxc.apparmor.profile line that is not the one we want. Unlike
+    # the cgroup allow rules in the GPU task, this key is SINGLE-VALUED, so a
+    # differing line is unambiguously stale and is replaced, not appended beside.
+    lxc_aa_stale: >-
+      {{ lxc_aa_live.stdout_lines
+         | select('match', '^lxc\.apparmor\.profile:')
+         | reject('equalto', lxc_aa_want) | list }}
+    lxc_aa_missing: "{{ [] if lxc_aa_want in lxc_aa_live.stdout_lines else [lxc_aa_want] }}"
+  vars:
+    lxc_aa_want: "lxc.apparmor.profile: unconfined"
+
+- name: "Report AppArmor profile drift verdict — CT {{ item.vmid }}"
+  ansible.builtin.debug:
+    msg: >-
+      CT {{ item.vmid }} AppArmor profile:
+      {{ 'converged (' ~ lxc_aa_desired ~ ' applied)'
+         if (lxc_aa_missing | length == 0 and lxc_aa_stale | length == 0)
+         else 'WOULD CHANGE — missing: [' ~ (lxc_aa_missing | join('; ')) ~ ']'
+              ~ ' stale: [' ~ (lxc_aa_stale | join('; ')) ~ ']' }}
+
+- name: "Reconcile the AppArmor profile in the live config section — CT {{ item.vmid }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      conf="/etc/pve/lxc/{{ item.vmid }}.conf"
+      work=$(mktemp -d /tmp/lxc-aa-{{ item.vmid }}-XXXXXX)
+      trap 'rm -rf "$work"' EXIT
+
+      # Split at the FIRST section header: everything before it is the live
+      # config; everything from it onward belongs to snapshots and is copied
+      # through byte-for-byte.
+      if grep -q '^\[' "$conf"; then
+        hdr=$(grep -n -m1 '^\[' "$conf" | cut -d: -f1)
+        live_lines=$((hdr - 1))
+      else
+        live_lines=$(wc -l < "$conf")
+      fi
+      head -n "$live_lines" "$conf" > "$work/live"
+      tail -n +$((live_lines + 1)) "$conf" > "$work/rest"
+
+      # Drop every apparmor-profile line from the LIVE region only (a
+      # single-valued key: a second one would just shadow the first), then append
+      # the one we want. grep exit 1 = "no lines left", which is fine here.
+      set +e
+      grep -v '^lxc\.apparmor\.profile:' "$work/live" > "$work/live.new"
+      rc=$?
+      set -e
+      if [ "$rc" -gt 1 ]; then
+        echo "grep failed while filtering apparmor lines (rc=$rc)" >&2
+        exit 1
+      fi
+      mv "$work/live.new" "$work/live"
+      printf '%s\n' '{{ lxc_aa_desired }}' >> "$work/live"
+
+      cat "$work/live" "$work/rest" > "$work/merged"
+
+      # Structural sanity: a container config without arch: means the split or a
+      # filter ate real content — never write that over a live guest's config.
+      if ! grep -q '^arch:' "$work/merged"; then
+        echo "REFUSING: merged config lost its 'arch:' line — aborting write" >&2
+        exit 1
+      fi
+
+      mkdir -p /var/backups
+      cp "$conf" "/var/backups/lxc-{{ item.vmid }}.conf.$(date +%s)"
+
+      # /etc/pve is pmxcfs: write by truncation, never mv/rename onto it.
+      cat "$work/merged" > "$conf"
+
+      # Post-verify against the APPLIED view.
+      after=$(pct config {{ item.vmid }} --current)
+      if ! printf '%s\n' "$after" | grep -qxF '{{ lxc_aa_desired }}'; then
+        echo "post-verify FAILED: '{{ lxc_aa_desired }}' missing from applied config" >&2
+        exit 1
+      fi
+      if printf '%s\n' "$after" | grep '^lxc\.apparmor\.profile:' | grep -qvxF '{{ lxc_aa_desired }}'; then
+        echo "post-verify FAILED: a stale apparmor profile line is still applied" >&2
+        exit 1
+      fi
+      echo changed
+  args:
+    executable: /bin/bash
+  become: true
+  register: lxc_aa_reconcile
+  # Last line, not whole stdout: pct can emit chatter ahead of it (features-task
+  # precedent in proxmox_guests/tasks/main.yml).
+  changed_when: lxc_aa_reconcile.stdout_lines | default([]) | last | default('') == 'changed'
+  when: lxc_aa_missing | length > 0 or lxc_aa_stale | length > 0
+
+# Deliberately NO `pct reboot` here, unlike the GPU task. This task runs just
+# before "Start LXC containers", so a container that is stopped picks the profile
+# up on that start; a RUNNING one keeps its old confinement until the operator
+# restarts it, and silently bouncing the fleet's Docker host mid-play is worse
+# than saying so. The line only ever changes on a rebuild or a hand-edit, so this
+# is a loud message on a rare path, not a recurring nag.
+- name: "Warn that the new AppArmor profile needs a CT restart — CT {{ item.vmid }}" # noqa: no-handler
+  ansible.builtin.debug:
+    msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}) now declares
+      '{{ lxc_aa_desired }}', but lxc.apparmor.profile is read at container START.
+      If this container is currently running it is STILL CONFINED and Docker
+      inside it will fail with `apparmor_parser: Access denied` until you restart
+      it: `pct reboot {{ item.vmid }}`.
+  when: lxc_aa_reconcile.changed | default(false)

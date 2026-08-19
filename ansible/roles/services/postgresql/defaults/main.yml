@@ -1,0 +1,13 @@
+---
+# The PostgreSQL wire port. Its entry in postgres_firewall.ports (host_vars) is
+# the single source of truth for BOTH the nftables allowlist and pg_hba.conf's
+# LAN host entries — templating them from one place is what removes the drift
+# class #114 is about. pgAdmin's published port (10080) is governed by the
+# firewall only; it is not a postgres protocol port and has no pg_hba meaning.
+postgres_hba_port: 5432
+
+# pgAdmin's HOST-side published port, as written in files/compose.yaml
+# (`10080:8080`). Used only by the post-deploy readiness gate, which probes the
+# published port rather than the container's internal one — that mapping is
+# precisely what a security-context change can break (#95). Change both together.
+pgadmin_published_port: 10080

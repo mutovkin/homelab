@@ -209,10 +209,36 @@
       };
       Unattended-Upgrade::Package-Blacklist {};
       Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "{{ unattended_upgrades_remove_unused_dependencies | bool | lower }}";
       Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
       Unattended-Upgrade::Automatic-Reboot "false";
+      // Without this the ONLY record of a nightly run is
+      // /var/log/unattended-upgrades/*.log, which nothing reads or ships — a
+      // FAILED run is invisible (#99). SyslogEnable makes the run result reach
+      // /dev/log, hence rsyslog's /var/log/syslog, which Vector already tails.
+      // Verified option spelling against the shipped binary on both a bookworm
+      // (u-u 2.9.1) and a trixie (2.12) host: apt_pkg.config.find_b(
+      // "Unattended-Upgrade::SyslogEnable"). It is NOT Syslog::Enable.
+      Unattended-Upgrade::SyslogEnable "true";
+      Unattended-Upgrade::SyslogFacility "daemon";
     mode: "0644"
+
+# SyslogEnable above writes to /dev/log; on a journald-only host that is the end
+# of the line — journald is not a file, and the Vector `host_logs` file source
+# (eq12_docker, the only host running Vector) includes /var/log/syslog. Live
+# evidence at the time of #99: eq12_docker had NO rsyslog, a zero-byte
+# /var/log/syslog last written in 2023, and no auth.log or kern.log at all — the
+# whole host_logs pipeline was dead. rsyslog is therefore a role dependency, not
+# an operator extra (vars/main.yml, out of reach of an inventory override), and
+# the service must actually be running: installed-but-masked writes nothing.
+- name: Ensure rsyslog is enabled and running (writes the files Vector ships)
+  ansible.builtin.systemd_service:
+    name: rsyslog.service
+    enabled: true
+    state: started
+  # In --check the package install above is a no-op, so on a host that does not
+  # have rsyslog yet the unit genuinely does not exist and this cannot preview.
+  when: not ansible_check_mode
 
 # The config above is only ever acted on by this timer; #77 had it enabled and
 # active while the binary was absent, so the role now owns both halves rather
@@ -228,7 +254,13 @@
   loop_control:
     loop_var: apt_timer
 
-- name: Apply pending security upgrades
+# Deliberate maintenance-window mass upgrade only (#97). Unconditional until
+# #97, this applied ALL pending upgrades on every run of the role — a pending
+# docker-ce upgrade would restart dockerd and bounce every container as a side
+# effect of an unrelated deploy. Security patching is unattended-upgrades'
+# job (#77, above); run this by choice: -e apt_apply_pending_upgrades=true
+- name: Apply pending package upgrades (deliberate maintenance only)
   ansible.builtin.apt:
     upgrade: safe
     update_cache: true
+  when: apt_apply_pending_upgrades | bool

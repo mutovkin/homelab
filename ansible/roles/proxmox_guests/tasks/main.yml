@@ -121,6 +121,8 @@
   ansible.builtin.shell: |
     set -o pipefail
     pveam available --section system | grep '{{ proxmox_templates[item] }}' | tail -1 | awk '{print $2}'
+  args:
+    executable: /bin/bash
   register: template_resolution
   changed_when: false
   check_mode: false  # read-only pveam query; must run in --check to populate resolved_templates
@@ -376,131 +378,37 @@
   loop_control:
     label: "VM {{ item.vmid }} ({{ item.name }})"
 
-# proxmox_kvm state=present only creates VMs — it does not update existing ones.
-# This task applies network interface changes to already-existing VMs.
-
-- name: Update VM network interfaces on existing VMs
-  become: true
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail   # -e so a failed qm read/set aborts instead of falsely echoing "changed"
-      args=""
-      # Read the config ONCE, unprotected: with -e, a genuine `qm config` failure
-      # (pmxcfs wedged, VM vanished) aborts here instead of being swallowed by a
-      # `|| true` on the whole pipeline and silently yielding an empty $current —
-      # which would look like "NIC missing" and rewrite the interface.
-      cfg=$(qm config {{ item.vmid }})
-      {% for nic_name, nic_val in item.net.items() %}
-      # Get the current configuration (e.g. "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr1").
-      # `|| true` here is legitimate: a genuinely absent NIC is a no-match, not an error.
-      current=$(printf '%s\n' "$cfg" | grep "^{{ nic_name }}:" | cut -d' ' -f2- || true)
-      desired="{{ nic_val }}"
-
-      if [ -z "$current" ]; then
-        # Interface doesn't exist yet, simply add it
-        args="$args -{{ nic_name }} $desired"
-      else
-        # Extract existing auto-generated MAC address if present
-        mac=$(echo "$current" | grep -oE '[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' || true)
-
-        # If current has a MAC but our desired config doesn't specify one, we MUST preserve the MAC.
-        # If we don't, Proxmox replaces the entire NIC and the guest OS loses its network configuration.
-        if [ -n "$mac" ] && ! echo "$desired" | grep -qEi '([0-9a-f]{2}:){5}[0-9a-f]{2}'; then
-
-          # Strip MAC from current string so we can cleanly compare the remaining properties
-          current_no_mac=$(echo "$current" | sed -E "s/=$mac//i")
-
-          if [ "$current_no_mac" != "$desired" ]; then
-            # Non-MAC configuration differs. We inject the preserved MAC back into the desired string
-            # e.g. "virtio,bridge=vmbr2" -> "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr2"
-            model=$(echo "$desired" | cut -d',' -f1)
-            rest=$(echo "$desired" | cut -d',' -f2-)
-            args="$args -{{ nic_name }} ${model}=${mac},${rest}"
-          fi
-        else
-          # Direct comparison (either neither has a MAC, or desired explicitly provides one)
-          if [ "$current" != "$desired" ]; then
-            args="$args -{{ nic_name }} $desired"
-          fi
-        fi
-      fi
-      {% endfor %}
-
-      if [ -n "$args" ]; then
-        qm set {{ item.vmid }} $args
-        echo "changed"
-      fi
-  register: vm_net_update
-  changed_when: vm_net_update.stdout == "changed"
-  loop: "{{ proxmox_vms | selectattr('net', 'defined') | list }}"
-  loop_control:
-    label: "VM {{ item.vmid }} ({{ item.name }}) — net update"
-
-# Same create-only limitation as networking above: startup/onboot set in vars
-# never reach a VM that already existed when the value was added — so boot order
-# silently drifts (TrueNAS lost its order=1, booting AFTER its NFS consumer; #36).
-# Reconcile both explicitly via qm set so "edit vars, re-run" actually enforces
-# them. This is a config change only — qm set does not restart the guest.
-- name: Reconcile startup/onboot on existing VMs
-  become: true
-  ansible.builtin.shell: |
-    set -euo pipefail   # -e so a failed qm set aborts instead of falsely echoing "changed"
-    args=""
-    desired_startup="{{ item.startup | default('') }}"
-    desired_onboot="{{ (item.onboot | default(proxmox_vm_defaults.onboot)) | ternary(1, 0) }}"
-
-    current_startup=$(qm config {{ item.vmid }} | sed -n 's/^startup: //p')
-    current_onboot=$(qm config {{ item.vmid }} | sed -n 's/^onboot: //p')
-    current_onboot=${current_onboot:-0}
-
-    if [ -n "$desired_startup" ] && [ "$current_startup" != "$desired_startup" ]; then
-      args="$args -startup $desired_startup"
-    fi
-    if [ "$current_onboot" != "$desired_onboot" ]; then
-      args="$args -onboot $desired_onboot"
-    fi
-
-    if [ -n "$args" ]; then
-      qm set {{ item.vmid }} $args
-      echo "changed"
-    fi
-  register: vm_startup_update
-  changed_when: vm_startup_update.stdout == "changed"
-  loop: "{{ proxmox_vms }}"
-  loop_control:
-    label: "VM {{ item.vmid }} ({{ item.name }}) — startup/onboot"
-
-# --- VM cores/memory reconcile (#86) ---
+# --- Existing-VM reconcile: the one live read (#86, #119) ---
 #
-# proxmox_kvm state=present creates but never updates, so cores/memory edited in
-# host_vars silently never reached an existing VM. These tasks close that gap.
+# proxmox_kvm state=present only CREATES; it never updates an existing VM. So
+# every convergence of a live VM in this role is an explicit task below, and they
+# all share ONE shape: read live state here → compute drift in Jinja → report it
+# with `debug` → apply it with a guarded `command`.
 #
-# RECONCILED HERE: cores, memory. Nothing else.
-# RECONCILED BY THEIR OWN TASKS ABOVE: net (MAC-preserving NIC task),
-# startup/onboot.
-# CREATE-TIME ONLY (deliberate — changing them on a live guest is destructive,
-# guest-visible, or both): sockets, bios, machine, vga, scsi, scsihw, efidisk0,
-# ide, hostpci, agent, balloon, cpu, usb, localtime, tablet, tags, description,
-# name — all passed at create and never reconciled afterwards. Those fields were
-# modelled from the live guests in #87 so a from-scratch rebuild matches them;
-# `ide2` in particular must NOT be reconciled — the TrueNAS installer ISO is
-# deliberately ejected post-install, so live reads `none,media=cdrom` while
-# host_vars still names the ISO. That mismatch is the documented DR flow; see
-# the comment on ide2 in n5pro host_vars.
+# Why the shape matters (#119): the NIC and startup/onboot reconciles used to be
+# `shell` tasks that read `qm config` inside the script. `shell` is skipped
+# wholesale under `--check`, so NIC and boot-order drift were invisible in the
+# documented dry run — and the reads themselves were unguarded, saved only by
+# provisioning order.
 #
-# Neither VM has memory/cpu hotplug enabled, so applying cores/memory to a
-# RUNNING VM cannot take effect without a guest stop. We therefore fail loudly
-# instead of warning: a warning inside a green play is exactly how this drift
-# went unnoticed in the first place. `qm set` on a running VM would also create
-# pending changes that make `qm config` disagree with the running guest and
-# poison this very comparison.
-# A guest listed in host_vars but not yet created has no config to read. That is
-# the normal state during a dry run of a NEW guest — provisioning is skipped in
-# --check, so `qm config <new-vmid>` exits 2 with "Configuration file '...' does
-# not exist" on stderr — and the documented dry-run-first workflow must not blow
-# up on it. But the tolerance is DISCRIMINATING, not blanket: any other failure
-# (pmxcfs unavailable, permission denied) fails loudly, because silently
-# treating it as "absent" would drop a live guest out of reconcile entirely.
+# The reads are `check_mode: false` on purpose. Skipping them in --check would
+# leave `.rc` undefined for every `when:` below, and it is what makes `--check` a
+# real drift report instead of a wall of "skipping".
+#
+# `failed_when` is DISCRIMINATING, not blanket-false. A guest listed in host_vars
+# but not yet created has no config to read. That is the normal state during a dry
+# run of a NEW guest — provisioning is skipped in --check, so `qm config
+# <new-vmid>` exits 2 with "Configuration file '...' does not exist" on stderr —
+# and the documented dry-run-first workflow must not blow up on it. But the
+# tolerance is DISCRIMINATING: any other failure (pmxcfs unavailable, permission
+# denied) fails loudly, because silently treating it as "absent" would drop a live
+# guest out of reconcile entirely.
+#
+# ONE read feeds all three computes (NIC, startup/onboot, cores/memory) and is NOT
+# re-read between their applies. That is safe by construction, not by luck: the
+# three touch disjoint field sets — `net*`, `startup`/`onboot`, `cores`/`memory` —
+# so no apply can invalidate a later compute. Adding a fourth reconcile means
+# checking that property again.
 - name: Read current VM configuration
   become: true
   ansible.builtin.command: "qm config {{ item.vmid }}"
@@ -535,12 +443,180 @@
     label: "VM {{ item.item.vmid }} ({{ item.item.name }})"
   when: item.rc != 0
 
-# Facts persist across role inclusions within a play, so seed the accumulator
+# Facts persist across role inclusions within a play, so seed the accumulators
 # explicitly rather than relying on `| default([])` to paper over a stale value.
-- name: Seed VM drift accumulator
+- name: Seed VM drift accumulators
   ansible.builtin.set_fact:
+    vm_nic_drift: []
+    vm_startup_drift: []
     vm_resource_drift: []
 
+# --- VM NIC reconcile (#36, #119) ---
+#
+# MAC PRESERVATION IS THE WHOLE POINT OF THIS TASK. `qm set -netN` REPLACES the
+# interface: pushing a desired string without a MAC at a NIC that has one makes
+# Proxmox generate a fresh MAC, and the guest OS loses its network config (and its
+# DHCP reservation). VM 100 is the LIVE Home Assistant VM and IS reconciled here,
+# so a bug in this compute hot-rewrites its NIC.
+#
+# The three branches below are a field-for-field port of the bash this replaced —
+# same order, same predicates:
+#   1. NIC absent from `qm config`  -> add the desired string as-is.
+#   2. live has a MAC, desired does not -> strip `=<mac>` from live (first
+#      occurrence, exactly like the old `sed -E "s/=$mac//i"`; the MAC is
+#      extracted FROM the live string, so it is a literal substring and needs no
+#      case folding) and compare the remainder. Only if that differs do we write,
+#      re-injecting the live MAC as `<model>=<mac>,<rest>`. `<rest>` is everything
+#      after the first comma, or the whole string when there is no comma — the old
+#      `cut -d',' -f2-` behaviour.
+#   3. otherwise (neither has a MAC, or desired pins one) -> plain string compare.
+# Fleet state this must stay a no-op for: VM 100 pins its MAC in host_vars
+# (branch 3, equal), VM 200's net0/net1 declare no MAC (branch 2, remainder
+# equal). Both were simulated against captured live configs before this landed.
+- name: Compute VM NIC drift
+  ansible.builtin.set_fact:
+    vm_nic_drift: "{{ vm_nic_drift + [drift_entry] }}"
+  vars:
+    nic_plan_json: >-
+      {%- set out = [] -%}
+      {%- for nic_name, nic_val in item.item.net.items() -%}
+      {%- set matches = item.stdout_lines | default([]) | select('match', nic_name ~ ':') | list -%}
+      {%- set current = matches[0].split(' ', 1)[1] if matches else '' -%}
+      {%- set mac = current | regex_search('[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}') -%}
+      {%- set desired_has_mac = nic_val is search('([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}') -%}
+      {%- if current == '' -%}
+      {%- set _ = out.append({'arg': '-' ~ nic_name ~ ' ' ~ nic_val, 'human': nic_name ~ ' absent live — will add ' ~ nic_val}) -%}
+      {%- elif mac and not desired_has_mac -%}
+      {%- set current_no_mac = current.replace('=' ~ mac, '', 1) -%}
+      {%- if current_no_mac != nic_val -%}
+      {%- set model = nic_val.split(',')[0] -%}
+      {%- set rest = nic_val.split(',', 1)[1] if ',' in nic_val else nic_val -%}
+      {%- set _ = out.append({'arg': '-' ~ nic_name ~ ' ' ~ model ~ '=' ~ mac ~ ',' ~ rest,
+      'human': nic_name ~ ' live=' ~ current ~ ' desired=' ~ nic_val
+      ~ ' (re-injecting live MAC ' ~ mac ~ ')'}) -%}
+      {%- endif -%}
+      {%- elif current != nic_val -%}
+      {%- set _ = out.append({'arg': '-' ~ nic_name ~ ' ' ~ nic_val, 'human': nic_name ~ ' live=' ~ current ~ ' desired=' ~ nic_val}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{- out | to_json -}}
+    nic_plan: "{{ nic_plan_json | from_json }}"
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      name: "{{ item.item.name }}"
+      args: "{{ nic_plan | map(attribute='arg') | join(' ') }}"
+      human: "{{ nic_plan | map(attribute='human') | join('; ') }}"
+  loop: "{{ vm_config_raw.results | default([]) }}"
+  loop_control:
+    label: "VM {{ item.item.vmid }} ({{ item.item.name }})"
+  when:
+    # rc first: a non-existent guest has no config to parse, and nic_plan must
+    # never be evaluated against a stderr blob. `net` second: a VM that declares
+    # no `net` is not enrolled in NIC reconcile at all (the old task's
+    # selectattr('net', 'defined') loop).
+    - item.rc == 0
+    - item.item.net is defined
+    - nic_plan | length > 0
+
+- name: Report VM NIC drift
+  ansible.builtin.debug:
+    msg: "VM {{ item.vmid }} ({{ item.name }}): {{ item.human }} — will apply via qm set"
+  loop: "{{ vm_nic_drift | default([]) }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+# Hot on a running VM (Proxmox re-plugs the NIC); deliberate — see #36. Guarded by
+# construction: the loop is empty unless the compute above found real drift.
+- name: Apply NIC changes to existing VMs
+  become: true
+  ansible.builtin.command: "qm set {{ item.vmid }} {{ item.args }}"
+  changed_when: true
+  loop: "{{ vm_nic_drift | default([]) }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }}) — net"
+
+# --- VM startup/onboot reconcile (#36, #119) ---
+#
+# Same create-only limitation as networking above: startup/onboot set in vars
+# never reach a VM that already existed when the value was added — so boot order
+# silently drifts (TrueNAS lost its order=1, booting AFTER its NFS consumer; #36).
+# This is a config change only — qm set does not restart the guest.
+#
+# `startup` is compared ONLY when the guest declares one: an absent declaration
+# means "not managed", not "clear it" (the old `[ -n "$desired_startup" ]` guard).
+# `onboot` has no such opt-out — it has a role default — and a VM with no `onboot:`
+# line in `qm config` sits on Proxmox's own default of 0.
+- name: Compute VM startup/onboot drift
+  ansible.builtin.set_fact:
+    vm_startup_drift: "{{ vm_startup_drift + [drift_entry] }}"
+  vars:
+    live_startup: "{{ item.stdout | regex_search('(?m)^startup: (.*)$', '\\1') | default([], true) | join }}"
+    live_onboot: "{{ item.stdout | regex_search('(?m)^onboot: (\\d+)', '\\1') | default([], true) | join | default('0', true) }}"
+    want_startup: "{{ item.item.startup | default('') }}"
+    want_onboot: "{{ (item.item.onboot | default(proxmox_vm_defaults.onboot)) | ternary(1, 0) }}"
+    drift_fields: >-
+      {{ ([] if (want_startup | length == 0 or live_startup == want_startup) else ['startup'])
+         + ([] if live_onboot | int == want_onboot | int else ['onboot']) }}
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      name: "{{ item.item.name }}"
+      args: >-
+        {{ ((['-startup ' ~ want_startup] if 'startup' in drift_fields else [])
+            + (['-onboot ' ~ want_onboot] if 'onboot' in drift_fields else [])) | join(' ') }}
+      human: >-
+        {{ ((['startup live=' ~ (live_startup | default('<unset>', true)) ~ ' desired=' ~ want_startup] if 'startup' in drift_fields else [])
+            + (['onboot live=' ~ live_onboot ~ ' desired=' ~ want_onboot] if 'onboot' in drift_fields else [])) | join(', ') }}
+  loop: "{{ vm_config_raw.results | default([]) }}"
+  loop_control:
+    label: "VM {{ item.item.vmid }} ({{ item.item.name }})"
+  when:
+    # rc first: a non-existent guest has no config to parse, and drift_fields
+    # must never be evaluated against a stderr blob.
+    - item.rc == 0
+    - drift_fields | length > 0
+
+- name: Report VM startup/onboot drift
+  ansible.builtin.debug:
+    msg: "VM {{ item.vmid }} ({{ item.name }}): {{ item.human }} — will apply via qm set"
+  loop: "{{ vm_startup_drift | default([]) }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }})"
+
+- name: Apply startup/onboot to existing VMs
+  become: true
+  ansible.builtin.command: "qm set {{ item.vmid }} {{ item.args }}"
+  changed_when: true
+  loop: "{{ vm_startup_drift | default([]) }}"
+  loop_control:
+    label: "VM {{ item.vmid }} ({{ item.name }}) — startup/onboot"
+
+# --- VM cores/memory reconcile (#86) ---
+#
+# proxmox_kvm state=present creates but never updates, so cores/memory edited in
+# host_vars silently never reached an existing VM. These tasks close that gap.
+#
+# RECONCILED HERE: cores, memory. Nothing else.
+# RECONCILED BY THEIR OWN TASKS ABOVE: net (MAC-preserving NIC task),
+# startup/onboot.
+# CREATE-TIME ONLY (deliberate — changing them on a live guest is destructive,
+# guest-visible, or both): sockets, bios, machine, vga, scsi, scsihw, efidisk0,
+# ide, hostpci, agent, balloon, cpu, usb, localtime, tablet, tags, description,
+# name — all passed at create and never reconciled afterwards. Those fields were
+# modelled from the live guests in #87 so a from-scratch rebuild matches them;
+# `ide2` in particular must NOT be reconciled — the TrueNAS installer ISO is
+# deliberately ejected post-install, so live reads `none,media=cdrom` while
+# host_vars still names the ISO. That mismatch is the documented DR flow; see
+# the comment on ide2 in n5pro host_vars.
+#
+# Neither VM has memory/cpu hotplug enabled, so applying cores/memory to a
+# RUNNING VM cannot take effect without a guest stop. We therefore fail loudly
+# instead of warning: a warning inside a green play is exactly how this drift
+# went unnoticed in the first place. `qm set` on a running VM would also create
+# pending changes that make `qm config` disagree with the running guest and
+# poison this very comparison.
+#
+# Reads and the drift accumulator live in the shared block above (#119).
+#
 # A missing `cores:`/`memory:` line means the VM sits on Proxmox's own default
 # (1 core / 512 MB) — qm config omits keys that were never set.
 - name: Compute VM cores/memory drift
@@ -712,10 +788,64 @@
     # reconcile task. `state: started` below is unaffected — that dispatch
     # branch never reads `update`.
     update: false
+  # Registered for the fresh-allocation restore gate (#127): a per-item `changed`
+  # here is the ONLY signal that this run created the container, and therefore
+  # allocated it a brand-new empty /data. `no_log` censors the DISPLAY of each
+  # result, not the registered structure — `.changed` and `.item` read back fine
+  # (verified) — and everything downstream only ever prints vmid / hostname /
+  # mount path, never a module arg.
+  register: lxc_provision
   delegate_to: localhost
   loop: "{{ proxmox_lxcs }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+# --- Existing-CT reconcile: the one live read (#86, #119) ---
+#
+# Mirror of the VM block above, and for the same reasons. community.proxmox.proxmox
+# is pinned create-only, so every convergence of a live container is an explicit
+# read → compute → report → apply below.
+#
+# `check_mode: false` because it is read-only and `--check` must still produce a
+# drift report; `failed_when` discriminating so a CT added to host_vars but not yet
+# created ("Configuration file '...' does not exist") is reported as pending while
+# any OTHER read failure fails the play instead of silently dropping the container
+# from reconcile.
+#
+# `pct config` (the rendered live view) and never the raw /etc/pve/lxc/<id>.conf:
+# that file carries [pve:pending] and per-snapshot sections, each with its own copy
+# of the keys we match, and a line-anchored read cannot tell them apart (#86).
+#
+# ONE read feeds both computes below (startup/onboot, cores/memory), and the
+# `features` task between them writes a third, disjoint field — so nothing here can
+# invalidate a later compute.
+- name: Read current LXC configuration
+  become: true
+  ansible.builtin.command: "pct config {{ item.vmid }}"
+  register: lxc_config_raw
+  changed_when: false
+  failed_when:
+    - lxc_config_raw.rc != 0
+    - "'does not exist' not in lxc_config_raw.stderr"
+  check_mode: false  # read-only; must run in --check so drift is reported, not skipped
+  loop: "{{ proxmox_lxcs }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Report LXC containers that do not exist yet
+  ansible.builtin.debug:
+    msg: "CT {{ item.item.vmid }} ({{ item.item.hostname }}): not created yet — provisioning owns creation"
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when: item.rc != 0
+
+# Facts persist across role inclusions within a play, so seed the accumulators
+# explicitly rather than relying on `| default([])` to paper over a stale value.
+- name: Seed LXC drift accumulators
+  ansible.builtin.set_fact:
+    lxc_startup_drift: []
+    lxc_resource_drift: []
 
 # This task reported `changed` on every run for CT 201 while converging nothing,
 # for the whole life of the deployment (#86). Two independent bugs stacked:
@@ -727,8 +857,12 @@
 #      spelled `mount=nfs` (format 'fstype;fstype;...').
 #   2. The script set `-o pipefail` but not `-e`, so that failure was swallowed
 #      and `echo "changed"` ran anyway — a green report over a no-op. The
-#      startup/onboot reconcile tasks (VM one above, LXC one below) already
-#      carry `-euo` for exactly this reason.
+#      startup/onboot reconcile shells this task copied already carried `-euo`
+#      for exactly this reason (they have since become read/compute/report/apply
+#      task chains under #119). This is now the LAST mutate-then-echo shell in
+#      the role, so it is also the last task whose drift is invisible under
+#      --check — same defect class as #119, deliberately left out of its scope;
+#      worth a follow-up issue rather than a drive-by change.
 #
 # The old existence check also grepped the raw /etc/pve/lxc/<id>.conf, which
 # contains SNAPSHOT sections ([preissue77] on CT 201) that carry their own
@@ -771,6 +905,8 @@
       pct set {{ item.vmid }} -features "$desired"
       echo "changed"
     fi
+  args:
+    executable: /bin/bash
   register: pct_features
   # Last line, not whole stdout: pct/pvesh can emit progress chatter ahead of it.
   changed_when: pct_features.stdout_lines | default([]) | last | default('') == 'changed'
@@ -779,34 +915,55 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — features"
 
-# Reconcile startup/onboot on existing CTs for the same reason as the VM task
-# above: keep the docker LXC at order=2 (after TrueNAS) instead of drifted state.
-- name: Reconcile startup/onboot on existing LXC containers
+# --- CT startup/onboot reconcile (#36, #119) ---
+#
+# Same reason as the VM task above: keep the docker LXC at order=2 (after TrueNAS)
+# instead of drifted state. Config-only — `pct set` does not restart the container.
+#
+# `startup` is compared ONLY when the guest declares one: an absent declaration
+# means "not managed", not "clear it" (the old `[ -n "$desired_startup" ]` guard).
+# A CT with no `onboot:` line sits on Proxmox's own default of 0.
+- name: Compute LXC startup/onboot drift
+  ansible.builtin.set_fact:
+    lxc_startup_drift: "{{ lxc_startup_drift + [drift_entry] }}"
+  vars:
+    live_startup: "{{ item.stdout | regex_search('(?m)^startup: (.*)$', '\\1') | default([], true) | join }}"
+    live_onboot: "{{ item.stdout | regex_search('(?m)^onboot: (\\d+)', '\\1') | default([], true) | join | default('0', true) }}"
+    want_startup: "{{ item.item.startup | default('') }}"
+    want_onboot: "{{ (item.item.onboot | default(proxmox_lxc_defaults.onboot)) | ternary(1, 0) }}"
+    drift_fields: >-
+      {{ ([] if (want_startup | length == 0 or live_startup == want_startup) else ['startup'])
+         + ([] if live_onboot | int == want_onboot | int else ['onboot']) }}
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      hostname: "{{ item.item.hostname }}"
+      args: >-
+        {{ ((['-startup ' ~ want_startup] if 'startup' in drift_fields else [])
+            + (['-onboot ' ~ want_onboot] if 'onboot' in drift_fields else [])) | join(' ') }}
+      human: >-
+        {{ ((['startup live=' ~ (live_startup | default('<unset>', true)) ~ ' desired=' ~ want_startup] if 'startup' in drift_fields else [])
+            + (['onboot live=' ~ live_onboot ~ ' desired=' ~ want_onboot] if 'onboot' in drift_fields else [])) | join(', ') }}
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when:
+    # rc first: a non-existent CT has no config to parse, and drift_fields must
+    # never be evaluated against a stderr blob.
+    - item.rc == 0
+    - drift_fields | length > 0
+
+- name: Report LXC startup/onboot drift
+  ansible.builtin.debug:
+    msg: "CT {{ item.vmid }} ({{ item.hostname }}): {{ item.human }} — will apply via pct set"
+  loop: "{{ lxc_startup_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Apply startup/onboot to existing LXC containers
   become: true
-  ansible.builtin.shell: |
-    set -euo pipefail   # -e so a failed pct set aborts instead of falsely echoing "changed"
-    args=""
-    desired_startup="{{ item.startup | default('') }}"
-    desired_onboot="{{ (item.onboot | default(proxmox_lxc_defaults.onboot)) | ternary(1, 0) }}"
-
-    current_startup=$(pct config {{ item.vmid }} | sed -n 's/^startup: //p')
-    current_onboot=$(pct config {{ item.vmid }} | sed -n 's/^onboot: //p')
-    current_onboot=${current_onboot:-0}
-
-    if [ -n "$desired_startup" ] && [ "$current_startup" != "$desired_startup" ]; then
-      args="$args -startup $desired_startup"
-    fi
-    if [ "$current_onboot" != "$desired_onboot" ]; then
-      args="$args -onboot $desired_onboot"
-    fi
-
-    if [ -n "$args" ]; then
-      pct set {{ item.vmid }} $args
-      echo "changed"
-    fi
-  register: lxc_startup_update
-  changed_when: lxc_startup_update.stdout == "changed"
-  loop: "{{ proxmox_lxcs }}"
+  ansible.builtin.command: "pct set {{ item.vmid }} {{ item.args }}"
+  changed_when: true
+  loop: "{{ lxc_startup_drift | default([]) }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — startup/onboot"
 
@@ -823,37 +980,8 @@
 # with no restart. Note the sharp edge — lowering memory below what the
 # container is currently using takes effect immediately and can OOM its
 # workload. That is a deliberate operator action; the role does not guard it.
-# Same discriminating tolerance as the VM config read above: a CT added to
-# host_vars but not yet created exits 2 with "Configuration file '...' does not
-# exist" on stderr and is reported as pending, while any OTHER read failure
-# fails the play instead of silently dropping the container from reconcile.
-- name: Read current LXC configuration
-  become: true
-  ansible.builtin.command: "pct config {{ item.vmid }}"
-  register: lxc_config_raw
-  changed_when: false
-  failed_when:
-    - lxc_config_raw.rc != 0
-    - "'does not exist' not in lxc_config_raw.stderr"
-  check_mode: false  # read-only; must run in --check so drift is reported, not skipped
-  loop: "{{ proxmox_lxcs }}"
-  loop_control:
-    label: "CT {{ item.vmid }} ({{ item.hostname }})"
-
-- name: Report LXC containers that do not exist yet
-  ansible.builtin.debug:
-    msg: "CT {{ item.item.vmid }} ({{ item.item.hostname }}): not created yet — provisioning owns creation"
-  loop: "{{ lxc_config_raw.results | default([]) }}"
-  loop_control:
-    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
-  when: item.rc != 0
-
-# Facts persist across role inclusions within a play, so seed the accumulator
-# explicitly rather than relying on `| default([])` to paper over a stale value.
-- name: Seed LXC drift accumulator
-  ansible.builtin.set_fact:
-    lxc_resource_drift: []
-
+#
+# Reads and the drift accumulators live in the shared block above (#119).
 - name: Compute LXC cores/memory drift
   ansible.builtin.set_fact:
     lxc_resource_drift: "{{ lxc_resource_drift | default([]) + [drift_entry] }}"
@@ -906,13 +1034,15 @@
 # Privileged LXC containers (`unprivileged: false`) running Docker require their AppArmor
 # profile to be unconfined. Otherwise, Proxmox applies a default profile that blocks
 # Docker's `apparmor_parser` when it attempts to load the `docker-default` profile.
-- name: Disable AppArmor for privileged LXC containers (required for Docker)
-  become: true
-  ansible.builtin.lineinfile:
-    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    line: "lxc.apparmor.profile: unconfined"
-    regexp: "^lxc\\.apparmor\\.profile:"
-    state: present
+#
+# Region-scoped shell reconcile, NOT `lineinfile` (#98): a regexp against
+# /etc/pve/lxc/<id>.conf matches the LAST occurrence, which on CT 201 is a copy
+# inside [preissue77]/[pve:pending] — so lineinfile reported ok while the live
+# section stayed confined, and with no match at all it appended into a snapshot
+# section. Those files are disqualified for lineinfile outright; see
+# docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md
+- name: Force AppArmor unconfined on privileged LXC containers (required for Docker)
+  ansible.builtin.include_tasks: lxc-apparmor-unconfined.yml
   loop: "{{ proxmox_lxcs }}"
   when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
   loop_control:
@@ -938,6 +1068,120 @@
     + proxmox_lxcs | rejectattr('started', 'defined') | list }}
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+# --- Fresh-allocation restore gate: the marker (#127) ---
+#
+# `mounts` is create-time-only (provisioning is pinned update:false, #86) and is
+# written in ALLOCATION form (`local-zfs:110,mp=/data`) so a from-scratch rebuild
+# succeeds (#87). Succeeding is the problem: the old named-subvol form failed the
+# create loudly, which was an accidental tripwire. Now a rebuild runs green,
+# hands the CT a FRESH EMPTY /data, and `deploy-services` initialises brand-new
+# databases and app state on top of it — the vzdump restore that was supposed to
+# happen in between lived only in a host_vars comment.
+#
+# So the create path drops a `.fresh-allocation` breadcrumb on every mount it just
+# allocated AND one canonical manifest listing them all at
+# `{{ fresh_allocation_manifest }}` on the container's rootfs;
+# playbooks/deploy-services.yml refuses to run while that manifest exists. Two
+# artefacts, one gate — deliberately: the reader must stat a SINGLE
+# mount-independent path or it drifts out of step with this loop the moment a
+# guest declares a second mount, which is exactly how the first version of this
+# gate was defeatable. `.changed` on the
+# provisioning result is the only honest "this run created it" signal available;
+# an already-existing CT exits changed=false through the `elif not force:` branch
+# and gets no marker. Under --check the module is skipped entirely, so nothing
+# below runs — the gate cannot fire spuriously in a dry run.
+- name: Compute fresh-allocation marker targets
+  ansible.builtin.set_fact:
+    lxc_fresh_markers: "{{ markers_json | from_json }}"
+    lxc_started_vmids: >-
+      {{ (proxmox_lxcs | selectattr('started', 'defined')
+      | selectattr('started', 'equalto', true) | list
+      + proxmox_lxcs | rejectattr('started', 'defined') | list)
+      | map(attribute='vmid') | list }}
+  vars:
+    markers_json: >-
+      {%- set out = [] -%}
+      {%- for r in lxc_provision.results | default([]) -%}
+      {%- if r.changed | default(false) -%}
+      {%- for mp_key, mp_val in (r.item.mounts | default({})).items() -%}
+      {%- set mp_path = (mp_val.split(',') | select('match', 'mp=') | list
+      | first | default('')) | replace('mp=', '', 1) -%}
+      {%- if mp_path | length > 0 -%}
+      {%- set _ = out.append({'vmid': r.item.vmid, 'hostname': r.item.hostname,
+      'key': mp_key, 'path': mp_path}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{- out | to_json -}}
+
+# The marker is written with `pct exec`, which needs the container RUNNING. A
+# freshly created mount-bearing CT declared `started: false` would therefore be
+# skipped — and a silent skip is worse than no gate at all, because the operator
+# would believe the tripwire is armed. Refuse instead. Membership is computed from
+# the same expression the `Start LXC containers` loop uses, so the two cannot
+# drift apart.
+- name: Refuse to leave a freshly allocated mount unmarked
+  ansible.builtin.fail:
+    msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}) was created by this run with a
+      freshly allocated mount at {{ item.path }} ({{ item.key }}), but it is
+      declared `started: false` so it is not running and the
+      {{ item.path }}/.fresh-allocation breadcrumb and the
+      {{ fresh_allocation_manifest }} manifest cannot be written. That manifest is
+      what stops playbooks/deploy-services.yml from initialising services on an
+      empty, un-restored volume (#127). Set `started: true` for this container,
+      or drop its `mounts` declaration.
+  loop: "{{ lxc_fresh_markers | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.path }}"
+  when: item.vmid not in (lxc_started_vmids | default([]))
+
+- name: Mark freshly allocated LXC mounts as un-restored
+  become: true
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - touch
+      - "{{ item.path }}/.fresh-allocation"
+  changed_when: true
+  loop: "{{ lxc_fresh_markers | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.path }}/.fresh-allocation"
+
+# The per-mount markers above are evidence ON the volume; this manifest is the
+# GATE. deploy-services.yml stats exactly one path, and it used to be a
+# hard-coded `/data/.fresh-allocation` while this loop marks EVERY mount the
+# build allocated — so a CT that gained a second mount would have had a fresh
+# `/media/.fresh-allocation` the reader never looked at, and the play would run
+# green onto an empty volume. Writing one canonical file on the container's
+# ROOTFS, whose CONTENT is the same `mounts`-derived path list, makes the reader
+# complete by construction for any number of mounts.
+#
+# `sh -c` (not `printf` via argv) because the redirect has to happen INSIDE the
+# container; pct exec has no shell of its own. The paths come from the guest
+# definition's `mounts` keys and are repo-controlled, not user input.
+- name: Record the fresh-allocation manifest on freshly built LXC containers
+  become: true
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.0 }}"
+      - "--"
+      - sh
+      - -c
+      - >-
+        printf '%s\n' {{ item.1 | map(attribute='path') | map('quote') | join(' ') }}
+        > {{ fresh_allocation_manifest | quote }}
+  changed_when: true
+  loop: "{{ lxc_fresh_markers | default([]) | groupby('vmid') }}"
+  loop_control:
+    label: "CT {{ item.0 }} — {{ fresh_allocation_manifest }}"
 
 - name: Ensure LXC root disk is resized
   become: true

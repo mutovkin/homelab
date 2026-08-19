@@ -106,7 +106,30 @@ tasks:
   docker:status:
     desc: Show status of all Docker containers across hosts
     cmds:
-      - ssh root@deb-docker.lan 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'
+      # Both docker hosts — the task claimed "across hosts" while only ever
+      # showing eq12's, so n5pro-docker's containers were invisible here (#94).
+      # One host being down must not hide the other's output (that was the whole
+      # point of the fix), but `ignore_error: true` per host also meant BOTH hosts
+      # unreachable exited 0: two headers, two ssh errors on stderr, and a green
+      # status. So count the failures and fail only when nothing succeeded — a
+      # partial result is still a result, a total failure is not.
+      - |
+        set -u
+        hosts="deb-docker.lan n5pro-docker.lan"
+        total=0
+        failed=0
+        for h in $hosts; do
+          total=$((total + 1))
+          echo "=== $h ==="
+          if ! ssh -o ConnectTimeout=10 root@"$h" 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'; then
+            echo "!!! $h: unreachable or docker not responding" >&2
+            failed=$((failed + 1))
+          fi
+        done
+        if [ "$failed" -eq "$total" ]; then
+          echo "docker:status: all $total host(s) failed — reporting failure rather than a green no-op" >&2
+          exit 1
+        fi
 
   # === Vault ===
   vault:edit:

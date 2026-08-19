@@ -7,7 +7,6 @@
 
 # Proxmox
 proxmox_node: n5pro
-proxmox_api_url: "https://{{ ansible_host }}:8006"
 
 # Hardware
 total_ram_gb: 96
@@ -50,8 +49,10 @@ npu_device_id: "1022:17f0"
 # Goldenmate 1500VA UPS connected via USB
 nut_role: "server"
 # Only the eq12 client (connects from 192.168.25.5) may reach upsd over the LAN.
+# CIDR form is required by the shared nft_scoped_fw allowlist assert (#114) —
+# /32 is exactly what a bare address already meant to nft.
 nut_allowed_clients:
-  - "192.168.25.5"
+  - "192.168.25.5/32"
 nut_server:
   ups_name: "goldenmate"
   # Loopback for the local upsmon + the LAN IP the eq12 client connects to
@@ -112,7 +113,6 @@ kernel_cmdline_extra:
 
 # Network
 proxmox_bridge: vmbr1 # 10GbE (Aquantia AQC113) — primary management
-proxmox_bridge_secondary: vmbr0 # 5GbE (Realtek RTL8126) — DHCP internet
 
 # Host-only bridge for NFS traffic (TrueNAS <-> Docker LXC)
 # No physical NIC attached — traffic stays in RAM, never hits the network
@@ -185,8 +185,21 @@ proxmox_lxcs:
       # Allocation form — consumed at CREATE only (update:false, #86): a rebuild
       # allocates a fresh empty 200G /data; the live volume is
       # local-zfs:subvol-201-disk-1 (pct config 201, 2026-08-16). DR: restore
-      # /data before deploying services. Nothing enforces that ordering yet —
-      # tracked in #127.
+      # /data before deploying services. That ordering is now ENFORCED (#127),
+      # not just documented: the run that creates this CT writes
+      # /var/lib/ansible-fresh-allocation inside it (listing every mount it
+      # allocated fresh — see `fresh_allocation_manifest` in group_vars/all), and
+      # deploy-services.yml refuses to run for any docker host carrying it.
+      # Restore the volume, then `rm /var/lib/ansible-fresh-allocation` — that rm
+      # is the explicit "yes, this data is what I want" acknowledgement, and it is
+      # the only thing that clears the gate. (Each listed mount also gets a
+      # `.fresh-allocation` breadcrumb at its root; that is evidence, not the
+      # gate.) On a genuinely greenfield build, remove it without restoring.
+      # NOTE: unlike CT 101's mp0 this volume carries no `backup=1` (live:
+      # `mp0: local-zfs:subvol-201-disk-1,size=200G,mp=/data`, pct config 201,
+      # 2026-08-18), so vzdump does not include it and there is nothing to
+      # restore FROM. The gate will stop a rebuild here, and that is the correct
+      # outcome until a backup for this volume exists.
       # NOTE: /etc/pve/lxc/201.conf carries a [pve:pending] mp0 that is a
       # semantically identical reorder of the live value — likely residue of the
       # pre-#86 blind update-PUT era (origin unconfirmed; that PUT did send
@@ -214,7 +227,15 @@ proxmox_lxcs:
     started: true
     tags:
       - docker
+    # `description` is CREATE-TIME ONLY (provisioning is pinned update:false,
+    # #86) — nothing reconciles it, so editing it here changes the REBUILD
+    # declaration and leaves the live CT's description alone. The live text keeps
+    # the old service list until this container is next built from scratch; that
+    # divergence is deliberate, same as VM 100's `tags` divergence in eq12
+    # host_vars. Kept accurate anyway because the rebuild is exactly when nobody
+    # has the spare attention to notice a stale one.
     description: >-
-      Docker host — Immich, Frigate, NextCloud, PostgreSQL, Lyrion.
+      Docker host — Lyrion (LMS), Portainer, Watchtower
+      (Immich/Frigate/NextCloud/PostgreSQL planned).
       net0: vmbr1 (LAN), net1: vmbr2 (host-only NFS).
       Boots after TrueNAS (order=2).

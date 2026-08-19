@@ -37,10 +37,11 @@ The service provides:
 
 Because a read-write docker socket is root-equivalent on the host, access to the
 UI port is restricted by an Ansible-managed **fail-open nftables table**
-(`inet portainer_fw`, see `templates/portainer-firewall.nft.j2` and
-`defaults/main.yml`). Only these sources may reach tcp/9000:
+(`inet portainer_fw`, built by the shared `roles/nft_scoped_fw` from the per-port
+allowlist `portainer_fw_ports` in `defaults/main.yml` — #114). Only these sources
+may reach tcp/9000:
 
-- `192.168.25.20` — NPM LXC (CT 104), reverse-proxy upstream reach
+- `192.168.25.20/32` — NPM LXC (CT 104), reverse-proxy upstream reach
 - `192.168.48.0/24` — operator workstation subnet
 - loopback
 

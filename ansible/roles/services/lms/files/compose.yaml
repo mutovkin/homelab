@@ -23,6 +23,7 @@ services:
     network_mode: host              # Required for UDP broadcast discovery
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
     environment:

@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Stateful and schema-migrating: every release runs one-way postgres migrations
       # against the photo library. "enable" keeps it in scan scope so new versions are
@@ -15,7 +16,11 @@ services:
     ports:
       - "2283:2283"
     environment:
-      DB_HOSTNAME: postgres
+      # Its OWN postgres, not the shared server (#91). Immich requires VectorChord
+      # (PG 14-17); the shared cluster is vanilla postgres:18 with no vector
+      # extension and no immich database in its init script — pointing here would
+      # have produced a server that cannot finish startup the day immich is enabled.
+      DB_HOSTNAME: immich-postgres
       DB_USERNAME: ${IMMICH_DB_USERNAME}
       DB_PASSWORD: ${IMMICH_DB_PASSWORD}
       DB_DATABASE_NAME: ${IMMICH_DB_DATABASE}
@@ -28,9 +33,10 @@ services:
     depends_on:
       immich-redis:
         condition: service_healthy
+      immich-postgres:
+        condition: service_healthy
     networks:
       - immich_network
-      - postgres_network
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:2283/api/server/ping || exit 1"]
       interval: 30s
@@ -43,6 +49,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Stateless itself, but Immich requires server and ML to run the same release —
       # auto-updating one alone breaks lockstep. Reported, never auto-updated; it moves
@@ -64,12 +71,66 @@ services:
       timeout: 10s
       retries: 3
 
+  # Dedicated, VectorChord-enabled PostgreSQL for Immich (#91). Kept separate from
+  # the shared postgres:18 server on purpose: Immich's supported matrix is PG 14-17
+  # WITH VectorChord, and adding an extension + shared_preload_libraries to the
+  # cluster that backs joplin/nextcloud would make every other service inherit
+  # Immich's upgrade constraints.
+  #
+  # Image reference mirrors immich's own docker-compose.yml for the release this
+  # stack tracks, digest included — upstream ships DB and server as a matched pair
+  # (tag family: <pg_major>-vectorchord<ver>-pgvectors<ver>), and a mismatched
+  # vector extension is a failed startup, not a warning. Verified 2026-08-18 against
+  # https://github.com/immich-app/immich/blob/main/docker/docker-compose.yml (v3.1.0).
+  # BUMP IT WITH IMMICH, from that file — never independently, and note the digest
+  # pin means Watchtower can report nothing about this container (it only ever
+  # checks the exact reference in use), which is why the bump rides on the server's.
+  immich-postgres:
+    container_name: immich-postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
+      # Safe here despite the entrypoint dropping root -> postgres: that image chain
+      # (immich -> pgvector -> official postgres) drops privileges with `gosu`, which
+      # is NOT setuid — it is already root and calls setuid(2) directly. no_new_privs
+      # only blocks privilege GAIN through execve of setuid/fcaps binaries (kernel
+      # no_new_privs.txt: "does not prevent privilege changes that do not involve
+      # execve"), which is why `su`/`sudo` break under it and gosu does not.
+      - "no-new-privileges:true"
+    labels:
+      # Stateful: it holds the photo library's entire index. Also digest-pinned to
+      # immich's own reference, so it must never be moved by anything but a
+      # deliberate immich bump. "enable" keeps it counted in scanned=N; the pin
+      # means the only thing it could ever report is a re-push of that digest,
+      # which cannot happen — and "monitor-only" makes that doubly true (#83).
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
+    environment:
+      POSTGRES_USER: ${IMMICH_DB_USERNAME}
+      POSTGRES_PASSWORD: ${IMMICH_DB_PASSWORD}
+      POSTGRES_DB: ${IMMICH_DB_DATABASE}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      # Named volume, not a bind mount: initdb owns this path and must create it
+      # with the right ownership on a fresh host.
+      - immich-pgdata:/var/lib/postgresql/data
+    shm_size: "128mb"
+    networks:
+      - immich_network
+    # The image ships its own HEALTHCHECK (it also verifies vector-index integrity),
+    # so this only re-enables it for compose — matching upstream's `disable: false`.
+    # A real binary exists in the image, so depends_on: service_healthy above is safe.
+    healthcheck:
+      disable: false
+
   immich-redis:
     container_name: immich-redis
     image: redis:7-alpine
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
+      - "no-new-privileges:true"
     labels:
       # Auto-update class: pinned to major 7, cache-only state, recreate-from-image is
       # the recovery path anyway. The label is also what puts it in scan scope at all —
@@ -88,6 +149,7 @@ services:
 volumes:
   immich-model-cache:
   immich-redis-data:
+  immich-pgdata:
 
 networks:
   immich_network:
@@ -95,6 +157,6 @@ networks:
     ipam:
       config:
         - subnet: ${IMMICH_NETWORK_SUBNET:-172.31.0.0/24}
-  postgres_network:
-    external: true
-    name: postgres_network
+# The shared external postgres_network is deliberately gone (#91): with its own DB
+# sidecar, immich has no reason to reach the shared cluster, and attaching to it
+# would only widen what a compromised photo service can talk to.

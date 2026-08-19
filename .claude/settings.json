@@ -6,8 +6,6 @@
   },
   "permissions": {
     "allow": [
-      "Bash(npm run lint)",
-      "Bash(npm run test:*)",
       "Read(~/.zshrc)",
       "Read(./.env.example)"
     ],

@@ -268,11 +268,18 @@ lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
 
 ## NFS Architecture
 
-Containers that need TrueNAS storage (Lyrion, Frigate, etc.) use Docker NFS volumes instead of `/etc/fstab` mounts. This is a deliberate choice to avoid a boot-order race condition:
+Containers that need TrueNAS storage (Lyrion's music library, media) use Docker NFS volumes instead of `/etc/fstab` mounts. This is a deliberate choice to avoid a boot-order race condition:
 
 1. **Dependency inversion** — The NFS mount is bound to the container's lifecycle, not the host boot sequence. Docker handles the mount when starting the container.
 2. **Fail-safe booting** — If TrueNAS isn't ready when a container starts, the NFS mount fails and the container crashes immediately. This prevents Lyrion from booting against an empty directory and corrupting its database.
 3. **Self-healing** — `restart: unless-stopped` causes Docker to continuously retry. Once TrueNAS finishes booting and exports the NFS share, the next restart succeeds.
+
+> **Frigate is not one of these containers.** Its recordings live on local disk:
+> `FRIGATE_RECORDINGS_DIR` resolves under `data_mount`
+> (`roles/services/frigate/templates/env.j2`), which here is CT 201's own ZFS subvol.
+> The compose comment claiming an NFS mount from TrueNAS was stale and was corrected in
+> #91; moving recordings to TrueNAS would be a deliberate change to that variable plus a
+> real mount, not a comment.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐

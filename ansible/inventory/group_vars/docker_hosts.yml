@@ -1,9 +1,18 @@
 ---
 # Docker host group defaults
-docker_compose_version: "v2"
 docker_log_driver: "json-file"
 docker_log_max_size: "10m"
 docker_log_max_file: "3"
+# Fleet-wide auto-allocation pool for networks with no pinned subnet — and for
+# docker0 itself (#126). 172.18.0.0/15 is the one /15 disjoint from every pinned
+# subnet on both hosts: the old 172.20.0.0/14 overlapped eq12's pins outright, so
+# a fresh bootstrap could allocate a bridge on top of a pin and then fail the
+# pinned network's creation with "Pool overlaps with other one on this address
+# space" — ordering-dependent, invisible on an already-built host. n5pro carried
+# a host_vars override with exactly this value since #84; #126 moves it to the
+# group so both hosts agree and the override could be deleted.
+# Fleet map (keep every row disjoint): see the table in
+# inventory/host_vars/n5pro_docker/vars.yml.
 docker_default_address_pools:
-  - base: "172.20.0.0/14"
+  - base: "172.18.0.0/15"
     size: 24

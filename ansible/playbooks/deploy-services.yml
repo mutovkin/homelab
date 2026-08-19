@@ -2,7 +2,8 @@
 # Deploy Docker Compose services to hosts based on their service assignments
 # Each host's `services` list (inventory/host_vars/*/vars.yml) drives BOTH which
 # roles run and the order they run in — keep dependencies earlier in the list
-# (e.g. postgresql before joplin/immich/nextcloud, which share postgres_network).
+# (e.g. postgresql before joplin/nextcloud, which share postgres_network — immich
+# has its own DB sidecar since #91 and does not).
 # Run: ansible-playbook playbooks/deploy-services.yml
 # Single service: ansible-playbook playbooks/deploy-services.yml --tags postgresql
 # Valid --tags values are the entries of each host's `services` list. Because the
@@ -14,6 +15,72 @@
 - name: Deploy container services
   hosts: docker_hosts
   become: true
+  # --- Fresh-allocation restore gate (#127) ---
+  #
+  # The counterpart to the marker the proxmox_guests role drops on a mount it just
+  # allocated. A from-scratch rebuild creates the docker LXC with a brand-new EMPTY
+  # /data (its `mounts` declaration is allocation form, #87) and then runs green
+  # straight into this playbook, which initialises fresh databases and app state on
+  # top of the volume the operator was supposed to restore from vzdump first. The
+  # instruction to restore lived only in a host_vars comment, and site.yml has no
+  # pause point — documented-but-unenforced is precisely the pattern this repo
+  # keeps getting bitten by.
+  #
+  # Trivially green on the live fleet: both /data volumes are the real ones and no
+  # manifest exists. `stat`/`slurp` support check mode, so the gate is exercised by
+  # a dry run rather than skipped by it, and `tags: always` keeps it in force under
+  # a `--tags <service>` single-service deploy — the path most likely to be used in
+  # a hurry.
+  #
+  # The gate reads ONE canonical file, `fresh_allocation_manifest`
+  # (group_vars/all/vars.yml), which the writer puts on the container's ROOTFS and
+  # fills with the mount paths it allocated. It used to stat a hard-coded
+  # `/data/.fresh-allocation` behind a `data_restore_marker` knob that was set in no
+  # host_vars, group_vars or role — a name that looked like configuration and
+  # configured nothing, while the writer marked EVERY mount. Both CTs declare a
+  # single `mp=/data` today, so it happened to work; the first CT to gain an
+  # `mp1: local-zfs:500,mp=/media` would have had its rebuild sail through.
+  pre_tasks:
+    - name: Check for an un-restored fresh allocation
+      ansible.builtin.stat:
+        path: "{{ fresh_allocation_manifest }}"
+      register: fresh_allocation_marker
+      changed_when: false
+      tags: always
+
+    # Read inside the gate, not before it: the manifest names which mounts are
+    # fresh, and the operator needs that list in the failure, not in a log line
+    # they have to go find.
+    - name: Read the fresh-allocation manifest
+      ansible.builtin.slurp:
+        src: "{{ fresh_allocation_manifest }}"
+      register: fresh_allocation_manifest_content
+      when: fresh_allocation_marker.stat.exists
+      tags: always
+
+    - name: Refuse to deploy services onto a freshly allocated, un-restored volume
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} carries {{ fresh_allocation_manifest }}, which the
+          proxmox_guests role wrote when it ALLOCATED this container's data mounts —
+          meaning these volumes are brand new and empty, not the restored ones:
+          {{ (fresh_allocation_manifest_content.content | b64decode).split() | join(', ') }}.
+          Deploying now would initialise fresh databases and app state on them and
+          make the emptiness permanent-looking.
+          Restore first. The DR note beside `mp0` in
+          ansible/inventory/host_vars/<host>/vars.yml says what backs each mount
+          up and what does not — CT 101's mp0 carries `backup=1` so vzdump
+          includes it; CT 201's does not, and there is nothing to restore from.
+          Recover the volumes (vzdump restore, or copy the data back) before
+          re-running this playbook. Each listed mount also carries a
+          `.fresh-allocation` breadcrumb at its root, which a restore of that volume
+          removes on its own — but the manifest is the gate.
+          If the volumes really are meant to be greenfield, say so explicitly by
+          removing the manifest on the host:
+          `rm {{ fresh_allocation_manifest }}`
+          — that `rm` IS the acknowledgement; nothing else clears it. (#127)
+      when: fresh_allocation_marker.stat.exists
+      tags: always
   tasks:
     # One loop over the host's services list replaces the per-service import
     # blocks. include_role + apply.tags:item keeps `--tags <service>` working

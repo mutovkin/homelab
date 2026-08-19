@@ -26,6 +26,24 @@
     path: /dev/kfd
   register: dev_kfd
 
+# A guest declaring `gpu_sharing: true` and a host with no /dev/kfd is a
+# combination worth saying out loud. The desired-line set below silently shrinks
+# to the two /dev/dri lines, both drift sets come back empty, and the verdict
+# would otherwise print a bare "converged" over a CT that has just lost ROCm —
+# positive false reassurance, which is worse than the old task's silence. The
+# usual cause is amdgpu failing to load after a kernel upgrade. NOT an assert:
+# VAAPI via /dev/dri still works without it, and failing the whole host run over
+# a missing compute device would be disproportionate.
+- name: "Warn that /dev/kfd is absent so ROCm is not passed through — CT {{ item.vmid }}"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: /dev/kfd does not exist on {{ inventory_hostname }}, so ROCm
+      compute is NOT being shared into CT {{ item.vmid }} and the drift verdict
+      below covers the two /dev/dri lines ONLY. Check `lsmod | grep amdgpu` and
+      `dmesg | grep -i amdgpu` — a kernel upgrade that left the module unloaded
+      looks exactly like this.
+  when: not dev_kfd.stat.exists
+
 - name: "Get /dev/kfd major:minor numbers in decimal — CT {{ item.vmid }}"
   ansible.builtin.shell: "read -r major minor < <(stat -c '%t %T' /dev/kfd) && printf '%d:%d' \"0x$major\" \"0x$minor\""
   args:
@@ -38,30 +56,176 @@
   check_mode: false
   when: dev_kfd.stat.exists
 
-- name: "Add GPU DRI passthrough to LXC config — CT {{ item.vmid }}"
-  ansible.builtin.lineinfile:
-    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    line: "{{ dri_line }}"
-  loop:
-    - "lxc.cgroup2.devices.allow: c 226:* rwm"
-    - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
-  loop_control:
-    loop_var: dri_line
-  register: lxc_dri_update
-
-- name: "Add GPU KFD passthrough to LXC config — CT {{ item.vmid }}"
-  ansible.builtin.lineinfile:
-    path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    line: "{{ kfd_line }}"
-  loop:
-    - "lxc.cgroup2.devices.allow: c {{ dev_kfd_major_minor.stdout | default('') }} rwm"
-    - "lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file"
-  loop_control:
-    loop_var: kfd_line
+# A blank or malformed derivation would otherwise be written verbatim as
+# "lxc.cgroup2.devices.allow: c  rwm" — an invalid cgroup rule in a live CT's
+# config, appended fresh on every run because it never matches the regexp (#98).
+- name: "Assert /dev/kfd major:minor is well-formed — CT {{ item.vmid }}"
+  ansible.builtin.assert:
+    that:
+      - dev_kfd_major_minor.stdout | default('') is match('^\d+:\d+$')
+    fail_msg: >-
+      /dev/kfd major:minor derivation returned
+      '{{ dev_kfd_major_minor.stdout | default('') }}' — refusing to write a malformed
+      cgroup allow line to /etc/pve/lxc/{{ item.vmid }}.conf (#98).
   when: dev_kfd.stat.exists
-  register: lxc_kfd_update
 
-- name: "Restart LXC to apply GPU passthrough — CT {{ item.vmid }}"
+# /etc/pve/lxc/<id>.conf stores the LIVE config first, then snapshot sections
+# ([preissue77], [pve:pending], …) that carry their own copies of these same
+# lxc.* lines. `lineinfile` with a regexp rewrites the LAST match in the file —
+# which is the SNAPSHOT copy, not the live one. Keying the lines therefore made
+# things worse, not better: the next KFD renumber would have rewritten a
+# snapshot, reported changed, fired the reboot below, and left the live section
+# stale — a green play that silently takes the GPU away. So reconcile with a
+# shell task scoped to the region before the first "[" header, mirroring the
+# features task in proxmox_guests/tasks/main.yml (#98).
+#
+# `--current` matters: plain `pct config` prints the PENDING-merged view, so a
+# value staged in [pve:pending] but not yet applied reads back as if it were
+# already in force (CT 201: plain shows `features: mount=nfs,nesting=1`,
+# `--current` shows `nesting=1`). `--current` is the applied config, which is
+# what "converged" has to mean. Neither form ever prints snapshot sections.
+- name: "Read applied GPU passthrough config — CT {{ item.vmid }}"
+  ansible.builtin.command: "pct config {{ item.vmid }} --current"
+  register: lxc_gpu_live
+  changed_when: false
+  # Read-only, so --check must run it or the drift verdict is derived from nothing.
+  check_mode: false
+
+- name: "Determine GPU passthrough drift — CT {{ item.vmid }}"
+  vars:
+    _desired: >-
+      {{ ['lxc.cgroup2.devices.allow: c 226:* rwm',
+          'lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir']
+         + (['lxc.cgroup2.devices.allow: c ' ~ (dev_kfd_major_minor.stdout | default('')) ~ ' rwm',
+             'lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file']
+            if dev_kfd.stat.exists else []) }}
+  ansible.builtin.set_fact:
+    lxc_gpu_desired: "{{ _desired }}"
+    # Missing: a desired line the applied config does not have.
+    lxc_gpu_missing: "{{ _desired | difference(lxc_gpu_live.stdout_lines) }}"
+    # Extras: numeric cgroup allow rules present but NOT desired. A renumbered
+    # /dev/kfd leaves exactly one (its old value). Anything else may be a device
+    # someone added on purpose — a Coral TPU (c 189:x), /dev/net/tun (c 10:200) —
+    # so extras are never deleted by shape, only the single provably-stale one.
+    lxc_gpu_extras: >-
+      {{ lxc_gpu_live.stdout_lines
+         | select('match', '^lxc\.cgroup2\.devices\.allow: c [0-9]+:[0-9]+ rwm$')
+         | difference(_desired) }}
+
+- name: "Report GPU passthrough drift verdict — CT {{ item.vmid }}"
+  ansible.builtin.debug:
+    msg: >-
+      CT {{ item.vmid }} GPU passthrough
+      ({{ 'dri+kfd' if dev_kfd.stat.exists else 'dri ONLY — /dev/kfd absent, no ROCm' }}):
+      {{ 'converged (' ~ (lxc_gpu_desired | length) ~ ' lines applied, no foreign allow rules)'
+         if (lxc_gpu_missing | length == 0 and lxc_gpu_extras | length == 0)
+         else 'WOULD CHANGE — missing: [' ~ (lxc_gpu_missing | join('; ')) ~ ']'
+              ~ ' extras: [' ~ (lxc_gpu_extras | join('; ')) ~ ']' }}
+
+- name: "Reconcile GPU passthrough in the live config section — CT {{ item.vmid }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      conf="/etc/pve/lxc/{{ item.vmid }}.conf"
+      {% if lxc_gpu_extras | length > 1 %}
+      echo "REFUSING: CT {{ item.vmid }} has multiple foreign numeric cgroup allow rules:" >&2
+      {% for extra in lxc_gpu_extras %}
+      echo "  {{ extra }}" >&2
+      {% endfor %}
+      echo "Only one can be the stale /dev/kfd rule; the rest may be deliberate device" >&2
+      echo "passthroughs. A human must reconcile this — refusing to guess." >&2
+      exit 1
+      {% elif lxc_gpu_extras | length == 1 and lxc_gpu_missing | length == 0 %}
+      echo "REFUSING: CT {{ item.vmid }} has every desired GPU line AND an extra rule:" >&2
+      echo "  {{ lxc_gpu_extras[0] }}" >&2
+      echo "Nothing is stale here, so that rule is likely a deliberate passthrough" >&2
+      echo "(Coral TPU, /dev/net/tun, …). Not deleting it." >&2
+      exit 1
+      {% endif %}
+      work=$(mktemp -d /tmp/lxc-gpu-{{ item.vmid }}-XXXXXX)
+      trap 'rm -rf "$work"' EXIT
+
+      # Split at the FIRST section header: everything before it is the live
+      # config; everything from it onward belongs to snapshots and is copied
+      # through byte-for-byte.
+      if grep -q '^\[' "$conf"; then
+        hdr=$(grep -n -m1 '^\[' "$conf" | cut -d: -f1)
+        live_lines=$((hdr - 1))
+      else
+        live_lines=$(wc -l < "$conf")
+      fi
+      head -n "$live_lines" "$conf" > "$work/live"
+      tail -n +$((live_lines + 1)) "$conf" > "$work/rest"
+      {% if lxc_gpu_extras | length == 1 %}
+
+      # Exactly one stale rule, and we know its literal text from the drift probe:
+      # remove THAT string, never anything merely matching the numeric shape.
+      set +e
+      grep -vxF '{{ lxc_gpu_extras[0] }}' "$work/live" > "$work/live.new"
+      rc=$?
+      set -e
+      if [ "$rc" -gt 1 ]; then
+        echo "grep failed while removing the stale rule (rc=$rc)" >&2
+        exit 1
+      fi
+      mv "$work/live.new" "$work/live"
+      {% endif %}
+
+      desired=(
+      {% for gpu_line in lxc_gpu_desired %}
+        '{{ gpu_line }}'
+      {% endfor %}
+      )
+      for want in "${desired[@]}"; do
+        if ! grep -qxF "$want" "$work/live"; then
+          printf '%s\n' "$want" >> "$work/live"
+        fi
+      done
+
+      cat "$work/live" "$work/rest" > "$work/merged"
+
+      # Structural sanity: a container config without arch: means the split or a
+      # filter ate real content — never write that over a live guest's config.
+      if ! grep -q '^arch:' "$work/merged"; then
+        echo "REFUSING: merged config lost its 'arch:' line — aborting write" >&2
+        exit 1
+      fi
+
+      mkdir -p /var/backups
+      cp "$conf" "/var/backups/lxc-{{ item.vmid }}.conf.$(date +%s)"
+
+      # /etc/pve is pmxcfs: write by truncation, never mv/rename onto it.
+      cat "$work/merged" > "$conf"
+
+      # Post-verify against the APPLIED view: every desired line present, and the
+      # stale rule actually gone.
+      after=$(pct config {{ item.vmid }} --current)
+      for want in "${desired[@]}"; do
+        if ! printf '%s\n' "$after" | grep -qxF "$want"; then
+          echo "post-verify FAILED: '$want' missing from applied config" >&2
+          exit 1
+        fi
+      done
+      {% if lxc_gpu_extras | length == 1 %}
+      if printf '%s\n' "$after" | grep -qxF '{{ lxc_gpu_extras[0] }}'; then
+        echo "post-verify FAILED: stale rule still applied" >&2
+        exit 1
+      fi
+      {% endif %}
+      echo changed
+  args:
+    executable: /bin/bash
+  register: lxc_gpu_reconcile
+  # Last line, not whole stdout: pct can emit chatter ahead of it (features-task
+  # precedent in proxmox_guests/tasks/main.yml).
+  changed_when: lxc_gpu_reconcile.stdout_lines | default([]) | last | default('') == 'changed'
+  when: lxc_gpu_missing | length > 0 or lxc_gpu_extras | length > 0
+
+# Deliberately NOT a handler (hence the noqa): this file is included per guest,
+# so the reboot must fire for THIS item.vmid while its reconcile result is in
+# scope. A handler runs once at end of play, detached from the loop item, and
+# would reboot the wrong container — or the right one far too late.
+- name: "Restart LXC to apply GPU passthrough — CT {{ item.vmid }}" # noqa: no-handler
   ansible.builtin.command: "pct reboot {{ item.vmid }}"
   changed_when: true
-  when: (lxc_dri_update.changed or (lxc_kfd_update is defined and lxc_kfd_update.changed))
+  when: lxc_gpu_reconcile.changed | default(false)

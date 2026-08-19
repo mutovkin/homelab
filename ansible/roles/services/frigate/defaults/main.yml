@@ -1,0 +1,24 @@
+---
+# Cameras for the Ansible-owned Frigate config (templates/config.yml.j2).
+#
+# Empty by default and asserted non-empty in tasks/main.yml: Frigate is not
+# deployed on any host today (#91), and the day it is enabled an empty camera list
+# must stop the deploy rather than bring up an NVR that records nothing.
+#
+# Define this in the host_vars of the docker host that runs frigate:
+#
+#   frigate_cameras:
+#     driveway:
+#       stream_url: "rtsp://admin:{FRIGATE_RTSP_PASSWORD}@192.168.30.40:554/Streaming/Channels/101"
+#       objects: [person, car]        # optional, defaults to [person]
+#       detect: {width: 1280, height: 720}  # optional, Frigate auto-detects otherwise
+#
+# NOTE the `{FRIGATE_RTSP_PASSWORD}` placeholder: Frigate substitutes any env var
+# whose name starts with FRIGATE_ into config.yml at load time, and that variable is
+# already templated into the stack's .env from vault. Write the placeholder, never
+# the password — a real credential in host_vars would be committed in plaintext.
+frigate_cameras: {}
+
+# Continuous recording retention, in days. Detections/snapshots are retained
+# separately (see templates/config.yml.j2).
+frigate_record_retain_days: 7

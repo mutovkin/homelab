@@ -32,12 +32,24 @@ proxmox_templates:
   ubuntu-22.04: "ubuntu-22.04-standard"
 
 # Default VM settings
+#
+# Every key here MUST be dereferenced by a task in this role. The mirror image of
+# the guest-definition schema guards in tasks/main.yml (#87): those refuse a
+# host_vars key the role never reads; this comment is the same rule pointed at the
+# role's own defaults. #128 deleted six keys that no task read —
+# `proxmox_vm_defaults.disk_size`/`.storage` (VM disks are declared per guest via
+# `scsi:`, e.g. `scsi0: local-zfs:32,...`, and passed straight through),
+# `.net_model` (the model is hardcoded `virtio` in the `net` default expression),
+# and `.started` on both dicts plus `.gpu_sharing` on the LXC dict. The last two
+# are ITEM-LEVEL ONLY by construction: the start loops and the GPU-sharing loop
+# select on `selectattr('started'|'gpu_sharing', 'defined')` against each guest
+# entry and never consult a defaults dict, so a value here could not have applied.
+# Setting `proxmox_vm_defaults.started: false` and expecting fleet-wide behaviour
+# is exactly the inert-var class this repo keeps getting bitten by.
 proxmox_vm_defaults:
   cores: 2
   sockets: 1
   memory: 2048
-  disk_size: 32
-  storage: local-zfs
   bios: seabios
   # PVE's own default machine type (i440fx) unless a guest asks for q35 — the
   # old q35 default (echoed by VM 100's old explicit `machine: q35`) never
@@ -55,11 +67,14 @@ proxmox_vm_defaults:
   # that failure fires even for guests that pin net/netif explicitly — intended:
   # declare the host's primary bridge.
   net_bridge: "{{ proxmox_bridge }}"
-  net_model: virtio
   onboot: true
-  started: true
 
 # Default LXC settings
+#
+# Same rule as proxmox_vm_defaults above (#128): no dead keys. `storage` and
+# `root_disk_size` stay — both are read (the provisioning `storage`/`disk` params
+# and the `pct resize` task). `started` and `gpu_sharing` were deleted: they are
+# item-level-only, per the comment above.
 proxmox_lxc_defaults:
   cores: 2
   memory: 2048
@@ -71,7 +86,5 @@ proxmox_lxc_defaults:
   # as proxmox_vm_defaults above (#87).
   net_bridge: "{{ proxmox_bridge }}"
   onboot: true
-  started: true
   nesting: false
   unprivileged: true
-  gpu_sharing: false
