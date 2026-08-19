@@ -103,11 +103,14 @@ proxmox_lxcs:
       # DR: a rebuild allocates a FRESH EMPTY /data — restore it from the vzdump
       # backup (backup=1 includes mp0) before deploying services. That ordering
       # is now ENFORCED (#127), not just documented: the run that creates this CT
-      # writes /data/.fresh-allocation inside it, and deploy-services.yml refuses
-      # to run for any docker host carrying that marker. Restore the volume, then
-      # `rm /data/.fresh-allocation` — that rm is the explicit "yes, this data is
-      # what I want" acknowledgement, and it is the only thing that clears the
-      # gate. On a genuinely greenfield build, remove it without restoring.
+      # writes /var/lib/ansible-fresh-allocation inside it (listing every mount it
+      # allocated fresh — see `fresh_allocation_manifest` in group_vars/all), and
+      # deploy-services.yml refuses to run for any docker host carrying it.
+      # Restore the volume, then `rm /var/lib/ansible-fresh-allocation` — that rm
+      # is the explicit "yes, this data is what I want" acknowledgement, and it is
+      # the only thing that clears the gate. (Each listed mount also gets a
+      # `.fresh-allocation` breadcrumb at its root; that is evidence, not the
+      # gate.) On a genuinely greenfield build, remove it without restoring.
       mp0: "local-zfs:110,mp=/data,backup=1"
     netif:
       net0: "name=eth0,bridge=vmbr0,gw=192.168.23.1,hwaddr=AE:E1:F1:EE:F5:9A,ip=192.168.25.15/18,type=veth"

@@ -1079,8 +1079,14 @@
 # databases and app state on top of it — the vzdump restore that was supposed to
 # happen in between lived only in a host_vars comment.
 #
-# So the create path drops a marker file on every mount it just allocated, and
-# playbooks/deploy-services.yml refuses to run while one exists. `.changed` on the
+# So the create path drops a `.fresh-allocation` breadcrumb on every mount it just
+# allocated AND one canonical manifest listing them all at
+# `{{ fresh_allocation_manifest }}` on the container's rootfs;
+# playbooks/deploy-services.yml refuses to run while that manifest exists. Two
+# artefacts, one gate — deliberately: the reader must stat a SINGLE
+# mount-independent path or it drifts out of step with this loop the moment a
+# guest declares a second mount, which is exactly how the first version of this
+# gate was defeatable. `.changed` on the
 # provisioning result is the only honest "this run created it" signal available;
 # an already-existing CT exits changed=false through the `elif not force:` branch
 # and gets no marker. Under --check the module is skipped entirely, so nothing
@@ -1122,7 +1128,8 @@
       CT {{ item.vmid }} ({{ item.hostname }}) was created by this run with a
       freshly allocated mount at {{ item.path }} ({{ item.key }}), but it is
       declared `started: false` so it is not running and the
-      {{ item.path }}/.fresh-allocation marker cannot be written. That marker is
+      {{ item.path }}/.fresh-allocation breadcrumb and the
+      {{ fresh_allocation_manifest }} manifest cannot be written. That manifest is
       what stops playbooks/deploy-services.yml from initialising services on an
       empty, un-restored volume (#127). Set `started: true` for this container,
       or drop its `mounts` declaration.
@@ -1145,6 +1152,36 @@
   loop: "{{ lxc_fresh_markers | default([]) }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.path }}/.fresh-allocation"
+
+# The per-mount markers above are evidence ON the volume; this manifest is the
+# GATE. deploy-services.yml stats exactly one path, and it used to be a
+# hard-coded `/data/.fresh-allocation` while this loop marks EVERY mount the
+# build allocated — so a CT that gained a second mount would have had a fresh
+# `/media/.fresh-allocation` the reader never looked at, and the play would run
+# green onto an empty volume. Writing one canonical file on the container's
+# ROOTFS, whose CONTENT is the same `mounts`-derived path list, makes the reader
+# complete by construction for any number of mounts.
+#
+# `sh -c` (not `printf` via argv) because the redirect has to happen INSIDE the
+# container; pct exec has no shell of its own. The paths come from the guest
+# definition's `mounts` keys and are repo-controlled, not user input.
+- name: Record the fresh-allocation manifest on freshly built LXC containers
+  become: true
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.0 }}"
+      - "--"
+      - sh
+      - -c
+      - >-
+        printf '%s\n' {{ item.1 | map(attribute='path') | map('quote') | join(' ') }}
+        > {{ fresh_allocation_manifest | quote }}
+  changed_when: true
+  loop: "{{ lxc_fresh_markers | default([]) | groupby('vmid') }}"
+  loop_control:
+    label: "CT {{ item.0 }} — {{ fresh_allocation_manifest }}"
 
 - name: Ensure LXC root disk is resized
   become: true

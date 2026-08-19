@@ -187,11 +187,14 @@ proxmox_lxcs:
       # local-zfs:subvol-201-disk-1 (pct config 201, 2026-08-16). DR: restore
       # /data before deploying services. That ordering is now ENFORCED (#127),
       # not just documented: the run that creates this CT writes
-      # /data/.fresh-allocation inside it, and deploy-services.yml refuses to run
-      # for any docker host carrying that marker. Restore the volume, then
-      # `rm /data/.fresh-allocation` — that rm is the explicit "yes, this data is
-      # what I want" acknowledgement, and it is the only thing that clears the
-      # gate. On a genuinely greenfield build, remove it without restoring.
+      # /var/lib/ansible-fresh-allocation inside it (listing every mount it
+      # allocated fresh — see `fresh_allocation_manifest` in group_vars/all), and
+      # deploy-services.yml refuses to run for any docker host carrying it.
+      # Restore the volume, then `rm /var/lib/ansible-fresh-allocation` — that rm
+      # is the explicit "yes, this data is what I want" acknowledgement, and it is
+      # the only thing that clears the gate. (Each listed mount also gets a
+      # `.fresh-allocation` breadcrumb at its root; that is evidence, not the
+      # gate.) On a genuinely greenfield build, remove it without restoring.
       # NOTE: unlike CT 101's mp0 this volume carries no `backup=1` (live:
       # `mp0: local-zfs:subvol-201-disk-1,size=200G,mp=/data`, pct config 201,
       # 2026-08-18), so vzdump does not include it and there is nothing to

@@ -9,6 +9,20 @@ timezone: America/Los_Angeles
 # instead. Role-required packages are in roles/common/vars/main.yml and cannot
 # be overridden from inventory.
 
+# Fresh-allocation restore gate (#127): ONE path, written by the proxmox_guests
+# role (playbooks/proxmox-hosts.yml) and read by playbooks/deploy-services.yml.
+# It lives here rather than in either role's defaults precisely because two plays
+# on two different hosts have to agree on it — the writer runs on the Proxmox
+# node via `pct exec`, the reader runs inside the guest.
+#
+# It sits on the container's ROOTFS, not on a data mount, and it lists every
+# mount whose volume this build allocated fresh. That is the fix for the original
+# shape: the writer marked every mount while the reader stat'd a single
+# hard-coded /data path, so the first CT to declare a second mount
+# (`mp1: local-zfs:500,mp=/media`) would have had its rebuild sail straight
+# through the gate.
+fresh_allocation_manifest: /var/lib/ansible-fresh-allocation
+
 # Watchtower schedule
 watchtower_schedule: "0 30 4 * * *" # Daily at 4:30 AM
 watchtower_timezone: "America/Los_Angeles"
