@@ -106,7 +106,10 @@ tasks:
   docker:status:
     desc: Show status of all Docker containers across hosts
     cmds:
-      - ssh root@deb-docker.lan 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'
+      # Both docker hosts — the task claimed "across hosts" while only ever
+      # showing eq12's, so n5pro-docker's containers were invisible here (#94).
+      - for: ["deb-docker.lan", "n5pro-docker.lan"]
+        cmd: echo "=== {{.ITEM}} ===" && ssh root@{{.ITEM}} 'docker ps -a --format "table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}"'
 
   # === Vault ===
   vault:edit:
