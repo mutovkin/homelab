@@ -99,9 +99,9 @@ Hard-won lessons — check here before debugging from scratch.
   is the privileged-CT half of the fix and is applied only where `docker_lxc: true`
   (n5pro_docker, CT 201); unprivileged CT 101 does not see the host's AppArmor and
   needs no mask — don't "fix" eq12 by adding one. The per-service `security_opt` is
-  fleet-wide regardless, and since #95 every service carries `no-new-privileges:true`
-  alongside it (in-container escalation defense matters more here precisely because
-  AppArmor is unconfined).
+  fleet-wide regardless, and #95 added `no-new-privileges:true` alongside it on every
+  service (in-container escalation defense matters more here precisely because AppArmor
+  is unconfined) — new services need both lines.
 - **AppArmor 4.1 / PVE 9 ABI regression (host profiles).** PVE 9's AppArmor 4.1 default
   ABI enforces fine-grained `AF_UNIX` mediation that older bundled profiles (e.g.
   `dhclient`) predate, so unix sockets are denied (`failed protocol match`) — flooding the
