@@ -222,7 +222,15 @@ proxmox_lxcs:
     started: true
     tags:
       - docker
+    # `description` is CREATE-TIME ONLY (provisioning is pinned update:false,
+    # #86) — nothing reconciles it, so editing it here changes the REBUILD
+    # declaration and leaves the live CT's description alone. The live text keeps
+    # the old service list until this container is next built from scratch; that
+    # divergence is deliberate, same as VM 100's `tags` divergence in eq12
+    # host_vars. Kept accurate anyway because the rebuild is exactly when nobody
+    # has the spare attention to notice a stale one.
     description: >-
-      Docker host — Immich, Frigate, NextCloud, PostgreSQL, Lyrion.
+      Docker host — Lyrion (LMS), Portainer, Watchtower
+      (Immich/Frigate/NextCloud/PostgreSQL planned).
       net0: vmbr1 (LAN), net1: vmbr2 (host-only NFS).
       Boots after TrueNAS (order=2).
