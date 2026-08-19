@@ -116,8 +116,8 @@ services:
       # Scanned and reported, never auto-updated (#83).
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.monitor-only=true"
-    ports:
-      - "8686:8686" # Vector GraphQL API for monitoring and debugging
+    # No ports: vector.yaml enables no `api:` block, so 8686 published nothing
+    # but an open port on 0.0.0.0 (#94).
     volumes:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -165,7 +165,7 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
-    user: telegraf:${DOCKER_GID:-996}
+    user: telegraf:${DOCKER_GID:-999}
     labels:
       # Two reasons, either sufficient. (1) Socket holder: it bind-mounts
       # /var/run/docker.sock, and `:ro` is cosmetic for a unix socket — the API is

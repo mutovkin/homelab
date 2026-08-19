@@ -75,13 +75,17 @@ After evaluating various solutions, the VictoriaMetrics ecosystem was chosen for
 
 ### Deployment Steps
 
-#### 1. Edit Environment Variables
+#### 1. Environment Variables
+
+`.env` is not created by hand and is never committed: the deploy pipeline templates it
+onto the host from `templates/env.j2`, filling secrets from ansible-vault. Change a value
+by editing `env.j2` (or the vault/host_vars variable it reads) and re-deploying — the
+`.env.example` this section used to reference was deleted in #85/#106.
+
+The deployed file contains:
 
 ```bash
-cp .env.example .env
-nano .env
-
-# Required: Set Grafana password (generate with: openssl rand -hex 32):
+# Required: Grafana password (generate with: openssl rand -hex 32):
 GRAFANA_PASSWORD=<your-password>
 
 # Required: VictoriaMetrics/VictoriaLogs authentication. Since #88 these four are
@@ -94,10 +98,6 @@ VL_AUTH_PASSWORD=<your-password>
 
 # Required: Docker group ID (for Telegraf to access Docker socket):
 DOCKER_GID=999                    # Run: getent group docker | cut -d: -f3
-
-# Optional: Network monitoring (SNMP disabled by default - requires MIB files):
-# ROUTER_IP=192.168.1.1
-# SNMP_COMMUNITY=public
 
 # System configuration:
 TIMEZONE=America/Los_Angeles      # Your timezone
@@ -370,12 +370,13 @@ SNMP monitoring is commented out because it requires MIB files not included in t
 To enable SNMP monitoring:
 
 1. **Uncomment the SNMP section** in `telegraf/telegraf.conf`
-2. **Set environment variables** in `.env`:
+2. **Add the variables to `templates/env.j2`** so the deploy templates them into `.env`
+   (they were removed in #94 because nothing active consumed them):
    ```bash
-   ROUTER_IP=192.168.1.1
-   SNMP_COMMUNITY=public
+   ROUTER_IP={{ router_ip }}
+   SNMP_COMMUNITY={{ snmp_community }}
    ```
-3. **Restart Telegraf**
+3. **Re-deploy** (the role restarts Telegraf when its config changes)
 
 Example (already in config, just uncommented):
 ```toml
