@@ -34,7 +34,11 @@
     owner: root
     group: nut
     mode: "0644"
-  notify: restart-nut-driver
+  # upsd parses ups.conf too, not just the driver — restarting only the driver
+  # left upsd serving the old UPS definitions until something else bounced it (#94).
+  notify:
+    - restart-nut-driver
+    - restart-nut-server
 
 - name: Assert upsd binds specific addresses (no wildcards)
   ansible.builtin.assert:
@@ -106,11 +110,16 @@
     enabled: true
     state: started
 
+# The USB driver handshake can take a few seconds after a restart, so a single
+# immediate upsc call raced it and failed a healthy server (#94). `until`
+# exhausting its retries fails the task on its own — no failed_when needed.
 - name: Verify UPS communication
   ansible.builtin.command: "upsc {{ nut_server.ups_name }}"
   register: nut_ups_status
   changed_when: false
-  failed_when: "'ups.status' not in nut_ups_status.stdout"
+  retries: 5
+  delay: 5
+  until: "'ups.status' in nut_ups_status.stdout"
 
 - name: Show UPS status
   ansible.builtin.debug:
