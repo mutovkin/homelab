@@ -97,7 +97,9 @@ VL_AUTH_USERNAME=obs
 VL_AUTH_PASSWORD=<your-password>
 
 # Required: Docker group ID (for Telegraf to access Docker socket):
-DOCKER_GID=999                    # Run: getent group docker | cut -d: -f3
+DOCKER_GID=996                    # Derived at deploy time by stat'ing /var/run/docker.sock
+                                  # (per-host: 996 on deb-docker, 990 on n5pro-docker).
+                                  # Not defaulted — a wrong gid loses docker metrics.
 
 # System configuration:
 TIMEZONE=America/Los_Angeles      # Your timezone

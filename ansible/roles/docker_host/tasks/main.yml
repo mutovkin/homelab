@@ -9,8 +9,9 @@
 
 - name: Add Docker GPG key
   ansible.builtin.get_url:
-    # Distribution-derived, matching the repo line below: hardcoding debian
-    # fetched the wrong key on the Ubuntu guest (CT 201) on a fresh build (#94).
+    # Keep the key path in step with the distribution-derived repo line below.
+    # Both distros serve the byte-identical key today — this is not a live bug —
+    # but that is Docker's choice to change, not an assumption to hardcode (#94).
     url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
     dest: /etc/apt/keyrings/docker.asc
     mode: "0644"

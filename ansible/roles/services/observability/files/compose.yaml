@@ -165,7 +165,9 @@ services:
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
-    user: telegraf:${DOCKER_GID:-999}
+    # :? not :-  — a default here is a guess at a per-host gid (996 vs 990) and
+    # a wrong one silently costs telegraf its docker metrics (#94).
+    user: telegraf:${DOCKER_GID:?}
     labels:
       # Two reasons, either sufficient. (1) Socket holder: it bind-mounts
       # /var/run/docker.sock, and `:ro` is cosmetic for a unix socket — the API is
