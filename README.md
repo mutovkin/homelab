@@ -60,11 +60,11 @@ task deploy:services  # 3. Deploy compose stacks
 - **Cross-host:** Direct LAN (both machines on the same 192.168.x.x network)
 - **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20–25.x pins (pool 172.20.0.0/14). N5 Pro: 172.26–29.x + .31 pins (pool 172.18.0.0/15 — fleet map in `host_vars/n5pro_docker`).
 - **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on EQ12
-- **NFS:** N5 Pro Docker LXC → TrueNAS VM for Frigate recordings, media storage, and Lyrion music library
+- **NFS:** N5 Pro Docker LXC → TrueNAS VM for the Lyrion music library today; Frigate recordings and other media once those stacks land (#91)
 
 ## Hardware Passthrough
 
-- **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Used via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 for Frigate and Immich.
+- **N5 Pro GPU** — AMD Radeon 890M with 32GB UMA allocation. Reserved for Frigate and Immich (both planned #91) via VAAPI `/dev/dri` device sharing (not full PCI passthrough) in CT-201 — no deployed workload uses it today.
 - **TrueNAS SATA** — JMicron JMB58x controller at c1:00.0 uses full PCI passthrough in VM-200 (requires VM, not LXC).
 - **TrueNAS NVMe** — 2× WD SN850X 2TB at c6:00.0 and c3:00.0 passed through to VM-200 for mirrored ZFS special vdev.
 
@@ -108,10 +108,10 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 | Service                                 | Port             | Description                                          |
 | --------------------------------------- | ---------------- | ---------------------------------------------------- |
 | [LMS](ansible/roles/services/lms/)               | 9001, 9090, 3483 | Music server (Lyrion/Squeezebox) — NFS from TrueNAS   |
-| [PostgreSQL](ansible/roles/services/postgresql/) | 5432             | _(planned #91)_ Database for Immich + NextCloud      |
-| [Immich](ansible/roles/services/immich/)         | 2283             | _(planned #91)_ Self-hosted photo/video management (GPU-accelerated) |
-| [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 | _(planned #91)_ NVR with AI object detection (GPU-accelerated)       |
-| [NextCloud](ansible/roles/services/nextcloud/)   | 8080             | _(planned #91)_ File sync and collaboration          |
+| [PostgreSQL](ansible/roles/services/postgresql/) | 5432 (planned)   | _(planned #91)_ Database for Immich + NextCloud      |
+| [Immich](ansible/roles/services/immich/)         | 2283 (planned)   | _(planned #91)_ Self-hosted photo/video management (GPU-accelerated) |
+| [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 (planned) | _(planned #91)_ NVR with AI object detection (GPU-accelerated) |
+| [NextCloud](ansible/roles/services/nextcloud/)   | 8080 (planned)   | _(planned #91)_ File sync and collaboration          |
 | [Portainer](ansible/roles/services/portainer/)   | 9000 (allowlisted) | Container management UI                            |
 | [Watchtower](ansible/roles/services/watchtower/) | —                | Scheduled container updates (per-service policy: auto vs monitor-only) |
 
