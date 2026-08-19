@@ -18,6 +18,8 @@
   ansible.builtin.shell: |
     set -o pipefail
     systemctl list-unit-files 'nut-monitor.service' | grep -q 'nut-monitor' && echo nut-monitor || echo nut-client
+  args:
+    executable: /bin/bash
   register: nut_monitor_detect
   changed_when: false
   when: nut_role in ["server", "client"]

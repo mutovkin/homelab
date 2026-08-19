@@ -38,24 +38,49 @@
   check_mode: false
   when: dev_kfd.stat.exists
 
+# A blank or malformed derivation would otherwise be written verbatim as
+# "lxc.cgroup2.devices.allow: c  rwm" — an invalid cgroup rule in a live CT's
+# config, appended fresh on every run because it never matches the regexp (#98).
+- name: "Assert /dev/kfd major:minor is well-formed — CT {{ item.vmid }}"
+  ansible.builtin.assert:
+    that:
+      - dev_kfd_major_minor.stdout | default('') is match('^\d+:\d+$')
+    fail_msg: >-
+      /dev/kfd major:minor derivation returned
+      '{{ dev_kfd_major_minor.stdout | default('') }}' — refusing to write a malformed
+      cgroup allow line to /etc/pve/lxc/{{ item.vmid }}.conf (#98).
+  when: dev_kfd.stat.exists
+
+# Each managed line is keyed by a regexp that matches THAT line and nothing
+# else, so a changed value (the KFD major:minor is derived at runtime) rewrites
+# in place instead of appending a duplicate. Without keying, every drifted value
+# stacked a new line and tripped the `pct reboot` below (#98).
 - name: "Add GPU DRI passthrough to LXC config — CT {{ item.vmid }}"
   ansible.builtin.lineinfile:
     path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    line: "{{ dri_line }}"
+    line: "{{ dri_line.line }}"
+    regexp: "{{ dri_line.regexp }}"
   loop:
-    - "lxc.cgroup2.devices.allow: c 226:* rwm"
-    - "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+    - line: "lxc.cgroup2.devices.allow: c 226:* rwm"
+      regexp: '^lxc\.cgroup2\.devices\.allow: c 226:\* rwm$'
+    - line: "lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir"
+      regexp: '^lxc\.mount\.entry: /dev/dri dev/dri '
   loop_control:
     loop_var: dri_line
   register: lxc_dri_update
 
+# The allow regexp is deliberately numeric-only (\d+:\d+): the DRI allow line
+# above is "c 226:* rwm", so it cannot be hijacked by this key.
 - name: "Add GPU KFD passthrough to LXC config — CT {{ item.vmid }}"
   ansible.builtin.lineinfile:
     path: "/etc/pve/lxc/{{ item.vmid }}.conf"
-    line: "{{ kfd_line }}"
+    line: "{{ kfd_line.line }}"
+    regexp: "{{ kfd_line.regexp }}"
   loop:
-    - "lxc.cgroup2.devices.allow: c {{ dev_kfd_major_minor.stdout | default('') }} rwm"
-    - "lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file"
+    - line: "lxc.cgroup2.devices.allow: c {{ dev_kfd_major_minor.stdout | default('') }} rwm"
+      regexp: '^lxc\.cgroup2\.devices\.allow: c \d+:\d+ rwm$'
+    - line: "lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file"
+      regexp: '^lxc\.mount\.entry: /dev/kfd dev/kfd '
   loop_control:
     loop_var: kfd_line
   when: dev_kfd.stat.exists

@@ -121,6 +121,8 @@
   ansible.builtin.shell: |
     set -o pipefail
     pveam available --section system | grep '{{ proxmox_templates[item] }}' | tail -1 | awk '{print $2}'
+  args:
+    executable: /bin/bash
   register: template_resolution
   changed_when: false
   check_mode: false  # read-only pveam query; must run in --check to populate resolved_templates
@@ -430,6 +432,8 @@
         qm set {{ item.vmid }} $args
         echo "changed"
       fi
+  args:
+    executable: /bin/bash
   register: vm_net_update
   changed_when: vm_net_update.stdout == "changed"
   loop: "{{ proxmox_vms | selectattr('net', 'defined') | list }}"
@@ -464,6 +468,8 @@
       qm set {{ item.vmid }} $args
       echo "changed"
     fi
+  args:
+    executable: /bin/bash
   register: vm_startup_update
   changed_when: vm_startup_update.stdout == "changed"
   loop: "{{ proxmox_vms }}"
@@ -771,6 +777,8 @@
       pct set {{ item.vmid }} -features "$desired"
       echo "changed"
     fi
+  args:
+    executable: /bin/bash
   register: pct_features
   # Last line, not whole stdout: pct/pvesh can emit progress chatter ahead of it.
   changed_when: pct_features.stdout_lines | default([]) | last | default('') == 'changed'
@@ -804,6 +812,8 @@
       pct set {{ item.vmid }} $args
       echo "changed"
     fi
+  args:
+    executable: /bin/bash
   register: lxc_startup_update
   changed_when: lxc_startup_update.stdout == "changed"
   loop: "{{ proxmox_lxcs }}"
