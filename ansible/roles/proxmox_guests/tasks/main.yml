@@ -335,6 +335,19 @@
   # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
+    # Explicit, not inherited (#137): community.proxmox's `validate_certs` argspec
+    # carries NO default — unset is `None`, and the collection then supplies `false`
+    # from a deprecation shim (module_utils/proxmox.py::_connect) whose own message
+    # says the default becomes `true` in community.proxmox 2.0.0
+    # (plugins/doc_fragments/proxmox.py). Our PVE nodes serve the self-signed PVE
+    # cluster CA, so an inherited flip would fail every task in this role at once,
+    # on both hypervisors, with no repo change to blame. requirements.yml bounds the
+    # collection <2.0.0 for the same reason — belt AND braces (#86 precedent).
+    #
+    # Trusting the PVE cluster CA on the operator machines and setting this `true`
+    # is the better end state; it must land on the Mac AND the Arch box together
+    # (Critical Rule 2), so it is filed as follow-up work, not done here.
+    validate_certs: false
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
     api_token_secret: "{{ vault_proxmox_api_token_secret }}"
@@ -708,6 +721,8 @@
   # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox_kvm:
     api_host: "{{ ansible_host }}"
+    # Explicit — see the first proxmox call site in this file (#137).
+    validate_certs: false
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
     api_token_secret: "{{ vault_proxmox_api_token_secret }}"
@@ -736,6 +751,8 @@
   # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
+    # Explicit — see the first proxmox call site in this file (#137).
+    validate_certs: false
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
     api_token_secret: "{{ vault_proxmox_api_token_secret }}"
@@ -1054,6 +1071,8 @@
   # censors failure output — re-run with ANSIBLE_NO_LOG=False to debug (re-exposes the token).
   community.proxmox.proxmox:
     api_host: "{{ ansible_host }}"
+    # Explicit — see the first proxmox call site in this file (#137).
+    validate_certs: false
     api_user: "{{ vault_proxmox_api_user }}"
     api_token_id: "{{ vault_proxmox_api_token_id }}"
     api_token_secret: "{{ vault_proxmox_api_token_secret }}"
