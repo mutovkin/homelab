@@ -2,8 +2,18 @@
 #
 # /var/log/structured.log is a full duplicate of syslog+auth.log in RFC5424, written
 # for Vector (see /etc/rsyslog.d/40-vector-structured.conf). Rotate it on exactly the
-# cadence Debian's own /etc/logrotate.d/rsyslog uses for /var/log/syslog, so the
-# duplicate can never outgrow the original.
+# cadence Debian's own /etc/logrotate.d/rsyslog uses for /var/log/syslog.
+#
+# It cannot outgrow syslog+auth COMBINED, but it is not free: measured over 60s,
+# syslog grew 30,412 B and auth.log 7,651 B (38,063 B total) against structured.log's
+# 39,647 B — i.e. +4.2% for the RFC5424 header. That confirms `*.*` really does equal
+# syslog+auth with no duplication, and it also means this file roughly DOUBLES
+# /var/log write volume on a rootfs that is 74% used with 6.4 G free.
+#
+# maxsize is the flood brake, and it is why the weekly cadence alone is not enough:
+# logrotate's daily timer rotates early once the file passes the limit, so a chatty
+# daemon cannot fill the rootfs waiting for Sunday. This repo has had two log floods
+# already. Weekly + rotate 4 still governs the normal case.
 #
 # The rotation period is also the bound on Vector's re-read window: the file source
 # reads this file from the beginning, so after a buffer reset (which wipes
@@ -15,6 +25,7 @@
 {
         rotate 4
         weekly
+        maxsize 100M
         missingok
         notifempty
         compress

@@ -317,7 +317,13 @@ services:
       GF_SMTP_PASSWORD: "${GRAFANA_SMTP_PASSWORD:?required - see #139}"
       GF_SMTP_FROM_ADDRESS: "${GRAFANA_SMTP_FROM_ADDRESS:?required - see #139}"
       GF_SMTP_FROM_NAME: Grafana (homelab)
-      GF_SMTP_STARTTLS_POLICY: OpportunisticStartTLS
+      # Mandatory, not Opportunistic. Under Opportunistic, a relay that stops
+      # advertising STARTTLS — downgrade, MITM, a relay change — gets the shared
+      # Gmail app password and the alert bodies in CLEARTEXT, and Grafana logs
+      # nothing unusual. smtp.gmail.com:587 always offers STARTTLS, so this costs
+      # nothing and removes a silent-downgrade path. Same argument as `:?` over
+      # `:-` above: never be quietly unable to do the secure thing.
+      GF_SMTP_STARTTLS_POLICY: MandatoryStartTLS
     deploy:
       resources:
         limits:

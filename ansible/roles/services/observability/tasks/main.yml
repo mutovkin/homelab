@@ -124,9 +124,19 @@
 
 # The one genuine outage risk in this change: a drop-in rsyslog rejects takes
 # rsyslog down on restart, and with it ALL host logging — syslog, auth.log and the
-# new stream at once. `rsyslogd -N1` parses the whole config (master + every
-# /etc/rsyslog.d drop-in) without touching the running daemon and exits non-zero on
-# a parse error, so a bad file fails the play here instead of on the restart below.
+# new stream at once. `rsyslogd -N1` parses the whole config without touching the
+# running daemon.
+#
+# Scope of the guarantee, narrowed after review because the earlier wording claimed
+# more than was tested: it is VERIFIED to exit non-zero on a PARSE error. Semantic
+# errors — an unknown template name, a bad omfile parameter — are NOT confirmed to
+# fail it, which is precisely why the end-to-end `logger` probe below exists rather
+# than this task being the only gate.
+#
+# It also validates EVERY drop-in in /etc/rsyslog.d, not just ours, so a pre-existing
+# break in an unrelated file (postfix.conf) now fails this role's play. That is loud
+# rather than silent and worth the coupling.
+#
 # Skipped in check mode, where the copy above has not happened and there would be
 # nothing new to validate.
 - name: Validate the rsyslog configuration before restarting
@@ -142,33 +152,75 @@
     - vector_rsyslog_conf.changed
     - not ansible_check_mode
 
+# UNGATED on purpose — no `changed` condition. The restart above only fires when the
+# drop-in itself changed, i.e. once. If rsyslog is dead on an otherwise-converged
+# host, nothing else in this role would start it, and Vector's only host-log input
+# stops growing while every task reports ok. Same shape as the nftables
+# RemainAfterExit trap in CLAUDE.md: state that can be invalidated from outside,
+# guarded by something that cannot see the invalidation.
+- name: Ensure rsyslog is running and enabled
+  ansible.builtin.systemd_service:
+    name: rsyslog
+    state: started
+    enabled: true
+  when: not ansible_check_mode
+
 # LOAD-BEARING GUARD, not a nicety. vector.yaml no longer tails syslog/auth.log, so
 # a drop-in that loads cleanly but routes nothing leaves Vector with an empty input
 # and the host silently stops shipping logs entirely — the exact green-but-dead
-# shape this whole issue family is about. rsyslog writes its own start message on
-# restart, so the file is non-empty within a second; the wait is slack.
-- name: Wait for the structured stream to appear
+# shape this whole issue family is about.
+#
+# This is an END-TO-END FRESHNESS probe, and the freshness is the entire point. The
+# guard this replaces asserted the file existed and was non-empty, which a file
+# untouched since last week satisfies instantly — so it could only ever fail on the
+# very first run that deployed the drop-in, and was inert on every converged run
+# afterwards. Writing a marker through `logger` and then waiting for that exact
+# marker to appear in the file exercises the whole path: rsyslog is alive, it is
+# reading its socket, the `*.*` selector still reaches our action, and omfile is
+# still writing to this path. It fails when rsyslog is dead, when the drop-in loads
+# but routes nothing, and when a `stop` rule added upstream of us swallows the
+# selector — none of which existence-plus-size can see.
+#
+# The marker is unique per run so a stale match from an earlier deploy cannot
+# satisfy it. local0.notice is used because Debian's config routes it to
+# /var/log/syslog as well, so the probe line is visible to a human debugging this.
+- name: Generate a unique marker for the structured-stream probe
+  ansible.builtin.set_fact:
+    vector_structured_probe: "ansible-structured-probe-{{ ansible_date_time.iso8601_micro | regex_replace('[^0-9]', '') }}"
+  when: not ansible_check_mode
+
+# changed_when: false — this writes one line to the log stream, which is the probe,
+# not a state change. Skipped in check mode: a dry run must not write.
+- name: Emit the structured-stream probe marker
+  ansible.builtin.command: logger -p local0.notice "{{ vector_structured_probe }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Wait for the probe marker to reach the structured stream
   ansible.builtin.wait_for:
     path: /var/log/structured.log
-    timeout: 15
+    search_regex: "{{ vector_structured_probe }}"
+    timeout: 10
+  register: vector_structured_probe_result
+  failed_when: false
   when: not ansible_check_mode
 
-- name: Stat the structured stream
-  ansible.builtin.stat:
-    path: /var/log/structured.log
-  register: vector_structured_log
-  when: not ansible_check_mode
-
-- name: Assert the structured stream is being written
+# Separate assert rather than letting wait_for fail, so the failure message can
+# explain what to check. failed_when:false above hands us the result either way;
+# deliberately NO no_log anywhere on this chain — censoring it would blind exactly
+# the diagnostic this guard exists to print (#88).
+- name: Assert the structured stream is being written right now
   ansible.builtin.assert:
     that:
-      - vector_structured_log.stat.exists
-      - vector_structured_log.stat.size > 0
+      - vector_structured_probe_result is not failed
     fail_msg: >-
-      /var/log/structured.log is missing or empty. rsyslog loaded
-      /etc/rsyslog.d/40-vector-structured.conf but is not routing to it, so Vector
-      — which now tails ONLY this file for host logs — would ship nothing.
-      Check `systemctl status rsyslog` and `journalctl -u rsyslog` on this host.
+      A marker written with `logger` did not reach /var/log/structured.log within
+      10s, so rsyslog is not currently routing to it and Vector — which tails ONLY
+      this file for host logs — is shipping nothing from this host. The file may
+      still exist and be non-empty; that proves only that it was written once.
+      Check `systemctl status rsyslog`, `journalctl -u rsyslog`, and that
+      /etc/rsyslog.d/40-vector-structured.conf is still present and that no drop-in
+      sorting before it ends the ruleset with `stop`.
     quiet: true
   when: not ansible_check_mode
 
@@ -374,6 +426,67 @@
   loop: "{{ observability_settled.results | default([]) }}"
   loop_control:
     label: "{{ item.item }}"
+  when: not ansible_check_mode
+
+# THE CHECK THIS ROLE WAS MISSING. Everything above proves processes are up:
+# containers running after a settle period, Grafana answering /api/health. That is
+# exactly the evidence that was green for the ~30 days the log pipeline was dead
+# (docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md),
+# whose own Prevention section says: assert the data ARRIVED, not that the process
+# is running — query the destination for recent records, never container state.
+#
+# #143 added three new in-process ways to ship nothing while staying up: the
+# parse_syslog failure branch, the "*" label expansion, and VRL abort paths (an
+# aborted remap drops the event silently — drop_on_abort defaults true and nothing
+# is rerouted). None of them stops the container; all of them are invisible except
+# in stderr, which nobody reads on a green run.
+#
+# Deliberately NOT gated on "vector was restarted this run". A converged run that
+# reports green over a dead pipeline is the precise failure this whole issue family
+# is about, so this runs on EVERY real run. If Vector is down, this is supposed to
+# fail.
+- name: Query VictoriaLogs for host log records ingested in the last 10 minutes
+  ansible.builtin.uri:
+    url: "http://localhost:{{ victorialogs_web_port }}/select/logsql/query"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: "_time:10m source:host | stats count() as rows"
+    url_username: "{{ vault_vl_auth_username }}"
+    url_password: "{{ vault_vl_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: observability_host_ingest
+  # /select/logsql/query returns JSONL. `stats count()` yields a single line, but
+  # sum the findall rather than assuming one — a shape change must read as "no
+  # rows" and retry, not raise a Jinja error inside `until`.
+  until: >-
+    observability_host_ingest.status | default(0) == 200
+    and (observability_host_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+  retries: 6
+  delay: 10
+  changed_when: false
+  # failed_when:false so the RETRY EXHAUSTION lands on the assert below, which can
+  # say what to check. Deliberately no no_log anywhere on this pair: censoring it
+  # would blind the one diagnostic this exists to print (#88).
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Assert host log records actually reached VictoriaLogs
+  ansible.builtin.assert:
+    that:
+      - observability_host_ingest.status | default(0) == 200
+      - (observability_host_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+    fail_msg: >-
+      VictoriaLogs reports ZERO host log records in the last 10 minutes, so the
+      pipeline is deployed and running but not delivering. Every container may
+      still be Up — that is the failure mode, not evidence against it. Check, in
+      order: `docker logs --tail 100 vector` on this host for remap aborts or sink
+      errors; that /var/log/structured.log is still GROWING (not merely present);
+      and `systemctl status rsyslog`. If the disk buffer is wedged, the runbook is
+      docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+      HTTP status was {{ observability_host_ingest.status | default('none') }}.
+    quiet: true
   when: not ansible_check_mode
 
 # --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------

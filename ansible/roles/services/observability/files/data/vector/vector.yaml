@@ -80,8 +80,13 @@ transforms:
       .hostname = "${VECTOR_HOSTNAME}"
       .host = "${VECTOR_HOSTNAME}"
 
-      # Extract container name from Docker metadata
-      .container_name = string!(.container_name)
+      # Defaulted, not `string!()`. A fallible-abort coercion aborts the whole VRL
+      # program, and an aborted remap DROPS the event: drop_on_abort defaults true,
+      # reroute_dropped defaults false, so there is no dead-letter and no exported
+      # counter — the event simply never existed. Unreachable today (docker_logs
+      # always sets container_name), but "unreachable by construction" is exactly
+      # the claim that ages badly, and a visible "unknown" beats a vanished event.
+      .container_name = to_string(.container_name) ?? "unknown"
 
       # Docker gives us no severity; the container's own line may contain one but
       # parsing arbitrary application formats is out of scope here.
@@ -100,7 +105,7 @@ transforms:
       # `?? {}` rather than a fallible assignment: parse_syslog's error branch
       # returns null, and indexing null is a VRL compile error. An empty object is
       # the "did not parse" sentinel checked immediately below.
-      parsed = parse_syslog(string!(.message)) ?? {}
+      parsed = parse_syslog(to_string(.message) ?? "") ?? {}
       if length(parsed) > 0 {
         # The whole point of the RFC5424 side-stream: a real severity per record,
         # one of emerg/alert/crit/err/warning/notice/info/debug. Kept as a plain
@@ -126,7 +131,12 @@ transforms:
         # Drop the RFC5424 header from the body — its parts are now fields.
         .message = parsed.message
       } else {
-        .level = "info"
+        # "unknown", NOT "info". Fabricating a severity is the exact defect this
+        # whole issue exists to remove, and an unparseable line is MORE likely to
+        # be a malformed emergency than a routine one — defaulting it to info
+        # would hide precisely the record worth seeing. `_time:24h parse_failed:*`
+        # is 0 today, so this costs nothing and is here for the day it is not.
+        .level = "unknown"
         .parse_failed = "syslog"
       }
 
@@ -153,12 +163,27 @@ transforms:
       - parse_pkg
     source: |
       # Stamp now() ONLY when nothing upstream supplied a timestamp. The old
-      # transform overwrote every event with now() unconditionally, which is
-      # harmless while tailing but would have stamped the entire package-audit
-      # backfill (#143 item 4/7) with the deploy time — a falsified history.
+      # transform overwrote EVERY event with now() unconditionally, so host records
+      # carried ingest time instead of the time in the line; that is what this
+      # fixes, and precision proves it (pre-change _time carried nanoseconds, the
+      # signature of now(); post-change exactly six digits, rsyslog's microseconds).
+      #
+      # It does NOT rescue the package-audit backfill, and an earlier version of
+      # this comment wrongly claimed it did. parse_pkg sets no timestamp, so all
+      # 293 pkg records landed inside a 3.8 ms window at deploy time while their
+      # _msg values carry dates back to 2026-08-16. Their in-line timestamps are
+      # not syslog-shaped; parsing them is tracked separately. The role README's
+      # limitation 4 documents this as a known property — keep the two in step.
+      #
+      # .timestamp_source records the provenance so it is QUERYABLE: a host record
+      # reading "ingest" fell through the syslog parse, which is otherwise visible
+      # only in stderr.
       ts = .timestamp
       if !is_timestamp(ts) {
         .timestamp = now()
+        .timestamp_source = "ingest"
+      } else {
+        .timestamp_source = "event"
       }
 
       # Map message field to _msg for VictoriaLogs
@@ -181,9 +206,19 @@ transforms:
       # See the role README's limitations and the docs/solutions entry.
       # Do NOT invent a synthetic container_name for host events: that puts a fake
       # value in a real field.
-      labels = {"source": to_string!(.source), "hostname": to_string!(.hostname)}
+      # Every coercion defaulted, none fallible-abort. `.source` especially: an
+      # abort in an upstream remap leaves the event unmodified, so `.source` would
+      # be absent here, `to_string!()` would abort a SECOND time and the event is
+      # dropped silently — or, surviving, the sink's "*" expansion would find no
+      # loki_labels and write an entry with an EMPTY label set. Two independent
+      # reviewers reached this by different routes. A defaulted "unknown" surfaces
+      # the anomaly as a queryable label instead of vanishing the record.
+      labels = {
+        "source": to_string(.source) ?? "unknown",
+        "hostname": to_string(.hostname) ?? "unknown"
+      }
       if exists(.container_name) {
-        labels = set!(labels, ["container_name"], to_string!(.container_name))
+        labels = set(labels, ["container_name"], to_string(.container_name) ?? "unknown") ?? labels
       }
       .loki_labels = labels
 
@@ -219,6 +254,13 @@ sinks:
       # unchanged for docker events and loses only the never-rendering label on
       # host events.
       "*": "{{ loki_labels }}"
+    # Strips the field the label template referenced (`loki_labels`) from the JSON
+    # body, so the object is not also stored as three duplicate keys on every
+    # record. The plan for #143 asserted this could not be done ("the sink reads it
+    # after the transform"); that was wrong — this is the sink's own option for
+    # exactly this case, and it was verified live afterwards by confirming
+    # `source:host` and `container_name:<a container>` still return rows.
+    remove_label_fields: true
     compression: gzip
     out_of_order_action: accept
     batch:

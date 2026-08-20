@@ -100,14 +100,23 @@ What it does, in `roles/services/observability/tasks/vector-buffer-reset.yml`:
 
 - Everything still queued in the buffer is **lost**.
 - The file-source checkpoints go with it. Since #143 that cost is **duplication
-  only, and bounded** — it used to be silent loss. The host source is a single
-  file, `/var/log/structured.log`, read with `read_from: beginning` and no
-  `ignore_older_secs`, so a reset re-reads it from the start: at most one
-  logrotate period (weekly, `rotate 4`) of duplicate host records. The four
-  package-audit files behave the same way, ~293 lines total.
-  Before #143 the sources were `read_from: end` + `ignore_older_secs: 600`, which
-  meant a reset — and any outage longer than ten minutes — silently threw the
-  window away instead. Duplicates you can see; a hole you cannot.
+  rather than loss** — it used to be silent loss — but the two source groups are
+  bounded very differently, and the difference matters:
+  - **Host logs**: one file, `/var/log/structured.log`, read with
+    `read_from: beginning` and no `ignore_older_secs`, rotated weekly with
+    `maxsize 100M`. A reset re-reads at most one rotation period.
+  - **Package-audit logs**: NOT the same bound, despite an earlier version of this
+    note saying so. Debian rotates `dpkg.log` and `apt/history.log` **monthly,
+    `rotate 12`**, and the `unattended-upgrades` logs **monthly, `rotate 6`** — so
+    a reset can re-read up to **a year** of package history, not a week. Worse,
+    every re-read record is re-stamped with ingest time (these lines are not
+    syslog-shaped, so Vector has no event time to use), which means each reset
+    multiplies the audit trail and drags its apparent dates forward. The ~293-line
+    figure is today's volume, not a bound.
+
+  Before #143 the sources were `read_from: end` + `ignore_older_secs: 600`, so a
+  reset — and any outage longer than ten minutes — silently threw the window away
+  instead. Duplicates you can see; a hole you cannot.
 
 This is a recovery action, not maintenance. If you find yourself running it
 regularly, the buffer is a symptom and something upstream (sink availability,

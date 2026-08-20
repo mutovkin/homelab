@@ -138,16 +138,22 @@ email.
 | `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
 | `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
 | `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
-| `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[1h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
 
 `execErrState: Alerting` on all four — a datasource that cannot be reached is not
 evidence of health.
 
-**Absence is alerted on exactly once.** `obs-http-probe-absent` owns it: its query
-returns a row for every probe seen in the last hour, so an empty result means not
-one probe has reported in an hour — telegraf or its write path is dead. The two
-threshold rules therefore use `noDataState: OK`; if they alerted on NoData too, one
-dead telegraf would page three times.
+**Absence is owned by exactly one RULE — which is not the same as one email.**
+`obs-http-probe-absent` owns it: its query returns a row for every probe seen in the
+last 24 hours, so an empty result means not one probe has reported in a day —
+telegraf or its write path is dead. The two threshold rules therefore use
+`noDataState: OK`; if they alerted on NoData too, one dead telegraf would fire three
+rules instead of one.
+Per *incident*, though, a dead telegraf sends **one email per probed target** —
+four today — then four resolved notices, because `server` is in the root policy's
+`group_by`. That is deliberate: two different services failing must be two
+notifications, not one merged digest whose subject names only the first. The cost is
+paid when the common cause is telegraf itself.
 
 **Adding a probe needs no rule edit.** The probe rules carry no `server` matcher —
 they aggregate `by (server, check_type)`. Add a URL to `[[inputs.http_response]]` in
@@ -158,12 +164,28 @@ is the point (#139).
 Detection latency: ~5 min for a failing probe (1 m interval x `for: 5m`), ~15 min
 for one that goes silent (600 s of `lag` plus `for: 5m`).
 
+The `[24h]` lookbehind on the absence rule is load-bearing and was `[1h]` until
+review caught it: a series with no sample inside the lookbehind is not returned at
+all, so with `[1h]` a dead probe was alertable only between 10 and 60 minutes of
+silence — past an hour its instance vanished, Grafana marked it stale and
+**resolved** the alert. Partial absence (one target dead, the rest healthy) is the
+likely case and had no coverage at all past an hour; `noDataState: Alerting` only
+catches *total* absence. Proven against the retired `http://searxng:8080` probe from
+#94, which `lag[1h]` cannot see and `lag[24h]` can.
+The deliberate cost: **removing a URL from `telegraf.conf` alerts for up to 24 h
+afterwards** (two emails at `repeat_interval: 12h`). `[7d]` was rejected — a week of
+firing after an intentional removal is alert fatigue, and a probe dead for more than
+a day has already paged and been ignored.
+
 ### Notification channel
 
 The root notification policy (`provisioning/alerting/notification-policies.yaml`)
-routes **everything in this folder** to the `homelab-email` contact point, which is
-templated by `templates/grafana-contact-points.yaml.j2` because its address is a
-vault value.
+routes **everything in the org** — not just this folder — to the `homelab-email`
+contact point, which is templated by `templates/grafana-contact-points.yaml.j2`
+because its address is a vault value. A `policies:` entry with no `routes:` IS the
+root route, so every rule in every folder inherits it, including #108's. That is the
+intent; adding a folder matcher to "scope" it would orphan every rule outside this
+folder back to Grafana's stub receiver.
 
 That contact point and Grafana's `GF_SMTP_*` settings reuse the host's **shared
 Gmail relay** — the `vault_watchtower_email_*` vars, the same relay watchtower
@@ -242,10 +264,11 @@ makes queryable, so `level:err` works without paying for stream cardinality.
 | `appname` | no | host | `sshd` | RFC5424 header |
 | `procid` | no | host | `1234` (`null` when the header says `-`) | RFC5424 header |
 | `syslog_hostname` | no | host | `deb-docker` | RFC5424 header — the CT's real OS hostname |
-| `parse_failed` | no | host | `syslog` | set only when a line is not RFC5424 |
+| `parse_failed` | no | host | `syslog` | set only when a line is not RFC5424; `level` is then `unknown`, never a fabricated `info` |
+| `timestamp_source` | no | all | `event` / `ingest` | provenance of `_time`, so a host record that fell through the syslog parse is queryable |
 | `file`, `source_type` | no | host, pkg | `/var/log/structured.log`, `file` | Vector's file source |
 | `_msg` | — | all | the message text | `message`, with the RFC5424 header stripped on host records |
-| `_time` | — | all | — | the real line timestamp on host records; ingestion time on docker/pkg |
+| `_time` | — | all | — | host: the line's own timestamp, to the microsecond. docker: the **Docker daemon's** log timestamp. pkg: ingestion time (see limitation 4) |
 
 `hostname` is deliberately the **Ansible inventory name**, not the container ID
 (`get_hostname!()`, the old value — it changed on every recreate) and not the CT's
@@ -297,20 +320,27 @@ duplicated.
    building a custom image. Measured 2026-08-18, journal and syslog+auth agreed
    exactly (968 lines each), so today's practical loss is a handful of early-boot
    lines — but it is a real gap, not a solved one.
-3. **Vector now ingests its own container's stderr, and that is new.** Measured after
-   this change: 77 records with `container_name:vector` over 7 days, every one under
-   the new `eq12_docker` hostname, against **zero** under all seven prior container-ID
-   hostnames. `docker_logs` does not self-exclude; why self-ingestion began with this
-   change was not determined, and no guess is recorded here. It is not a regression —
-   the volume is trivial (almost all startup lines) and Vector's own internal flood
-   suppression bounds it — but the consequence matters: **if Vector ever floods its
-   stderr again, it will now amplify**, which is exactly the loop #143 item 3 was
-   worried about (and which, measured, was NOT happening before). Zero of the old
-   label-render warnings ever reached VictoriaLogs.
-   `exclude_containers: ["vector"]` on the `docker_logs` source would stop it, and is
-   deliberately NOT applied: it would also remove Vector's own diagnostics from
-   VictoriaLogs, which is the first place anyone looks when this pipeline misbehaves.
-   Revisit if a real flood occurs.
+3. **This change INTRODUCED Vector self-ingestion; it did not eliminate it.** Say it
+   that way round, because the comfortable phrasing gets it backwards. #143 item 3 was
+   filed about a self-amplifying loop — Vector re-ingesting its own noisy stderr.
+   Measured, that loop was **not** happening before: zero records with
+   `container_name:vector` across all seven prior container-ID hostname labels, and
+   zero containing the old label-render warning, verified against control phrases from
+   Vector's own stderr that *do* return hits. Measured after: **77 records and
+   counting**, all under the new `eq12_docker` label, starting the moment the
+   post-change container came up. `docker_logs` does not self-exclude.
+   **Why self-ingestion began with this change was not determined**, and no guess is
+   recorded here.
+   Today it is harmless — the volume is trivial, almost all of it startup lines, and
+   Vector's own internal flood suppression bounds repeats. But the honest conclusion
+   is the uncomfortable one: the amplification hazard the issue was filed about is now
+   **live rather than hypothetical**, and because we cannot explain why it started, we
+   cannot promise it stays bounded.
+   `exclude_containers: ["vector"]` on the `docker_logs` source is the one-line
+   mitigation and is deliberately NOT applied: it would also delete Vector's own
+   diagnostics from VictoriaLogs, the first place anyone looks when this pipeline
+   misbehaves, and the only copy that survives a container recreate. Tracked as its own
+   issue rather than left to this paragraph.
 4. **Package-audit records carry ingestion time, not line time.** `dpkg.log`,
    `apt/history.log` and the two `unattended-upgrades` logs are not syslog-shaped and
    are tailed directly, so `_time` is when Vector read the line. This is a known

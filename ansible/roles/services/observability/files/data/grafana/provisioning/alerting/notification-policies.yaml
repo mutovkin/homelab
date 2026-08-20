@@ -11,8 +11,16 @@ apiVersion: 1
 # The receiver is provisioned from templates/grafana-contact-points.yaml.j2 (the
 # address is a vault value, so it cannot be a static file in this repo).
 #
-# NOTE: a provisioned root policy is READ-ONLY in the Grafana UI. Editing routing
-# from now on means editing this file and re-running the deploy. Before this
+# SCOPE, stated precisely because the wording here used to be wrong: a `policies:`
+# entry with no `routes:` is the ROOT route for the whole ORG, not for one folder.
+# Every rule in every folder inherits `homelab-email` — including #108's existing
+# rule, which is exactly why this wires it up. It is org-wide on purpose; do NOT
+# add a folder matcher to "scope" it, that would orphan every rule outside the
+# folder back to the stub receiver.
+#
+# NOTE: a provisioned root policy is READ-ONLY in the Grafana UI, so this file is
+# now the only editable source of routing. Editing it means editing this file and
+# re-running the deploy. Before this
 # landed, the root policy was Grafana's stock default and nothing hand-made
 # existed here — verified against /api/v1/provisioning/policies immediately
 # before the first apply. If someone later builds routing in the UI, this file

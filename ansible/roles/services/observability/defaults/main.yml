@@ -4,6 +4,12 @@
 # /api/health on the published port. Change both together.
 grafana_web_port: 3000
 
+# VictoriaLogs' HOST-side published port, as written in files/compose.yaml
+# ("9428:9428"). Used only by the post-deploy ingest assertion, which queries the
+# destination for recent host records rather than trusting container state
+# (vector-057's own Prevention rule). Change both together.
+victorialogs_web_port: 9428
+
 # How long a restarted vector/telegraf must stay up before the play accepts it.
 # Neither exposes an HTTP surface to probe, so "still running after N seconds" is
 # the gate. Vector exits about a second after a malformed vector.yaml, so this
