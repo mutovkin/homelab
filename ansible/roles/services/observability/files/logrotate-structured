@@ -1,0 +1,26 @@
+# Managed by Ansible — roles/services/observability (#143). Do not edit on the host.
+#
+# /var/log/structured.log is a full duplicate of syslog+auth.log in RFC5424, written
+# for Vector (see /etc/rsyslog.d/40-vector-structured.conf). Rotate it on exactly the
+# cadence Debian's own /etc/logrotate.d/rsyslog uses for /var/log/syslog, so the
+# duplicate can never outgrow the original.
+#
+# The rotation period is also the bound on Vector's re-read window: the file source
+# reads this file from the beginning, so after a buffer reset (which wipes
+# checkpoints) Vector re-ingests at most one rotation's worth of duplicates.
+#
+# postrotate calls Debian's own rsyslog helper — the same one /etc/logrotate.d/rsyslog
+# invokes — so rsyslog reopens the file instead of writing to an unlinked inode.
+/var/log/structured.log
+{
+        rotate 4
+        weekly
+        missingok
+        notifempty
+        compress
+        delaycompress
+        sharedscripts
+        postrotate
+                /usr/lib/rsyslog/rsyslog-rotate
+        endscript
+}

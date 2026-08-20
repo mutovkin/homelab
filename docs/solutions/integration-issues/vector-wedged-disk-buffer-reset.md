@@ -99,8 +99,15 @@ What it does, in `roles/services/observability/tasks/vector-buffer-reset.yml`:
 ## What it costs
 
 - Everything still queued in the buffer is **lost**.
-- The file-source checkpoints go with it, so vector re-reads `/var/log/*` from
-  wherever `read_from` puts it — a window of host logs is duplicated or skipped.
+- The file-source checkpoints go with it. Since #143 that cost is **duplication
+  only, and bounded** — it used to be silent loss. The host source is a single
+  file, `/var/log/structured.log`, read with `read_from: beginning` and no
+  `ignore_older_secs`, so a reset re-reads it from the start: at most one
+  logrotate period (weekly, `rotate 4`) of duplicate host records. The four
+  package-audit files behave the same way, ~293 lines total.
+  Before #143 the sources were `read_from: end` + `ignore_older_secs: 600`, which
+  meant a reset — and any outage longer than ten minutes — silently threw the
+  window away instead. Duplicates you can see; a hole you cannot.
 
 This is a recovery action, not maintenance. If you find yourself running it
 regularly, the buffer is a symptom and something upstream (sink availability,

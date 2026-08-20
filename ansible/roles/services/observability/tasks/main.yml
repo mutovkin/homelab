@@ -88,6 +88,79 @@
     - "{{ data_mount }}/grafana/dashboards"
     - "{{ data_mount }}/grafana/provisioning"
 
+# --- Structured host-log stream for Vector (#143) -----------------------------
+# Debian's RSYSLOG_FileFormat carries no <PRI>, so severity and facility are
+# unrecoverable from /var/log/syslog and /var/log/auth.log — Vector had to store
+# every host record as `level: info`. These tasks make rsyslog emit the same
+# messages a SECOND time in RFC5424 to /var/log/structured.log, which is what
+# vector.yaml's `host_syslog` source now tails INSTEAD of syslog+auth.log.
+# Full reasoning: files/rsyslog-vector-structured.conf.
+#
+# Ordered before the config copy below on purpose: the file must exist and be
+# written before Vector restarts onto a config that reads only that file.
+- name: Deploy rsyslog structured-stream config for Vector
+  ansible.builtin.copy:
+    src: rsyslog-vector-structured.conf
+    dest: /etc/rsyslog.d/40-vector-structured.conf
+    mode: "0644"
+  register: vector_rsyslog_conf
+
+- name: Deploy logrotate policy for the structured stream
+  ansible.builtin.copy:
+    src: logrotate-structured
+    dest: /etc/logrotate.d/vector-structured
+    mode: "0644"
+
+# The one genuine outage risk in this change: a drop-in rsyslog rejects takes
+# rsyslog down on restart, and with it ALL host logging — syslog, auth.log and the
+# new stream at once. `rsyslogd -N1` parses the whole config (master + every
+# /etc/rsyslog.d drop-in) without touching the running daemon and exits non-zero on
+# a parse error, so a bad file fails the play here instead of on the restart below.
+# Skipped in check mode, where the copy above has not happened and there would be
+# nothing new to validate.
+- name: Validate the rsyslog configuration before restarting
+  ansible.builtin.command: rsyslogd -N1
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Restart rsyslog to pick up the structured stream
+  ansible.builtin.systemd_service:
+    name: rsyslog
+    state: restarted
+  when:
+    - vector_rsyslog_conf.changed
+    - not ansible_check_mode
+
+# LOAD-BEARING GUARD, not a nicety. vector.yaml no longer tails syslog/auth.log, so
+# a drop-in that loads cleanly but routes nothing leaves Vector with an empty input
+# and the host silently stops shipping logs entirely — the exact green-but-dead
+# shape this whole issue family is about. rsyslog writes its own start message on
+# restart, so the file is non-empty within a second; the wait is slack.
+- name: Wait for the structured stream to appear
+  ansible.builtin.wait_for:
+    path: /var/log/structured.log
+    timeout: 15
+  when: not ansible_check_mode
+
+- name: Stat the structured stream
+  ansible.builtin.stat:
+    path: /var/log/structured.log
+  register: vector_structured_log
+  when: not ansible_check_mode
+
+- name: Assert the structured stream is being written
+  ansible.builtin.assert:
+    that:
+      - vector_structured_log.stat.exists
+      - vector_structured_log.stat.size > 0
+    fail_msg: >-
+      /var/log/structured.log is missing or empty. rsyslog loaded
+      /etc/rsyslog.d/40-vector-structured.conf but is not routing to it, so Vector
+      — which now tails ONLY this file for host logs — would ship nothing.
+      Check `systemctl status rsyslog` and `journalctl -u rsyslog` on this host.
+    quiet: true
+  when: not ansible_check_mode
+
 # The compose file bind-mounts these paths directly (not from the deploy dir), so
 # without these tasks a config edited in the repo never reaches the container and
 # the only way to apply it is an ad-hoc scp — which Critical Rule 1 forbids.
@@ -146,6 +219,14 @@
     name: services/_deploy
   vars:
     svc: observability
+    # These two live in files/ so the `copy` tasks above can find them, but they
+    # are HOST config (/etc/rsyslog.d, /etc/logrotate.d) — not part of the compose
+    # payload. Without the excludes _deploy's `delete: true` synchronize would also
+    # drop them into {{ data_mount }}/deploy/observability/, where they mean
+    # nothing and only invite someone to "fix" the wrong copy (#143).
+    svc_rsync_extra:
+      - "--exclude=rsyslog-vector-structured.conf"
+      - "--exclude=logrotate-structured"
 
 # Single source of truth for the restart decision, shared by the check-mode
 # preview, the restart itself and the readiness gates (postgresql/lms/frigate

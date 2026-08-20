@@ -146,6 +146,13 @@ services:
       # VictoriaLogs rejects every batch with 401 — silently, since Vector still
       # starts. This is upstream's documented flag for restoring the old behaviour.
       VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: "true"
+      # The hostname label on every log record (#143), read by vector.yaml as
+      # ${VECTOR_HOSTNAME} via the interpolation flag above. Templated from
+      # Ansible's inventory_hostname by templates/env.j2.
+      # `:?` and not `:-`: a missing value must abort the compose parse loudly. An
+      # empty default would silently relabel every record on the host with "", and
+      # a label that is wrong-but-present is exactly the defect this replaces.
+      VECTOR_HOSTNAME: ${VECTOR_HOSTNAME:?required - see roles/services/observability/templates/env.j2 (#143)}
     deploy:
       resources:
         limits:

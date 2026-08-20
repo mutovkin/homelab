@@ -48,10 +48,12 @@ if the stat is undefined and compose uses `${DOCKER_GID:?}`.
 
 ```
 roles/services/observability/
-├── tasks/main.yml                  firewall → data dirs → configs → deploy → restarts
+├── tasks/main.yml                  firewall → rsyslog stream → data dirs → configs → deploy → restarts
 ├── tasks/vector-buffer-reset.yml   opt-in, destructive; tagged `never` (see below)
 ├── templates/env.j2                the .env, templated from vault + host_vars
 ├── files/compose.yaml              the five services
+├── files/rsyslog-vector-structured.conf  → /etc/rsyslog.d/40-vector-structured.conf
+├── files/logrotate-structured            → /etc/logrotate.d/vector-structured
 └── files/data/                     bind-mounted config, rsync'd to {{ data_mount }}
     ├── vector/vector.yaml
     ├── telegraf/telegraf.conf
@@ -167,6 +169,86 @@ ssh root@192.168.25.15 'nft list table inet observability_fw'   # read-only chec
 Verify from a **blocked** source, not an allowed one — an allowed source proves
 nothing about the drop rule.
 
+## Log record schema
+
+What Vector stores in VictoriaLogs, per record (#143). Only the **labels** become
+part of `_stream`; everything else is a plain JSON field — which VictoriaLogs still
+makes queryable, so `level:err` works without paying for stream cardinality.
+
+| Field | Label? | Sources | Example | Origin |
+| ----- | ------ | ------- | ------- | ------ |
+| `source` | **label** | all | `host` / `docker` / `pkg` | literal, set per transform |
+| `hostname` | **label** | all | `eq12_docker` | `VECTOR_HOSTNAME` from `.env` (Ansible `inventory_hostname`) |
+| `host` | no | all | `eq12_docker` | same value; VictoriaLogs stores both keys and both used to be wrong |
+| `container_name` | **label** (docker only) | docker | `grafana` | Docker daemon metadata |
+| `level` | no | all | `err`, `warning`, `notice`, `info` | RFC5424 `<PRI>`; literal `info` for docker/pkg |
+| `facility` | no | host | `authpriv`, `daemon` | RFC5424 `<PRI>` |
+| `appname` | no | host | `sshd` | RFC5424 header |
+| `procid` | no | host | `1234` (`null` when the header says `-`) | RFC5424 header |
+| `syslog_hostname` | no | host | `deb-docker` | RFC5424 header — the CT's real OS hostname |
+| `parse_failed` | no | host | `syslog` | set only when a line is not RFC5424 |
+| `file`, `source_type` | no | host, pkg | `/var/log/structured.log`, `file` | Vector's file source |
+| `_msg` | — | all | the message text | `message`, with the RFC5424 header stripped on host records |
+| `_time` | — | all | — | the real line timestamp on host records; ingestion time on docker/pkg |
+
+`hostname` is deliberately the **Ansible inventory name**, not the container ID
+(`get_hostname!()`, the old value — it changed on every recreate) and not the CT's
+OS hostname. Per-host alerting (#134) keys on it, and an alert must be written
+against the name the inventory uses or it needs a second, hand-maintained mapping.
+
+### How host records get a severity
+
+Debian writes `/var/log/syslog` and `/var/log/auth.log` in `RSYSLOG_FileFormat`,
+which carries **no `<PRI>`** — severity and facility are simply not in those lines
+and cannot be parsed out. So the role deploys
+`/etc/rsyslog.d/40-vector-structured.conf` (from `files/rsyslog-vector-structured.conf`),
+which re-emits every message in **RFC5424** to `/var/log/structured.log`, and Vector
+tails *that* instead. `parse_syslog()` then yields severity, facility, appname,
+procid, hostname and the real timestamp.
+
+`*.*` in that drop-in is exactly Debian's `*.*;auth,authpriv.none` (syslog) plus
+`auth,authpriv.*` (auth.log), so the one file replaces both — and `vector.yaml` must
+**not** also tail syslog/auth.log or every host event is ingested twice. The
+human-facing files are untouched in format and content; growth of the duplicate is
+bounded by `/etc/logrotate.d/vector-structured` (weekly, `rotate 4`).
+
+Backfill posture: both file sources use `read_from: beginning` with **no**
+`ignore_older_secs`. The old `end` + 600 s pair made any Vector outage longer than
+ten minutes a permanent hole even though the files on disk were intact — including
+after a [buffer reset](#recovering-a-wedged-vector-buffer), which is supposed to be
+the recovery. The cost is the mirror image: a reset wipes checkpoints, so
+`structured.log` is re-read from its start and up to one logrotate period is
+duplicated.
+
+### Known limitations (three, all deliberate)
+
+1. **No kernel or OOM-kill events.** There is no kernel ring buffer in an LXC, so
+   `imklog` produces nothing and `/var/log/kern.log` can never exist on this host —
+   the glob that used to list it was implying coverage that does not exist. Kernel
+   events are visible only on the PVE host; closing that is #134 (Vector on
+   `eq12`/`n5pro`), not a `vector.yaml` change.
+2. **Boot-window blind spot — NOT closed.** #143 asked for a `journald` source to
+   fix two things at once: the lost structured metadata, and units that log before
+   `rsyslog.service` starts. Only the first half is solved (RFC5424 gives us
+   `level`, `facility`, `appname`, `procid`, `syslog_hostname`). The second half
+   stands: pre-rsyslog units are in the journal and reach neither file. A journald
+   source cannot close it here, because Vector's journald source shells out to the
+   `journalctl` binary and the image we run
+   (`timberio/vector:latest-distroless-static`) has no shell and no `journalctl` —
+   proven, not assumed:
+   `docker exec vector journalctl --version` → `executable file not found in $PATH`
+   (rc=127). `latest-debian` does not ship it either, so closing this gap means
+   building a custom image. Measured 2026-08-18, journal and syslog+auth agreed
+   exactly (968 lines each), so today's practical loss is a handful of early-boot
+   lines — but it is a real gap, not a solved one.
+3. **Package-audit records carry ingestion time, not line time.** `dpkg.log`,
+   `apt/history.log` and the two `unattended-upgrades` logs are not syslog-shaped and
+   are tailed directly, so `_time` is when Vector read the line. This is a known
+   property, not a defect: on the backfill run all 293 records landed inside a 3.8 ms
+   window (`min(_time)` 2026-08-20T03:39:20.421Z, `max(_time)` …20.424Z) while their
+   `_msg` values carry dates back to 2026-08-16. Host records are the opposite — their
+   `_time` is the line's own timestamp, to the microsecond.
+
 ## Coverage gap
 
 The log collector (`vector`) runs on **eq12_docker only**. `pve`, `n5pro` and
@@ -174,10 +256,9 @@ The log collector (`vector`) runs on **eq12_docker only**. `pve`, `n5pro` and
 output are invisible in Grafana. This is a known fleet gap with its own issue; it is
 not a misconfiguration of this role.
 
-On eq12_docker, `vector.yaml`'s `host_logs` source tails `/var/log/syslog`,
-`/var/log/auth.log` and `/var/log/kern.log` with **no filtering**, so
-`unattended-upgrades` and every other syslog-writing daemon reaches VictoriaLogs
-automatically.
+On eq12_docker, `vector.yaml` tails `/var/log/structured.log` with **no filtering**
+(so every syslog-writing daemon reaches VictoriaLogs automatically) plus the four
+package-audit files listed above.
 
 ## Home Assistant integration
 
