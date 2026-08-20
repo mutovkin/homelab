@@ -12,8 +12,9 @@ carry did the opposite and are gone.
 ## Why this stack
 
 - **VictoriaMetrics** (metrics) — Apache 2.0, ~10-20x better compression than
-  InfluxDB, single binary, PromQL/MetricsQL, and a native InfluxDB line-protocol
-  listener that Home Assistant writes to directly. 5-year retention.
+  InfluxDB, single binary, PromQL/MetricsQL. 5-year retention. It also runs a
+  native InfluxDB line-protocol listener on `:8089` — **nothing writes to it**;
+  see [Home Assistant integration](#home-assistant-integration).
 - **VictoriaLogs** (logs) — Apache 2.0, LogsQL, far lighter than Loki. 90-day
   retention.
 - **Vector** (log shipper), **Telegraf** (metrics collector), **Grafana** (UI).
@@ -317,9 +318,42 @@ package-audit files listed above.
 
 ## Home Assistant integration
 
-HA writes over the InfluxDB v1 line protocol to `192.168.25.15:8089` (no database,
-user or token needed). It must be listed under `observability_firewall.ports[8089]` —
-it is, as `192.168.25.10/32`.
+**There isn't one.** This section used to say HA writes over the InfluxDB v1 line
+protocol to `192.168.25.15:8089`. It never has — proven four independent ways by
+the #133 diagnosis (2026-08-20):
+
+- `vm_rows_inserted_total{type="influx"} = 0` since process start, against
+  `{type="promremotewrite"} = 734277` (telegraf's path);
+- no HA-shaped series has ever existed over the full 5 y store — `entity_id`,
+  `domain`, `friendly_name` label values are all `[]`, and the complete
+  `__name__` set is 162 telegraf metrics;
+- the DOCKER-chain DNAT counters on both `:8089` rules read `packets 0`, while
+  the `:8428` rule on the same chain shows traffic (so the counters work);
+- a 90 s tcpdump on CT 101's eth0 saw zero packets, and HA's own 258 MB archived
+  log contains zero occurrences of "influx".
+
+`configuration.yaml` on VM 100 has no `influxdb:` block and never has, back to the
+earliest snapshot in version control. So the `:8089` listener, its TCP+UDP port
+publishes, the 5-year retention "for HA historical data",
+`--dedup.minScrapeInterval=15s` "smooths HA transients", and #122's
+`observability_firewall` allowlist for `192.168.25.10/32` are all real
+infrastructure built for a writer that does not exist. **#122's allowlist is not
+implicated** — `192.168.25.10` is explicitly accepted for both protocols and its
+drop rules have never been reached; HA can reach the box fine
+(`curl http://192.168.25.15:8428/health` from inside VM 100 → 200 in 0.7 ms).
+
+If the export is ever wanted, it must target **8428** — the authenticated
+InfluxDB v1 HTTP API — not 8089, which is a raw line-protocol socket that cannot
+answer HA's HTTP client. Config snippet and the verified endpoint behaviour:
+[PORT_REFERENCE.md](PORT_REFERENCE.md#the-working-path-for-an-influxdb-http-client-port-8428).
+
+**#133 stays open** and nothing about the running configuration was changed by
+this correction: it removes a recipe the repo documented and we proved cannot
+work. The two decisions the human still owns are whether to keep
+`--dedup.minScrapeInterval=15s` (it silently collapses HA state changes < 15 s
+apart, which is lossy for event-driven entities) and whether to drop the `:8089`
+listener entirely, which would delete an unauthenticated write endpoint and make
+#122 moot.
 
 ## Troubleshooting
 
