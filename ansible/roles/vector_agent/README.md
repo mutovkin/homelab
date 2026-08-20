@@ -74,7 +74,10 @@ nothing is the default failure mode here.
    permanently. Fixed by clearing `ExecStartPre=` and re-adding it with
    `--skip-healthchecks --config /etc/vector/vector.yaml`. Config errors are still
    caught; sink reachability is no longer a start precondition.
-2. **`/etc/default/vector` is a dpkg conffile.** Writing it makes every future
+2. **`/etc/default/vector` is a dpkg conffile.** (Read off the package, not
+   assumed: its `conffiles` list is `/etc/default/vector` plus
+   `/etc/vector/examples/*` — `/etc/vector/vector.yaml` is **not** on it, so
+   templating that file is safe.) Writing it makes every future
    `apt install ./vector_<ver>.deb` a modified-conffile situation. Our environment
    goes in `/etc/vector/vector.env`, which dpkg does not own, pointed at from the
    drop-in. Drop-in `EnvironmentFile=` entries are additive and later wins, so the

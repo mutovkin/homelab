@@ -181,14 +181,28 @@
   when: vector_agent_preview_only
 
 # --- Configuration, written BEFORE the package is installed ------------------
-# Ordering note, and it is load-bearing rather than tidy: the .deb's postinst may
-# enable and start vector.service, and the shipped unit's ExecStartPre runs
-# `vector validate` WITH sink healthchecks (see the drop-in template, trap 1). If
-# the package landed first, that auto-start would race a host with no config at
-# all — burning the shipped StartLimitBurst on a unit that cannot possibly succeed.
-# Writing the config, the env file and the drop-in first means any auto-start finds
-# a complete, correct installation. systemd reads drop-ins for units that do not
-# exist yet, so /etc/systemd/system/vector.service.d can be populated up front.
+# Ordering note, and it is load-bearing rather than tidy, with the .deb's actual
+# maintainer scripts read rather than assumed (0.57.0, inspected 2026-08-19):
+#
+#   * FIRST install: the postinst does NOT start the unit. `deb-systemd-invoke
+#     try-restart` is guarded by `[ -n "$2" ]`, and $2 is empty on a fresh
+#     install; `deb-systemd-helper enable` is guarded by `was-enabled`. So a
+#     virgin host is safe either way.
+#   * UPGRADE (every version bump from here on): $2 IS set, so dpkg `try-restart`s
+#     vector.service from inside the apt task. That restart runs whatever config
+#     is on disk at that moment, with whatever ExecStartPre is in force.
+#
+# Writing the config, the env file and the drop-in first is what makes that second
+# case correct: the bumped binary restarts onto the new config with
+# --skip-healthchecks already in effect, instead of racing the shipped
+# `vector validate` (which DOES run sink healthchecks — drop-in trap 1) and
+# burning the shipped StartLimitBurst against a sink that may be booting.
+# systemd reads drop-ins for units that do not exist yet, so
+# /etc/systemd/system/vector.service.d can be populated up front.
+#
+# /etc/vector/vector.yaml is NOT a dpkg conffile — the package's conffiles list is
+# /etc/default/vector plus /etc/vector/examples/* only — so templating it here
+# creates no modified-conffile situation on a future bump.
 - name: Create the Vector configuration directory
   ansible.builtin.file:
     path: /etc/vector
@@ -323,12 +337,16 @@
     - not ansible_check_mode
     - vector_agent_dropin.changed or vector_agent_pkg.changed
 
-# Defensive, and cheap. If a previous run (or the package's own postinst) ever
-# started vector before its config existed, the unit can be sitting in `failed`
-# with the shipped start limit already consumed — and `systemctl start` on such a
-# unit answers "start request repeated too quickly" rather than starting it. The
-# drop-in above removes the limit for the future; this clears the latched state so
-# the very first converged run is not the one that cannot heal.
+# Defensive, and cheap. Nothing in a first install is expected to leave the unit
+# `failed` (the postinst does not start it — see the ordering note above), but the
+# state this clears is reachable in normal operation: a VictoriaLogs outage at the
+# wrong moment, or a hand-edited config on the host, can consume the start limit
+# and latch `failed` — and `systemctl start` on such a unit answers "start request
+# repeated too quickly" rather than starting it. The drop-in above removes the
+# limit going forward; this clears state already latched under the old one, so the
+# healing run is not the one that cannot heal. Same shape as the nftables
+# RemainAfterExit trap in CLAUDE.md: `state: started` cannot see, and cannot
+# repair, a condition invalidated from outside.
 - name: Clear any latched failed state on vector.service
   ansible.builtin.command: systemctl reset-failed vector.service
   changed_when: false
