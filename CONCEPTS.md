@@ -202,6 +202,21 @@ by substitution so it is never echoed. Reverting a file to run the counterfactua
 the last committed state, which silently discards an uncommitted fix — so the fix is
 committed first, or re-applied and re-verified afterwards.
 
+### Drifted fixture
+A synthetic input built to carry the very condition a verification claims to surface, used
+when the live system cannot be made to exhibit that condition on demand.
+
+A fully converged fleet is the wrong instrument for any claim about drift reporting: the
+branch that would demonstrate the claim is never taken, so the fixed and the unfixed code
+emit identical output and the comparison establishes nothing — worse, it reads as a pass.
+A fixture replaces the system's state, never its logic: the task's own expressions and
+conditions run verbatim and only the side effect is stubbed, because a fixture that
+paraphrases the condition tests the paraphrase. The same construction doubles as a truth
+table, since once state is synthetic the awkward rows — empty values, absent values,
+reversed orderings, removals — cost nothing to add. This is the mirror image of a Canary
+dry-run: there a planted value proves a suppression fired, here planted state proves a
+report fires.
+
 ### Reconcile task
 An explicit task that converges one named attribute of an already-existing Guest,
 written and owned by the role rather than delegated to a provisioning module.
