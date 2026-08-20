@@ -439,11 +439,18 @@
 #
 # No default() on any of these lookups: a property that stops being reported must
 # raise, not quietly satisfy a comparison against an empty string.
+#
+# All FIVE of the drop-in's directives are covered: StartLimitIntervalSec (trap 3),
+# ExecStartPre (trap 1), EnvironmentFile (trap 2), Restart, and ExecStart. ExecStart
+# earns its line rather than padding the list — the base unit's is a bare
+# `/usr/bin/vector` with no --config, so without the assert the two Exec lines could
+# silently disagree about which file was validated and which one is running.
 - name: Assert the homelab systemd drop-in is in force
   ansible.builtin.assert:
     that:
       - vector_agent_unit.status.StartLimitIntervalUSec == '0'
       - "'--skip-healthchecks' in vector_agent_unit.status.ExecStartPre"
+      - "'--config /etc/vector/vector.yaml' in vector_agent_unit.status.ExecStart"
       - "'/etc/vector/vector.env' in vector_agent_unit.status.EnvironmentFiles"
       - vector_agent_unit.status.Restart == 'always'
     fail_msg: >-
@@ -454,7 +461,8 @@
       Restart={{ vector_agent_unit.status.Restart }},
       RestartUSec={{ vector_agent_unit.status.RestartUSec }},
       EnvironmentFiles={{ vector_agent_unit.status.EnvironmentFiles }},
-      ExecStartPre={{ vector_agent_unit.status.ExecStartPre }}.
+      ExecStartPre={{ vector_agent_unit.status.ExecStartPre }},
+      ExecStart={{ vector_agent_unit.status.ExecStart }}.
       Without StartLimitIntervalUSec=0 systemd gives up on this shipper
       permanently after five failed starts; without --skip-healthchecks a
       VictoriaLogs outage IS five failed starts. Try `systemctl daemon-reload` and
@@ -610,3 +618,118 @@
       HTTP status was {{ vector_agent_ingest.status | default('none') }}.
     quiet: true
   when: not ansible_check_mode
+
+# --- docker_logs is a DECLARED CAPABILITY; prove it, do not assume it ----------
+# Everything above this point can pass with the docker_logs source completely
+# dead. Walk it: `getent group docker` passes (the group exists regardless), the
+# `user` task passes (it edits /etc/group, which says nothing about the running
+# process), `vector validate` passes (it does not connect to the socket under
+# --skip-healthchecks), ActiveState=active passes (Vector runs happily with one
+# broken source, logging about it on a loop), and the ingest proof above passes
+# because it filters `source:host` and its marker arrives via `logger`, never
+# touching Docker. The per-host alert filters `source:host` too. So every
+# container log on CT 201 could be missing indefinitely with the deploy green and
+# no alert firing — the #057 shape, one source over.
+#
+# Two assertions close it, and they answer different questions.
+
+# QUESTION 1: does the RUNNING PROCESS hold the group? /etc/group membership is
+# not the same thing — systemd resolves supplementary groups from the group
+# database at exec time, so a Vector that was already running when the group was
+# granted does not have it. /proc/<pid>/status is the kernel's view and the only
+# authority.
+- name: Read the docker gid and the effective groups of the running Vector process
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      pid=$(systemctl show -p MainPID --value vector)
+      gid=$(getent group docker | cut -d: -f3)
+      groups=$(sed -n 's/^Groups:[[:space:]]*//p' "/proc/${pid}/status")
+      echo "gid=${gid} groups=${groups}"
+    executable: /bin/bash
+  register: vector_agent_docker_groups
+  changed_when: false
+  when:
+    - vector_agent_docker_logs
+    - not ansible_check_mode
+
+- name: Assert the running Vector process can actually reach the docker socket
+  vars:
+    _gid: "{{ vector_agent_docker_groups.stdout | regex_replace('^gid=([0-9]+).*$', '\\1') | trim }}"
+    _groups: "{{ vector_agent_docker_groups.stdout | regex_replace('^.*groups=', '') | trim | split() }}"
+  ansible.builtin.assert:
+    that:
+      - _gid in _groups
+    fail_msg: >-
+      The running Vector process on {{ inventory_hostname }} does NOT hold the
+      docker group in its effective supplementary groups
+      ({{ vector_agent_docker_groups.stdout }}), so its docker_logs source cannot
+      read /var/run/docker.sock. Vector will stay `active` and keep shipping host
+      records while every container log is silently missing.
+      systemd resolves supplementary groups at exec time, so the usual cause is a
+      process that predates the group grant — a restart fixes that, and this role
+      restarts when group membership changes. If a restart does NOT fix it, add
+      `SupplementaryGroups=docker` to templates/vector-systemd-dropin.conf.j2
+      inside the vector_agent_docker_logs conditional. Do not weaken this assert.
+    quiet: true
+  when:
+    - vector_agent_docker_logs
+    - not ansible_check_mode
+
+# QUESTION 2: is Vector actually STORING container records? Group membership is
+# necessary, not sufficient — the same "assert the data arrived, not that the
+# process is running" rule the host proof follows, applied to the one source the
+# host proof cannot see.
+#
+# No unique marker here, unlike the host proof: producing one would mean starting
+# a throwaway container on a live host. This asserts on ORGANIC volume in a
+# 15-minute window instead. CT 201's three containers (lms, portainer, watchtower)
+# log continuously enough for that today. If a future quieter fleet makes 15m
+# marginal, WIDEN the window and record the measurement here — do not delete the
+# check.
+- name: Wait for container log records from this host to reach VictoriaLogs
+  ansible.builtin.uri:
+    url: "{{ victorialogs_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: '_time:15m hostname:{{ inventory_hostname }} source:docker | stats count() as rows'
+    url_username: "{{ vault_vl_auth_username }}"
+    url_password: "{{ vault_vl_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: vector_agent_docker_ingest
+  until: >-
+    vector_agent_docker_ingest.status | default(0) == 200
+    and (vector_agent_docker_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when:
+    - vector_agent_docker_logs
+    - not ansible_check_mode
+
+- name: Assert container log records from this host actually reached VictoriaLogs
+  ansible.builtin.assert:
+    that:
+      - vector_agent_docker_ingest.status | default(0) == 200
+      - (vector_agent_docker_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+    fail_msg: >-
+      VictoriaLogs holds ZERO `source:docker` records for
+      hostname={{ inventory_hostname }} in the last 15 minutes, while host records
+      from the same Vector are arriving (the assert above passed). The process, the
+      credential and the sink are therefore all fine and the docker_logs source
+      specifically is not producing. Check, in order:
+      (1) `journalctl -u vector -n 100` for permission-denied or connection errors
+          against /var/run/docker.sock;
+      (2) `ls -l /var/run/docker.sock` and compare its group to the effective
+          groups asserted above;
+      (3) `docker ps` — if every container on this host really has been silent for
+          15 minutes this is a false alarm, but VERIFY that rather than assuming
+          it.
+      HTTP status was {{ vector_agent_docker_ingest.status | default('none') }}.
+    quiet: true
+  when:
+    - vector_agent_docker_logs
+    - not ansible_check_mode

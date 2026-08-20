@@ -23,14 +23,27 @@ apiVersion: 1
 # alert instance vanishes, Grafana marks it stale and RESOLVES the alert. The rule
 # would fire for at most one evaluation and then declare the dead host healthy.
 #
-# The form below is the fix, and it was verified against the live VictoriaLogs
-# before it was written here. The OUTER window is 24h, so a host that shipped at
+# The form below is the fix. The OUTER window is 24h, so a host that shipped at
 # any point in the last day is still returned; the `if (_time:15m)` clause counts
 # only what arrived recently. A dead shipper therefore returns a row with
-# recent = 0, which a `< 1` threshold CAN fire on:
+# recent = 0, which a `< 1` threshold CAN fire on.
 #
-#     {"hostname":"d7d7d4e8c59e","recent":"0","total":"10526"}   <- stopped
-#     {"hostname":"eq12_docker","recent":"94","total":"5545"}    <- alive
+# EVIDENCE, measured 2026-08-19 against the live VictoriaLogs, running EXACTLY the
+# expression deployed below and then the naive form as a control. The pair is the
+# proof — neither line means much alone:
+#
+#   Q1, the deployed expression:
+#     _time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
+#       {"hostname":"d7d7d4e8c59e","recent":"0"}      <- stopped, and STILL RETURNED
+#       {"hostname":"eq12_docker","recent":"116"}     <- alive
+#
+#   Q3, the naive form this header says cannot work:
+#     _time:15m source:host | stats by (hostname) count() as rows
+#       {"hostname":"eq12_docker","rows":"116"}       <- the dead host is simply GONE
+#
+# Q1 emits the zero-count group; Q3 drops the series entirely. That difference is
+# the entire reason the 24h outer window is load-bearing, and it is why this file
+# must not be "simplified" to the shorter query.
 #
 # The plugin returns this as a MULTI-SERIES frame — one frame per hostname, with
 # `hostname` carried as a field label — so Grafana produces one alert instance per
@@ -38,12 +51,33 @@ apiVersion: 1
 # Grafana via POST /api/ds/query before this file was written, not assumed from
 # docs.
 #
-# THE ACCEPTED COST, stated rather than discovered later: the same 24h outer window
-# means a RETIRED hostname keeps returning recent = 0 and keeps alerting for up to
-# 24 hours after it legitimately stops shipping. Identical trade to
-# obs-http-probe-absent's `[24h]`, and accepted for the identical reason: a shipper
+# THE 24h WINDOW CUTS BOTH WAYS, and both sides belong here rather than being
+# discovered later.
+#
+# Side 1 — a RETIRED hostname keeps returning recent = 0 and keeps alerting for up
+# to 24 hours after it legitimately stops shipping. Identical trade to
+# obs-http-probe-absent's `[24h]`, accepted for the identical reason: a shipper
 # dead for more than a day has already paged and been ignored, and `7d` would be
 # alert fatigue after an intentional decommission.
+#
+# Side 2 — THE BLIND SPOT, and it is the more dangerous half. A host with NO rows
+# in the 24h outer window produces no series, hence no alert instance, hence
+# SILENCE. Three ways to land there:
+#   * a host that has never shipped at all (freshly built, rebuilt guest, a deploy
+#     that was reverted before the agent ever ran);
+#   * a host dead for MORE than 24 hours — its series ages out of the outer window
+#     and the alert goes quiet again;
+#   * and worst, at the 24h boundary Grafana sends a RESOLVED notification for a
+#     host that is still dead, because the instance disappeared rather than
+#     recovered.
+# This rule cannot see any of those: it can only report on hosts it has evidence
+# of. roles/vector_agent's deploy-time ingest assert covers the never-shipped case
+# AT DEPLOY TIME ONLY — it proves the host shipped once, not that it still is.
+# Closing it properly needs a rule driven by an EXPECTED-HOSTS list rather than by
+# observed series, which is a different mechanism (and gives up the
+# "adding a host needs no rule edit" property below). Tracked as its own follow-up
+# issue; do not paper over it by widening the window, which only moves the
+# boundary.
 #
 # NO `hostname:` MATCHER, deliberately. Adding a host to the fleet must not require
 # editing this file — the same property #139 established for the probe rules. That
@@ -100,9 +134,15 @@ groups:
             agents, `--tags observability --limit eq12_docker` for the container.
             If the disk buffer is wedged, the runbook is
             docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
-            NOTE: a hostname that was DELIBERATELY retired keeps producing a
-            recent=0 row, and therefore keeps alerting, for up to 24h. That is the
-            documented cost of the 24h outer window, not a bug.
+            NOTE, both directions of the 24h window: a hostname that was
+            DELIBERATELY retired keeps producing a recent=0 row, and therefore keeps
+            alerting, for up to 24h — the documented cost, not a bug. And in the
+            other direction, a host that has NEVER shipped, or has been dead for
+            MORE than 24h, has no row at all and this rule is SILENT about it; at
+            the 24h boundary it will even send a RESOLVED notice for a host that is
+            still dead. If you are here because a host went quiet, check the whole
+            expected fleet (eq12, eq12_docker, n5pro, n5pro_docker) against the
+            query's output rather than trusting the instance list to be complete.
         labels:
           severity: critical
           component: log-pipeline

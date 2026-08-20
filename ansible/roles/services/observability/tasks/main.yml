@@ -338,13 +338,43 @@
 # reports green over a dead pipeline is the precise failure this whole issue family
 # is about, so this runs on EVERY real run. If Vector is down, this is supposed to
 # fail.
-- name: Query VictoriaLogs for host log records ingested in the last 10 minutes
+# THE FILTER IS SCOPED TO THIS HOST, AND #134 IS WHY.
+#
+# Until #134 eq12_docker was the ONLY producer of `source:host` records, so the
+# bare `_time:10m source:host | count()` this used to run was implicitly per-host
+# and the distinction never mattered. #134 puts native Vector agents on eq12,
+# n5pro and n5pro_docker, all writing `source:host` into this same VictoriaLogs.
+# Left bare, this assert would be satisfied by THREE OTHER HOSTS' records while
+# the container it exists to check was dead or 401-ing — a green
+# `--tags observability` deploy over exactly the failure it was written for, with
+# the comment above it still claiming it asserts the data arrived. That is the
+# regression this change repairs, not a new feature.
+#
+# Two filters, because one is not enough. `hostname:` alone would pass on records
+# this container shipped BEFORE it broke, anywhere in the 10-minute window; the
+# per-run marker makes it a freshness proof, the same shape as the rsyslog
+# freshness probe and roles/vector_agent's ingest proof. Both filters are needed:
+# the marker proves recency, the hostname proves provenance.
+- name: Generate a unique marker for the VictoriaLogs ingest proof
+  ansible.builtin.set_fact:
+    observability_ingest_probe: "observability-ingest-probe-{{ ansible_date_time.iso8601_micro | regex_replace('[^0-9]', '') }}"
+  when: not ansible_check_mode
+
+# changed_when: false — one line into the log stream IS the probe, not a state
+# change. local0.notice so Debian also routes it to /var/log/syslog, where a human
+# debugging this can see it.
+- name: Emit the VictoriaLogs ingest probe marker
+  ansible.builtin.command: logger -p local0.notice "{{ observability_ingest_probe }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Query VictoriaLogs for this host's own log records
   ansible.builtin.uri:
     url: "http://localhost:{{ victorialogs_web_port }}/select/logsql/query"
     method: POST
     body_format: form-urlencoded
     body:
-      query: "_time:10m source:host | stats count() as rows"
+      query: '_time:10m hostname:{{ inventory_hostname }} source:host "{{ observability_ingest_probe }}" | stats count() as rows'
     url_username: "{{ vault_vl_auth_username }}"
     url_password: "{{ vault_vl_auth_password }}"
     force_basic_auth: true
@@ -356,7 +386,14 @@
   until: >-
     observability_host_ingest.status | default(0) == 200
     and (observability_host_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
-  retries: 6
+  # 12 retries, not the 6 this used to carry. The old query was satisfied by ANY
+  # host record in a 10-minute window, so on a healthy pipeline it returned on the
+  # first attempt and the retry budget was nearly decorative. This one waits for a
+  # marker written seconds ago to traverse logger -> rsyslog -> structured.log ->
+  # Vector's file source -> a 5s sink batch -> VictoriaLogs, which is a real round
+  # trip. Matching roles/vector_agent's budget (2 minutes) keeps a slow but healthy
+  # pipeline from failing a deploy.
+  retries: 12
   delay: 10
   changed_when: false
   # failed_when:false so the RETRY EXHAUSTION lands on the assert below, which can
@@ -365,18 +402,22 @@
   failed_when: false
   when: not ansible_check_mode
 
-- name: Assert host log records actually reached VictoriaLogs
+- name: Assert this host's own log records actually reached VictoriaLogs
   ansible.builtin.assert:
     that:
       - observability_host_ingest.status | default(0) == 200
       - (observability_host_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
     fail_msg: >-
-      VictoriaLogs reports ZERO host log records in the last 10 minutes, so the
-      pipeline is deployed and running but not delivering. Every container may
-      still be Up — that is the failure mode, not evidence against it. Check, in
-      order: `docker logs --tail 100 vector` on this host for remap aborts or sink
-      errors; that /var/log/structured.log is still GROWING (not merely present);
-      and `systemctl status rsyslog`. If the disk buffer is wedged, the runbook is
+      A marker written on {{ inventory_hostname }} a minute ago did not come back
+      out of VictoriaLogs labelled hostname={{ inventory_hostname }}, so this
+      host's pipeline is deployed and running but not delivering. Every container
+      may still be Up — that is the failure mode, not evidence against it. Note
+      this query is scoped to THIS host (#134 added three more `source:host`
+      producers to the same store), so other hosts still shipping does not make
+      this a false alarm. Check, in order: `docker logs --tail 100 vector` on this
+      host for remap aborts or sink errors; that /var/log/structured.log is still
+      GROWING (not merely present); and `systemctl status rsyslog`. If the disk
+      buffer is wedged, the runbook is
       docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
       HTTP status was {{ observability_host_ingest.status | default('none') }}.
     quiet: true

@@ -60,6 +60,17 @@ hosts at once**.
    and `omfile` is still writing to this path. "The file exists and is non-empty"
    proves none of that — a file untouched since last week satisfies it instantly.
 
+   > **This guard was INERT for its entire life before #134.** The `wait_for`
+   > carried `failed_when: false`, which does not "let the result through" — it
+   > *assigns* `failed: False`. The assert that reads `is not failed` was therefore
+   > literally `assert: true`, and a `wait_for` that timed out passed it. Measured:
+   > `failed_when: false` → `failed=False, elapsed=3` (assert passes) versus
+   > `ignore_errors: true` → `failed=True` (assert fires). It is `ignore_errors`
+   > now. The guard can genuinely fail from here on, on all four hosts, and it fails
+   > in the safe direction — the play stops *before* Vector is pointed at a stream
+   > nothing is writing. If it fires, that is a finding about that host, not a
+   > reason to put `failed_when: false` back.
+
 Everything from step 2 onward is skipped under `--check`.
 
 ## Interface

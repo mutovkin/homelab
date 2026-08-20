@@ -128,14 +128,25 @@ groups:
             `_time:10m source:host | count()` is 0. Docker logs may still be
             flowing, which is why the all-sources rule does not catch this. The
             usual cause is rsyslog no longer routing to /var/log/structured.log —
-            the file Vector tails for ALL host logs since #143. It is written by
-            /etc/rsyslog.d/40-vector-structured.conf; the human-facing
-            /var/log/syslog and /var/log/auth.log are written by separate rules and
-            can keep growing while this one is dead, so their size proves nothing.
-            Check `systemctl status rsyslog` on eq12_docker, confirm the drop-in is
-            present, and confirm no drop-in sorting before it ends the ruleset with
-            `stop`. Re-running the observability deploy re-asserts the whole path:
-            it writes a `logger` marker and waits for it to appear in the file.
+            the file every Vector in the fleet tails for ALL host logs since #143.
+            It is written by /etc/rsyslog.d/40-vector-structured.conf; the
+            human-facing /var/log/syslog and /var/log/auth.log are written by
+            separate rules and can keep growing while this one is dead, so their
+            size proves nothing.
+            SCOPE, since #134: this query spans ALL FOUR hosts (eq12, eq12_docker,
+            n5pro, n5pro_docker), so for it to reach zero every shipper in the fleet
+            must be silent — which points at VictoriaLogs itself or at something
+            fleet-wide, not at one host's rsyslog. ONE dead host is
+            obs-host-log-ingest-stalled-per-host's job and names the host in its
+            summary; this rule firing while that one is quiet is the fleet-wide
+            case.
+            Check `systemctl status rsyslog` on the affected host(s), confirm the
+            drop-in is present, and confirm no drop-in sorting before it ends the
+            ruleset with `stop`. Re-running that host's deploy re-asserts the whole
+            path — it writes a `logger` marker and waits for it to come back out of
+            VictoriaLogs: `--tags observability --limit eq12_docker` for the
+            container, `ansible-playbook playbooks/log-agents.yml --limit <host>`
+            for the three native agents.
         labels:
           severity: critical
           component: log-pipeline

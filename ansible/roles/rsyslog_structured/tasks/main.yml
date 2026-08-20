@@ -11,6 +11,30 @@
 # when #134 took Vector fleet-wide. Both consumers include it (the observability
 # compose stack on eq12_docker, and roles/vector_agent on eq12/n5pro/n5pro_docker)
 # and both include it BEFORE they point Vector at the file. See README.md.
+# PRECONDITION, deliberately explicit. This role writes into /etc/rsyslog.d, then
+# restarts rsyslog and probes it end to end. It does NOT install rsyslog — the
+# `common` role does, fleet-wide, and every host has it today (verified: all four
+# carry /usr/sbin/rsyslogd). But playbooks/log-agents.yml is a single-purpose play
+# that deliberately does not run `common`, so on a host that somehow lacked rsyslog
+# the first symptom would be `copy` failing on a missing directory — which reads as
+# a bug in this role rather than as a missing prerequisite. Name the prerequisite.
+- name: Check that rsyslog is installed
+  ansible.builtin.stat:
+    path: /usr/sbin/rsyslogd
+  register: rsyslog_structured_rsyslogd
+
+- name: Assert rsyslog is installed before configuring a stream through it
+  ansible.builtin.assert:
+    that:
+      - rsyslog_structured_rsyslogd.stat.exists
+    fail_msg: >-
+      /usr/sbin/rsyslogd is not present on {{ inventory_hostname }}, so this role
+      has nothing to configure and Vector would have no host-log input at all. This
+      is a MISSING PREREQUISITE, not a fault in this role: rsyslog is installed by
+      the `common` role (playbooks/configure-guests.yml / proxmox-hosts.yml), which
+      playbooks/log-agents.yml does not run. Run the host through `common` first.
+    quiet: true
+
 - name: Deploy rsyslog structured-stream config for Vector
   ansible.builtin.copy:
     src: rsyslog-vector-structured.conf
@@ -102,19 +126,41 @@
   changed_when: false
   when: not ansible_check_mode
 
+# ignore_errors, NOT failed_when: false — and the difference is the whole guard.
+#
+# `failed_when: <expr>` does not "let the result through"; it ASSIGNS
+# result['failed'] = <expr>. With `false`, a wait_for that TIMED OUT still reports
+# `failed: False`, so the `is not failed` test below reads that assignment and the
+# assert becomes literally `assert: true`. This guard was therefore INERT for its
+# entire life on eq12_docker: wave 1 (#143) claimed to "assert the marker reached
+# the stream" and never once enforced it. Nothing was ever proven by it.
+#
+# Measured rather than reasoned, against a wait_for that cannot possibly succeed:
+#   failed_when: false  -> failed=False  is_not_failed=True   elapsed=3  (assert PASSES)
+#   ignore_errors: true -> failed=True   is_not_failed=False             (assert FIRES)
+#
+# ignore_errors preserves `failed: True` on the register while letting the play
+# continue to the assert, which is the only shape that makes the assert real.
+# ansible-lint's `ignore-errors` rule accepts `ignore_errors: true` on a task that
+# also carries `register:`, which this one does.
+#
+# CONSEQUENCE, and it is intended: from here on this guard CAN fail, on all four
+# hosts. It fails in the safe direction — the play stops BEFORE Vector is installed
+# and pointed at a stream that is not being written, rather than after. If it fires
+# on a hypervisor, that is a real finding about that host's rsyslog, not a reason to
+# weaken it back.
 - name: Wait for the probe marker to reach the structured stream
   ansible.builtin.wait_for:
     path: /var/log/structured.log
     search_regex: "{{ vector_structured_probe }}"
     timeout: 10
   register: vector_structured_probe_result
-  failed_when: false
+  ignore_errors: true
   when: not ansible_check_mode
 
-# Separate assert rather than letting wait_for fail, so the failure message can
-# explain what to check. failed_when:false above hands us the result either way;
-# deliberately NO no_log anywhere on this chain — censoring it would blind exactly
-# the diagnostic this guard exists to print (#88).
+# Separate assert rather than letting wait_for fail outright, so the failure message
+# can explain what to check. Deliberately NO no_log anywhere on this chain —
+# censoring it would blind exactly the diagnostic this guard exists to print (#88).
 - name: Assert the structured stream is being written right now
   ansible.builtin.assert:
     that:

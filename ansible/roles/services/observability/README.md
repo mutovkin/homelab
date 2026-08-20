@@ -174,12 +174,23 @@ _time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
 ```
 
 A dead shipper is still in the 24 h window, so it returns a row with `recent = 0` —
-which a `< 1` threshold can fire on. Verified live before the rule was written:
+which a `< 1` threshold can fire on. Measured 2026-08-19 against the live
+VictoriaLogs, running the deployed expression and then the naive form as a control.
+The **pair** is the proof; neither line means much on its own:
 
 ```
-{"hostname":"d7d7d4e8c59e","recent":"0","total":"10526"}   <- a shipper that stopped
-{"hostname":"eq12_docker","recent":"94","total":"5545"}    <- a shipper that is alive
+Q1 — the expression this rule deploys
+_time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
+  {"hostname":"d7d7d4e8c59e","recent":"0"}    <- stopped, and STILL RETURNED
+  {"hostname":"eq12_docker","recent":"116"}   <- alive
+
+Q3 — the naive form, as a control
+_time:15m source:host | stats by (hostname) count() as rows
+  {"hostname":"eq12_docker","rows":"116"}     <- the dead host is simply GONE
 ```
+
+Q1 emits the zero-count group; Q3 drops the series entirely. That difference is the
+whole reason the 24 h outer window is load-bearing.
 
 The `victoriametrics-logs-datasource` plugin returns this as a **multi-series**
 frame — one frame per hostname, carrying `hostname` as a field label — so Grafana
@@ -187,11 +198,25 @@ produces one alert instance per host and the notification names which one.
 Confirmed empirically through `POST /api/ds/query`, not read off a doc page.
 
 **Adding a host to the fleet needs no rule edit.** There is deliberately no
-`hostname:` matcher, the same property #139 established for the probe rules. The
-price is the mirror of `obs-http-probe-absent`'s: a **retired** hostname keeps
-returning `recent = 0` and keeps alerting for up to 24 h. Accepted for the same
-reason — a shipper dead longer than a day has already paged and been ignored, and
-`7d` would be alert fatigue after an intentional decommission.
+`hostname:` matcher, the same property #139 established for the probe rules.
+
+The 24 h window cuts both ways, and both sides are real:
+
+- **A retired hostname keeps alerting for up to 24 h.** The mirror of
+  `obs-http-probe-absent`'s cost, accepted for the same reason — a shipper dead
+  longer than a day has already paged and been ignored, and `7d` would be alert
+  fatigue after an intentional decommission.
+- **A host with no rows in the window is invisible, and that is the dangerous
+  half.** No rows → no series → no instance → **silence**. That covers a host that
+  has never shipped (freshly built, rebuilt guest, reverted deploy) *and* a host
+  dead for more than 24 h, whose series ages out and whose alert goes quiet again.
+  Worse, at the 24 h boundary Grafana sends a **resolved** notification for a host
+  that is still dead. `roles/vector_agent`'s deploy-time ingest assert covers the
+  never-shipped case **at deploy time only** — it proves the host shipped once, not
+  that it still is. Closing this needs a rule driven by an *expected-hosts list*
+  rather than by observed series, which gives up the "no rule edit per host"
+  property above; it is a tracked follow-up, and widening the window only moves the
+  boundary.
 
 **Absence is owned by exactly one RULE — which is not the same as one email.**
 `obs-http-probe-absent` owns it: its query returns a row for every probe seen in the

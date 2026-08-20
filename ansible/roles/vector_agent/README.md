@@ -126,10 +126,27 @@ In order, and none of it is optional:
    it, the sink authenticating, VictoriaLogs storing it, and the hostname label
    being correct.
 
+9. **Where `vector_agent_docker_logs` is true, two more** — because every check
+   above passes with the `docker_logs` source completely dead. `getent` passes
+   (the group exists either way), the `user` task passes (it edits `/etc/group`,
+   which says nothing about the running process), `vector validate` passes (it
+   does not touch the socket under `--skip-healthchecks`), `ActiveState=active`
+   passes (Vector runs happily with one broken source), and step 8 passes because
+   it filters `source:host` and its marker arrives via `logger`. So:
+   a. the **running process's** effective supplementary groups, read from
+      `/proc/<pid>/status`, must contain the docker gid — `/etc/group` membership
+      is a different fact, since systemd resolves groups at exec time;
+   b. VictoriaLogs must hold `source:docker` records for this host in the last 15
+      minutes. No marker here (that would mean starting a throwaway container on a
+      live host), so it asserts on organic volume — CT 201's three containers are
+      chatty enough. If that ever stops being true, widen the window and record the
+      measurement; do not delete the check.
+
 "The process is running" is exactly the evidence that stayed green for the ~30 days
 the log pipeline was dead
 ([#73](../../../docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)).
-That is why step 8 exists and why it is not gated on anything having changed.
+That is why steps 8 and 9 exist and why neither is gated on anything having
+changed.
 
 ## Bumping the pinned version
 
@@ -171,7 +188,11 @@ can start a privileged container. It is the same posture the vector *container* 
 on eq12_docker via its `/var/run/docker.sock` bind-mount, and the same telegraf
 already holds there: a new holder of an existing grant, not a new kind of grant.
 The role asserts the `docker` group exists rather than letting the `user` module
-invent one with the wrong gid, which would be a silent no-op.
+invent one with the wrong gid, which would be a silent no-op — and then, after the
+restart, asserts that the **running process** actually holds that gid and that
+container records are actually landing in VictoriaLogs (verification steps 9a/9b
+above). Declaring the capability and proving it are different things, and only the
+second one survives contact with a socket permission change.
 
 On a host where `vector_agent_docker_logs` is false the `docker_logs` source is not
 merely unused — it is absent from the rendered config. A `docker_logs` source with
