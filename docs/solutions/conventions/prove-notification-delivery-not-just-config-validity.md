@@ -85,14 +85,25 @@ export WATCHTOWER_NOTIFICATION_URL=$(docker inspect watchtower \
   | sed -n 's/^WATCHTOWER_NOTIFICATION_URL=//p')
 [ -n "$WATCHTOWER_NOTIFICATION_URL" ] || { echo "no URL on the running container"; exit 1; }
 
-docker run --rm \
-  --security-opt apparmor=unconfined \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -e WATCHTOWER_NOTIFICATION_URL \
-  nickfedor/watchtower:1.21.0 \
-  --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1 \
-  | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
+# The brace group captures the probe's OWN exit status BEFORE the redactor runs.
+# A bare `$?` after this pipeline is SED's status — and sed exits 0 even when the probe
+# failed, which would promote a failed send to evidence of a successful one.
+{
+  docker run --rm \
+    --security-opt apparmor=unconfined \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -e WATCHTOWER_NOTIFICATION_URL \
+    nickfedor/watchtower:1.21.0 \
+    --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1
+  echo "PROBE_EXIT=$?"
+} | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
 ```
+
+**A redactor in the pipeline eats the exit code.** This is the evidence ladder biting its
+own probe: a command that pipes its output through `sed`, `grep`, `tee`, or a log-shipper
+hands `$?` to the *last* stage, and those stages succeed almost unconditionally. Capture
+the status inside a brace group before the pipe (or read `${PIPESTATUS[0]}` immediately
+after it) — otherwise the exit code you quote as rung-2 evidence is a measurement of sed.
 
 Invariants worth copying to any probe of this shape: `--rm` so it is discarded;
 `--monitor-only` so the probe can never change anything; `--security-opt

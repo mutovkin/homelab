@@ -94,6 +94,21 @@ is what makes a failed restore fail instead of limping to the end with half a sc
 If the `joplin` database still exists, drop it first (or the `CREATE DATABASE` errors and
 `ON_ERROR_STOP` aborts) — stop joplin-server before you do.
 
+**Partial DR — cluster intact, joplin database lost — needs the pg_dump half ONLY.** This
+is the likeliest real recovery scenario and the whole-file command above *fails* in it:
+the globals half opens with `CREATE ROLE joplin_user`, the role already exists, and
+`ON_ERROR_STOP=1` aborts **before any data lands**. Skip the globals and restore from the
+pg_dump section header:
+
+```bash
+sed -n '/^-- PostgreSQL database dump$/,$p' /data/backups/joplin-pgdump-<ts>.sql \
+  | docker exec -i -u postgres postgres psql -q -v ON_ERROR_STOP=1 -d postgres
+```
+
+That anchor — not `CREATE DATABASE` — is load-bearing; the next subsection explains why
+slicing one line lower produces a database that exists and contains nothing. Use the
+whole-file command only when the roles are genuinely absent (empty or rebuilt cluster).
+
 #### Restoring under a scratch name (the periodic restore drill)
 
 To prove the dump without touching the live database, restore the **pg_dump half** under

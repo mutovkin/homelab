@@ -234,14 +234,24 @@ export WATCHTOWER_NOTIFICATION_URL=$(docker inspect watchtower \
   | sed -n 's/^WATCHTOWER_NOTIFICATION_URL=//p')
 [ -n "$WATCHTOWER_NOTIFICATION_URL" ] || { echo "no URL on the running container"; exit 1; }
 
-docker run --rm \
-  --security-opt apparmor=unconfined \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -e WATCHTOWER_NOTIFICATION_URL \
-  nickfedor/watchtower:1.21.0 \
-  --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1 \
-  | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
+# The brace group captures the probe's OWN exit status BEFORE the redactor runs.
+# A bare `$?` after this pipeline is SED's status, not the probe's — and sed exits 0
+# even when the probe failed, which would turn a failed send into evidence of a
+# successful one. Do not "simplify" the group away.
+{
+  docker run --rm \
+    --security-opt apparmor=unconfined \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -e WATCHTOWER_NOTIFICATION_URL \
+    nickfedor/watchtower:1.21.0 \
+    --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1
+  echo "PROBE_EXIT=$?"
+} | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
 ```
+
+(`echo "PROBE_EXIT=${PIPESTATUS[0]}"` on the line immediately after a plain pipeline is
+an equivalent bash-only alternative. The brace group above is the form the results below
+were actually produced with.)
 
 **How it forces a send at `updated=0`:** production sets
 `WATCHTOWER_NO_STARTUP_MESSAGE=true`; the probe simply omits it, so watchtower queues its
@@ -272,7 +282,8 @@ What counts as evidence, in order of strength:
 
 1. `Mail successfully sent to "…"!` — shoutrrr's own positive confirmation. This is what
    to look for; the 1.21.0 build does print it.
-2. `Notification send completed successfully … total_urls=1` and a probe exit code of 0.
+2. `Notification send completed successfully … total_urls=1` and `PROBE_EXIT=0` — read
+   that line, never a bare `$?`, for the reason in the command's comment above.
 3. `Update session completed … scanned=N` with N equal to the labelled count.
 
 "No `Failed to send notification` line" is **weaker** evidence than a positive
