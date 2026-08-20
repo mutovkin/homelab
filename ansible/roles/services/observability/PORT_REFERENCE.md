@@ -107,13 +107,18 @@ eq12_docker's inventory address, so a re-IP of this CT moves them automatically.
 Two properties of that, both deliberate and both stated rather than shipped
 quietly:
 
-- **:9428 was not narrowed and no port was opened.** It is already reachable from
-  the flat `192.168.0.0/18` LAN — Grafana is here, but NPM and operator
-  workstations query it too, and `roles/services/observability`'s
-  `nft_scoped_fw` table governs **:8089 only**. #134 adds writers to an existing
-  exposure; it does not widen it. Narrowing it needs its own establishment of who
-  legitimately reaches it and its own from-a-blocked-source verification —
-  tracked as a follow-up issue, not smuggled into a logging change.
+- **:9428 IS narrowed, in this same change, and no port was opened.** An earlier
+  draft deferred this to a follow-up; that was overruled, correctly. The LAN is one
+  flat `192.168.0.0/18` with no segmentation, so the `inet observability_fw`
+  nftables table is the only thing constraining reach — and this change is exactly
+  what turns `:9428` from a port only the local container wrote to into a fleet
+  ingest endpoint. The allowlist is the three agents, NPM (**verified** against CT
+  104's `proxy_host` table, not assumed) and the operator subnet; Grafana needs no
+  entry because it reaches VictoriaLogs over the compose network. Full source list
+  and evidence: the README's
+  [Firewall section](README.md#9428-is-governed-too-since-134). `:8428` and `:3000`
+  remain ungoverned and are tracked separately — do not extend this list to them by
+  analogy.
 - **The ingest path is cleartext HTTP with basic auth**, like every other internal
   hop in this homelab. VictoriaLogs' `--httpAuth` is one credential pair for the
   whole instance, so each shipping host necessarily holds read+write credentials

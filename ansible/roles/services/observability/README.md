@@ -291,7 +291,7 @@ identities: changing one re-points every dashboard and alert that uses it.
 > send `-H 'Host: grafana.moutovkin.com'` (`/api/health` is exempt, which is why the
 > role's readiness gate works without it).
 
-## Firewall (:8089)
+## Firewall (:8089 and :9428)
 
 `--influxListenAddr=:8089` is an **unauthenticated write endpoint** on TCP *and*
 UDP — `--httpAuth.username/password` guards `:8428` only. Its one intended client is
@@ -310,10 +310,54 @@ scope guard, so a packet of neither protocol still falls through to `policy acce
 Shape (identical to the postgres/vaultwarden precedent, see
 [docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md](../../../../docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md)):
 `hook prerouting` at priority **-150** (before Docker's dstnat at -100 — an
-`input` hook never sees DNAT'd published ports), policy `accept`, only :8089 ever
-dropped, and unloading the table leaves the port open rather than the host
-unreachable. The read ports 8428/9428/3000 are untouched: NPM (192.168.25.20) and
-operator workstations must keep reaching them.
+`input` hook never sees DNAT'd published ports), policy `accept`, only the governed
+ports ever dropped, and unloading the table leaves those ports open rather than the
+host unreachable.
+
+### :9428 is governed too, since #134
+
+The **LAN is one flat `192.168.0.0/18`** with no segmentation between hypervisors,
+guests and workstations. Nothing else constrains who can reach a published port, so
+this nftables table is the only control there is — which is why #134 narrowed
+`:9428` in the same change that turned it from a port only this host's own container
+wrote to into a **fleet ingest endpoint** accepting writes from three other hosts.
+
+The allowlist is built from **configuration facts, not observed traffic**, and
+deliberately: measured 2026-08-20, the `:9428` DNAT rule had passed 3 packets in the
+~24 h since the container started, and conntrack held no `:9428` flows at all. A
+sample that size would have "proved" nothing needs access.
+
+| Source | Why | Evidence |
+| ------ | --- | -------- |
+| `192.168.25.5/32` | eq12 agent | writer, `roles/vector_agent` |
+| `192.168.30.5/32` | n5pro agent | writer, `roles/vector_agent` |
+| `192.168.30.15/32` | n5pro_docker agent | writer, `roles/vector_agent` |
+| `192.168.25.20/32` | NPM | **verified**: CT 104's `proxy_host` row id 11, `vl.moutovkin.com` → `deb-docker.lan:9428`, `is_deleted=0` |
+| `192.168.48.0/24` | operators | VictoriaLogs UI at `/select/vmui` |
+
+NPM was checked, not assumed — #140 established that inherited NPM grants in this
+repo have been wrong before, so this went to CT 104's own `proxy_host` table the
+same way. Unlike #140's portainer case, the answer came back **yes**. Deleting that
+proxy host is what would make the grant stale.
+
+**Grafana is unaffected and gets no grant**, confirmed rather than asserted: its
+provisioned datasource URL is `http://victorialogs:9428`, the compose service name
+on `172.20.0.0/24`, so its queries never traverse `eth0`. The same is true of the
+local `vector` and `telegraf` containers, and the role's own ingest assert uses
+`localhost` (covered by the table's `iif "lo"` rule).
+
+`:8428` (VictoriaMetrics) and `:3000` (Grafana) stay **ungoverned**. That is now a
+live asymmetry rather than a blanket "read ports are open" rule — this section used
+to lump `:9428` in with them. Narrowing those needs the same NPM-table check and its
+own from-a-blocked-source verification; it is tracked separately, and the `:9428`
+list must not be extended to them by analogy.
+
+Note the ingest path is **plain HTTP with basic auth**, like every other internal
+hop in this homelab, so these credentials cross the LAN in cleartext. VictoriaLogs'
+`--httpAuth` is one credential pair for the whole instance, so every shipping host
+necessarily holds read+write credentials — which is why they live in
+`group_vars/all/vault.yml`. TLS on the ingest path is a tracked follow-up, stated
+here rather than shipped quietly.
 
 ```bash
 ssh root@192.168.25.15 'nft list table inet observability_fw'   # read-only check
