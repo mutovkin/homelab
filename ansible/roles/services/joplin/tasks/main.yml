@@ -143,7 +143,7 @@
       ansible.builtin.debug:
         msg: >-
           Removing {{ joplin_partial_dumps.files | length }} orphaned partial
-          dump(s) left by a killed pg_dumpall — a sign a previous run died
+          dump(s) left by a killed dump — a sign a previous run died
           mid-stream (OOM, disk full, dropped connection):
           {{ joplin_partial_dumps.files | map(attribute='path') | join(', ') }}
       when:
@@ -163,38 +163,100 @@
     - name: Preview the pre-deploy dump (check mode)
       ansible.builtin.debug:
         msg: >-
-          A real apply WILL write a pg_dumpall of the postgres cluster to
+          A real apply WILL write the postgres cluster globals plus a
+          `pg_dump --create {{ joplin_database_name }}` to
           {{ data_mount }}/backups/joplin-pgdump-<timestamp>.sql before deploying.
       when: ansible_check_mode
 
     # `-u postgres`, not root: the cluster's local connections are `peer`
     # authenticated, so a dump run as root fails auth outright (#79).
     #
-    # Written straight to a host file rather than through Ansible: the dump is the
-    # whole cluster and carries credentials/session tokens — capturing it as a
-    # register would copy it to the controller and put it in play output.
+    # WHAT is dumped (#142): the cluster GLOBALS (roles/tablespaces — 946 bytes on
+    # 2026-08-19) followed by `pg_dump --create` of the joplin database ALONE,
+    # concatenated into one artifact. Not `pg_dumpall`. The guard exists to protect
+    # JOPLIN's schema through a one-way migration, so joplin's database is the
+    # correct scope; the cluster-wide dump was incidental. It also decouples this
+    # from cluster growth — the moment a second service lands in this shared
+    # postgres, a cluster dump would start dumping it on every routine joplin
+    # deploy. Do NOT sell this as a size fix: it is size-NEUTRAL. Measured
+    # 2026-08-19, the two artifacts taken 32 s apart were 633,247,291 B
+    # (pg_dumpall) vs 633,245,733 B (this task) — 1,558 bytes smaller. The other
+    # databases hold ~7.7 MB apiece of pg_database_size, but that is catalog and
+    # index storage which pg_dump never emits: `pg_dump template1` is 720 bytes
+    # and `pg_dump postgres` is 1,443 bytes, so ~2 KB is the entire achievable
+    # saving and always was. COMPARE THE TWO SIZES AT THE SAME INSTANT — joplin
+    # is a live sync server growing ~62 KB/h, so dumps 20 h apart differ by
+    # ~1.27 MB, which is larger than the whole format change and would let you
+    # "prove" a regression that does not exist. The wins are scope,
+    # growth-decoupling, and restore ergonomics.
+    #   - GLOBALS FIRST, not optional: joplin's objects are owned by role
+    #     `joplin_user` and `pg_dump` never emits roles. Globals first means a
+    #     restore into an empty cluster creates the role before anything grants to
+    #     it.
+    #   - `--create`, not optional: it emits `CREATE DATABASE` + `\connect`, so the
+    #     file restores with one `psql -d postgres -f <file>` and lands in the right
+    #     database. Without it the same command creates joplin's tables inside the
+    #     `postgres` database — a silent, plausible-looking WRONG restore.
+    #   - ONE file, keeping the `joplin-pgdump-<ts>.sql` name so the retention
+    #     prune's glob below is unchanged. A paired `joplin-globals-<ts>.sql` would
+    #     need its own retention slice; one `[retention:]` slice over a mixed list
+    #     keeps 3.5 pairs.
+    # `set -euo pipefail` aborts the whole script (firing the ERR trap) if the
+    # globals half fails, so a truncated globals section can never be followed by a
+    # successful pg_dump.
+    #
+    # Written straight to a host file rather than through Ansible: the globals half
+    # carries SCRAM password hashes and the joplin half carries session tokens —
+    # capturing it as a register would copy it to the controller and put it in play
+    # output.
+    #
+    # TWO markers, because the halves have DIFFERENT completion strings and one is a
+    # substring shape of the other:
+    #     globals   -> '-- PostgreSQL database cluster dump complete'
+    #     joplin db -> '-- PostgreSQL database dump complete'
+    # A pg_dumpall file contains BOTH, so the plain marker cannot tell a narrowed
+    # dump from a cluster dump. Each is therefore checked in the REGION it belongs
+    # to — never over the whole file: this is a NOTES database, and a note whose
+    # text contains either marker would satisfy an unbounded grep.
+    #
+    # PG18 writes an `\unrestrict <token>` line AFTER the plain marker, so the
+    # marker is NOT the last line of the file. A bounded tail region catches it; a
+    # "last line must be the marker" check would not — do not write one.
+    #
+    # The checks use command substitution + herestrings, NOT `head … | grep -q`. Do
+    # not "simplify" them back into pipelines: under `pipefail`, `grep -q` exits at
+    # its first match and SIGPIPEs the writer, the writer dies 141, pipefail
+    # propagates it, the ERR trap deletes a perfectly good dump and the `rescue:`
+    # below refuses the deploy. The previous `tail -n 20 | grep -q` form escaped
+    # that only because 20 lines fit the 64 KB pipe buffer — luck, not design.
     #
     # `.partial` + trap: a dump that dies mid-stream (disk full, killed process)
     # leaves a truncated file the retention prune cannot tell from a good backup,
     # and it would then age out a real one (the lesson from #107's archive rescue).
-    # The rename happens only after the tail check proves pg_dumpall finished.
+    # The rename happens only after both marker checks prove the dump finished.
     #
-    # The trap covers ERR (which `pipefail` makes the tail|grep check trip) AND the
+    # The trap covers ERR (which a failed marker check trips) AND the
     # ordinary exit/termination signals, then is cleared right after the successful
     # `mv` so the finished dump is never removed. Note what a trap CANNOT cover:
     # SIGKILL — the OOM killer, `kill -9` — is undeliverable to a handler by
     # definition, and that is the case most likely to strand a multi-GB `.partial`.
     # The sweep above, not this trap, is what actually cleans that up; the trap is
     # the cheap half of a two-part fix, not the whole of it.
-    - name: Dump the postgres cluster before deploying Joplin
+    - name: Dump the Joplin database and cluster globals before deploying Joplin
       ansible.builtin.shell:
         cmd: |
           set -euo pipefail
           umask 077
           dest="{{ data_mount }}/backups/joplin-pgdump-{{ ansible_date_time.iso8601_basic_short }}.sql"
           trap 'rm -f "${dest}.partial"' ERR EXIT HUP INT TERM
-          docker exec -u postgres postgres pg_dumpall > "${dest}.partial"
-          tail -n 20 "${dest}.partial" | grep -q 'PostgreSQL database cluster dump complete'
+          {
+            docker exec -u postgres postgres pg_dumpall --globals-only
+            docker exec -u postgres postgres pg_dump --create '{{ joplin_database_name }}'
+          } > "${dest}.partial"
+          head_region="$(head -c 65536 "${dest}.partial")"
+          grep -q 'PostgreSQL database cluster dump complete' <<<"$head_region"
+          tail_region="$(tail -n 20 "${dest}.partial")"
+          grep -q 'PostgreSQL database dump complete' <<<"$tail_region"
           mv "${dest}.partial" "$dest"
           trap - ERR EXIT HUP INT TERM
           echo "$dest"

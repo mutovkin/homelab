@@ -1,7 +1,7 @@
 ---
 title: "Watchtower with WATCHTOWER_LABEL_ENABLE never self-updates and silently ignores monitor-only containers"
 date: 2026-08-13
-last_updated: 2026-08-16
+last_updated: 2026-08-19
 category: integration-issues
 module: watchtower
 problem_type: integration_issue
@@ -26,6 +26,7 @@ tags:
   - shoutrrr
   - image-pinning
   - supply-chain
+  - delivery-evidence
 ---
 
 # Watchtower with WATCHTOWER_LABEL_ENABLE never self-updates and silently ignores monitor-only containers
@@ -144,10 +145,15 @@ it immediately, which is what you want right after changing labels:
 docker run --rm \
   --security-opt apparmor=unconfined \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  nickfedor/watchtower:1.20.3 \
+  nickfedor/watchtower:1.21.0 \
   --run-once --monitor-only --label-enable --no-startup-message 2>&1 \
   | grep 'Update session completed'
 ```
+
+**The scan count says nothing about DELIVERY.** This probe proves coverage; it does not
+prove a notification would arrive, because at `updated=0` the report template renders an
+empty message and nothing is sent. Proving the send is a separate, forced probe —
+see [[prove-notification-delivery-not-just-config-validity]] (#145).
 
 `--monitor-only` makes the probe read-only regardless of what the scanned containers are
 labeled, so it can never apply an update as a side effect of measuring. On Docker-in-LXC
@@ -165,8 +171,8 @@ load-bearing the moment you pin:
 - Moving tags — `:latest`, `:stable`, `:release`, `:lts`, and major lines like
   `postgres:18` or `redis:7-alpine` — keep notifying, because patch releases republish
   the same tag.
-- An immutable tag like `watchtower:1.20.3` notifies about nothing but a re-push of that
-  exact tag. A published `1.20.4` is simply invisible.
+- An immutable tag like `watchtower:1.21.0` notifies about nothing but a re-push of that
+  exact tag. A published `1.21.1` is simply invisible.
 
 So `pin + monitor-only` does not mean "we will be told and can decide". It means the
 unattended path is closed and **a human must check the releases page**. Pair every
@@ -185,6 +191,8 @@ someone will "fix" the mismatch in the wrong direction.
 
 ## Related Issues
 
+- #136 — the 1.20.3 → 1.21.0 bump; the probe and pin examples above track the pinned tag
+- #145 — validation passing is not delivery; the scan count proves coverage, not arrival
 - #71 — Watchtower never self-updates; migrate deprecated email notification config
 - #72 — Vaultwarden produces no update notifications; add pre-deploy backup
 - #83 — Update posture per container class; pin the update orchestrator

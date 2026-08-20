@@ -1,7 +1,11 @@
 ---
-# Number of pre-deploy PostgreSQL cluster dumps to retain in {{ data_mount }}/backups.
-# Same shape and directory as the Vaultwarden pre-upgrade archives (#107); the two
-# use different filename patterns so their retentions never prune each other.
+# Number of pre-deploy Joplin dumps to retain in {{ data_mount }}/backups. Each is
+# one file: the cluster globals (roles — kilobytes) followed by a
+# `pg_dump --create` of the joplin database only, NOT a whole-cluster pg_dumpall
+# (#142). Same shape and directory as the Vaultwarden pre-upgrade archives (#107);
+# the two use different filename patterns so their retentions never prune each
+# other, and the prune glob here is deliberately narrow enough to leave ad-hoc
+# operator dumps in the same directory alone.
 joplin_backup_retention: 7
 
 # The database joplin-server owns inside the shared postgres cluster. Created by
