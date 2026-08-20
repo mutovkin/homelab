@@ -833,9 +833,11 @@
 # that file carries [pve:pending] and per-snapshot sections, each with its own copy
 # of the keys we match, and a line-anchored read cannot tell them apart (#86).
 #
-# ONE read feeds both computes below (startup/onboot, cores/memory), and the
-# `features` task between them writes a third, disjoint field — so nothing here can
-# invalidate a later compute.
+# ONE read feeds all three computes below (features, startup/onboot, cores/memory)
+# and is NOT re-read between their applies. That is safe by construction, not by
+# luck: the three touch disjoint field sets — `features`, `startup`/`onboot`,
+# `cores`/`memory` — so no apply can invalidate a later compute. Adding a fourth
+# reconcile means checking that property again.
 - name: Read current LXC configuration
   become: true
   ansible.builtin.command: "pct config {{ item.vmid }}"
@@ -861,6 +863,7 @@
 # explicitly rather than relying on `| default([])` to paper over a stale value.
 - name: Seed LXC drift accumulators
   ansible.builtin.set_fact:
+    lxc_features_drift: []
     lxc_startup_drift: []
     lxc_resource_drift: []
 
@@ -876,15 +879,39 @@
 #      and `echo "changed"` ran anyway — a green report over a no-op. The
 #      startup/onboot reconcile shells this task copied already carried `-euo`
 #      for exactly this reason (they have since become read/compute/report/apply
-#      task chains under #119). This is now the LAST mutate-then-echo shell in
-#      the role, so it is also the last task whose drift is invisible under
-#      --check — same defect class as #119, deliberately left out of its scope;
-#      worth a follow-up issue rather than a drive-by change.
+#      task chains under #119).
 #
 # The old existence check also grepped the raw /etc/pve/lxc/<id>.conf, which
-# contains SNAPSHOT sections ([preissue77] on CT 201) that carry their own
-# `features:` line — so it could match a snapshot's value and skip a genuinely
-# drifted live config. Compare against `pct config` (live view only) instead.
+# contains SNAPSHOT sections that carry their own `features:` line — so it could
+# match a snapshot's value and skip a genuinely drifted live config. Compare
+# against `pct config` (the rendered live view) instead.
+#
+# #135 finished the job: this was the role's LAST mutate-then-echo shell, and so
+# the last reconcile whose drift was invisible under `--check` (Ansible skips
+# `shell` wholesale in check mode) — the same defect class #119 fixed for the NIC
+# and startup/onboot reconciles and deliberately left out of its scope. It also
+# read `pct config` a SECOND time, unguarded, inside its own mutating script: a CT
+# declared in host_vars but not yet created failed the play with a raw shell error
+# instead of taking the shared read's discriminating skip-and-report path. It is
+# now read -> compute -> report -> apply over the shared `lxc_config_raw`.
+#
+# COMPARISON BASIS — plain `pct config`, deliberately, and NOT `--current`:
+#
+#   `features` is a pending-capable option. PVE cannot change a running
+#   container's feature set in place, so a successful `pct set -features` on a
+#   running CT lands in `[pve:pending]` and takes effect at its next stop/start.
+#   The apply mechanism here IS `pct set`, so the question the reconcile has to
+#   answer is "would re-issuing `pct set` change anything?" — and plain
+#   `pct config` (the pending-merged view) is exactly the view that answers it.
+#   Comparing against `pct config <vmid> --current` would see standing drift for a
+#   value already queued, re-issue `pct set` every run to rewrite the identical
+#   pending value, and reinstate the permanent `changed=1` floor that #86 removed.
+#
+#   The cost, stated honestly: config convergence is not EFFECTIVE convergence.
+#   This chain can report converged while a feature is merely queued. `pct config
+#   <vmid> --current` and `pct pending <vmid>` are the operator's check for "is it
+#   actually in force"; the role deliberately does not bounce the CT that hosts
+#   the docker fleet to close that gap.
 
 # The features task only runs for PRIVILEGED containers, so `nfs_enabled` on an
 # unprivileged one would be silently inert — a var that looks like configuration
@@ -902,33 +929,60 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — nfs_enabled"
 
-- name: Set features for privileged LXC containers
-  become: true
+- name: Compute LXC features drift
+  ansible.builtin.set_fact:
+    lxc_features_drift: "{{ lxc_features_drift + [drift_entry] }}"
   vars:
-    # Alphabetical (mount before nesting) to match PVE's canonical print order.
+    live_features: >-
+      {{ item.stdout | regex_search('(?m)^features: (.*)$', '\1')
+         | default([], true) | join }}
+    # Alphabetical (mount before nesting) to match PVE's canonical print order, so
+    # the common case compares equal on the nose; the sort below makes the compare
+    # correct even if PVE ever writes them back in another order.
     desired_features: >-
-      {{ ((['mount=nfs'] if item.nfs_enabled | default(false) else [])
-          + ['nesting=' ~ (item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0'))]) | join(',') }}
-  ansible.builtin.shell: |
-    set -euo pipefail   # -e so a failed pct set aborts instead of falsely echoing "changed"
-    desired="{{ desired_features }}"
-    current=$(pct config {{ item.vmid }} | sed -n 's/^features: //p')
+      {{ ((['mount=nfs'] if item.item.nfs_enabled | default(false) else [])
+          + ['nesting=' ~ (item.item.nesting | default(proxmox_lxc_defaults.nesting) | ternary('1', '0'))])
+         | join(',') }}
+    # reject('equalto','') so an absent or empty `features:` line normalises to []
+    # rather than [''], which would never compare equal to a desired [].
+    live_norm: "{{ live_features | split(',') | reject('equalto', '') | sort | list }}"
+    desired_norm: "{{ desired_features | split(',') | reject('equalto', '') | sort | list }}"
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      hostname: "{{ item.item.hostname }}"
+      features: "{{ desired_features }}"
+      human: "features live={{ live_features | default('<unset>', true) }} desired={{ desired_features }}"
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when:
+    # rc first: a non-existent CT has no config to parse, and the compare must
+    # never run against a stderr blob. (Same ordering rule as the computes below.)
+    - item.rc == 0
+    # Privileged only — unchanged gate. Unprivileged CTs get `features` at CREATE
+    # time from the provisioning module and are not reconciled here; the
+    # `nfs_enabled` assert above enforces the matching half of that contract.
+    - not (item.item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+    - live_norm != desired_norm
 
-    # Order-insensitive compare: stay idempotent even if PVE ever writes the
-    # keys back in a different order than we emit them.
-    norm() { tr ',' '\n' | sort | paste -sd ',' -; }
+- name: Report LXC features drift
+  ansible.builtin.debug:
+    msg: "CT {{ item.vmid }} ({{ item.hostname }}): {{ item.human }} — will apply via pct set"
+  loop: "{{ lxc_features_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
-    if [ "$(printf '%s' "$current" | norm)" != "$(printf '%s' "$desired" | norm)" ]; then
-      pct set {{ item.vmid }} -features "$desired"
-      echo "changed"
-    fi
-  args:
-    executable: /bin/bash
-  register: pct_features
-  # Last line, not whole stdout: pct/pvesh can emit progress chatter ahead of it.
-  changed_when: pct_features.stdout_lines | default([]) | last | default('') == 'changed'
-  loop: "{{ proxmox_lxcs }}"
-  when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+# `command`, not `shell`: the value is a comma-joined key=value string built in
+# Jinja and needs no shell metacharacters — which also retires the missing-`set -e`
+# trap that let the old task echo "changed" over a failed `pct set` (#86).
+# `changed_when: true` matches the sibling applies below: the task only runs when
+# drift was computed, so running it IS the change. Like those siblings it is still
+# skipped under `--check`; the drift REPORT above is what became visible (#135).
+- name: Apply features to existing LXC containers
+  become: true
+  ansible.builtin.command: "pct set {{ item.vmid }} -features {{ item.features }}"
+  changed_when: true
+  loop: "{{ lxc_features_drift | default([]) }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — features"
 
