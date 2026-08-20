@@ -6,10 +6,15 @@
 
 | Port     | Protocol | Purpose                               | Used By                                         |
 | -------- | -------- | ------------------------------------- | ----------------------------------------------- |
-| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`) | Grafana queries, Telegraf writes, Manual queries |
-| **8089** | TCP/UDP  | **InfluxDB Line Protocol**            | Home Assistant, InfluxDB-compatible clients     |
-| **2003** | TCP/UDP  | **Graphite Protocol**                 | Graphite-compatible monitoring tools            |
-| **4242** | TCP      | **OpenTSDB Protocol**                 | OpenTSDB-compatible clients                     |
+| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`), incl. the **InfluxDB v1 HTTP API** | Grafana queries, Telegraf writes, Manual queries; the only working path for an InfluxDB HTTP client |
+| **8089** | TCP/UDP  | **InfluxDB line protocol, raw socket** — enabled, **unauthenticated**, and **no client has ever written to it** (#133) | nothing, today |
+| **2003** | TCP/UDP  | Graphite protocol — **not enabled in this deployment** | — |
+| **4242** | TCP      | OpenTSDB protocol — **not enabled in this deployment** | — |
+
+> `compose.yaml` passes only `--influxListenAddr=:8089`. There is no
+> `--graphiteListenAddr` and no `--opentsdbListenAddr`, and neither port is
+> published, so 2003 and 4242 are listed above only to record that they are *not*
+> available here — enabling either means adding the flag and the port publish.
 
 #### Port 8428 - Main HTTP API
 
@@ -19,34 +24,61 @@
 - **Prometheus Remote Write**: http://localhost:8428/api/v1/write
 - **Series Query**: http://localhost:8428/api/v1/series
 
-#### Port 8089 - InfluxDB Protocol ⭐ **Recommended for Home Assistant**
+#### Port 8089 - InfluxDB line protocol (raw socket) — **not for Home Assistant**
 
-- **Write Endpoint**: Automatically available (no path needed)
-- **Why Use This**: 
-  - Native Home Assistant integration
-  - No authentication required
-  - Simpler than Prometheus remote_write
-  - Better performance than HTTP API
-- **Home Assistant Config**:
+This section used to recommend 8089 for Home Assistant. **That recipe cannot
+work**, and following it would have built a silently-dead export. Corrected from
+the #133 diagnosis (2026-08-20), which measured every claim below.
 
-  ```yaml
-  influxdb:
-    api_version: 1
-    host: YOUR_DOCKER_HOST_IP
-    port: 8089  # VictoriaMetrics InfluxDB port
-  ```
+- **It is a raw line-protocol socket, not HTTP.** Home Assistant's `influxdb:`
+  integration is an HTTP client — it issues `POST /write?db=…`. There is nothing
+  on 8089 to answer an HTTP request.
+- **It is unauthenticated.** `--httpAuth.username/password` guards `:8428` only.
+  That is not a feature; it is the security defect that forced the scoped
+  nftables allowlist in #122, and it is published on **TCP and UDP**.
+- **Nothing has ever written to it.** `vm_rows_inserted_total{type="influx"} = 0`
+  over the full 5 y store; no HA-shaped series has ever existed; the DOCKER-chain
+  DNAT counters on both 8089 rules read `packets 0`; a 90 s tcpdump saw nothing.
+- **Performance claims removed.** There was no evidence for "better performance
+  than HTTP API", and that sentence is what produced a listener, a 5 y retention
+  setting and a firewall rule for a writer that has never sent a byte.
 
-#### Port 2003 - Graphite Protocol
+#### The working path for an InfluxDB HTTP client: **port 8428**
 
-- For legacy Graphite monitoring tools
-- Supports both TCP and UDP
-- Common in older monitoring setups
+VictoriaMetrics serves the InfluxDB **v1 HTTP API** on 8428 — verified live
+during the #133 diagnosis: `POST /write?db=…` → 204 authenticated / 401
+unauthenticated, `GET /ping` → 204, `GET /query?q=SHOW DATABASES` → a well-formed
+result, `GET /influx/health` → `status: pass`. Credentials are **required** (8428
+is the authenticated port).
 
-#### Port 4242 - OpenTSDB Protocol
+```yaml
+influxdb:
+  api_version: 1
+  host: 192.168.25.15
+  port: 8428                 # NOT 8089 — 8089 is a raw line-protocol socket;
+                             # HA's integration is an HTTP client.
+  ssl: false
+  verify_ssl: false
+  database: homeassistant    # VictoriaMetrics ignores the name; the client requires one
+  username: !secret vm_auth_username   # = vault_vm_auth_username (eq12_docker/vault.yml)
+  password: !secret vm_auth_password   # = vault_vm_auth_password
+  max_retries: 3
+  default_measurement: state
+  include:                   # start narrow — an unfiltered HA export is a cardinality event
+    domains: [sensor, binary_sensor]
+```
 
-- For OpenTSDB-compatible clients
-- HTTP-based metric ingestion
-- Used in some enterprise monitoring systems
+**#133 is still open** and Home Assistant is deliberately unchanged by this
+correction. What is fixed here is only the repo documenting a recipe we proved
+cannot work. The `:8089` listener, its two port publishes, `--retentionPeriod=5y`,
+`--dedup.minScrapeInterval=15s` and `observability_firewall.ports[8089]` all
+remain exactly as they are, pending the human's decision on #133.
+
+#### Ports 2003 (Graphite) and 4242 (OpenTSDB)
+
+**Not enabled in this deployment.** VictoriaMetrics supports both protocols, but
+`compose.yaml` passes neither `--graphiteListenAddr` nor `--opentsdbListenAddr`
+and publishes neither port. Nothing is listening.
 
 ---
 
@@ -114,6 +146,21 @@ without the other does nothing. Only then do these become reachable:
 - **Data Sources**: http://localhost:3000/datasources
 - **Explore**: http://localhost:3000/explore
 
+#### Outbound: SMTP 587 (alert notifications, #139)
+
+Grafana's only outbound port. `GF_SMTP_HOST` is `smtp.gmail.com:587` with
+`OpportunisticStartTLS`, templated into `.env` from the host's shared Gmail relay
+credentials (`vault_watchtower_email_*` — the same relay watchtower uses). It
+carries the four provisioned alert rules to the `homelab-email` contact point.
+
+Nothing listens on 587 here; egress to it must stay open or alerting silently
+stops delivering. Rules, routing and the shared-relay coupling:
+[README.md → Alerting](README.md#alerting).
+
+> Every Grafana **API** call by IP must send `-H 'Host: grafana.moutovkin.com'`.
+> `grafana.ini` sets `enforce_domain = true`, so anything else gets a 301 to the
+> configured domain. `/api/health` is the one exemption.
+
 ---
 
 ### Telegraf (Metrics Collector)
@@ -148,7 +195,10 @@ If accessing from other machines on your network, open these ports:
 # VictoriaMetrics Web UI (metrics exploration)
 sudo ufw allow 8428/tcp comment 'VictoriaMetrics HTTP API'
 
-# InfluxDB protocol for Home Assistant
+# InfluxDB raw line-protocol socket. NOT for Home Assistant (#133) and not
+# something to open casually — it is unauthenticated on TCP *and* UDP, and this
+# deployment deliberately RESTRICTS it with a scoped nftables table rather than
+# opening it (see README → Firewall (:8089), #122).
 sudo ufw allow 8089/tcp comment 'VictoriaMetrics InfluxDB'
 sudo ufw allow 8089/udp comment 'VictoriaMetrics InfluxDB UDP'
 
@@ -168,22 +218,36 @@ Change in `observability.yml`:
 ```yaml
 ports:
   - "127.0.0.1:8428:8428"  # Only localhost can access
-  - "0.0.0.0:8089:8089"    # Home Assistant needs network access
+  - "0.0.0.0:8089:8089"    # left wide only because it is scoped by nftables
 ```
+
+> Two corrections to the block above, kept as a warning rather than deleted:
+> the file it names (`observability.yml`) no longer exists — the compose file is
+> `files/compose.yaml` — and binding a service to `127.0.0.1` on this host
+> **breaks NPM**, which proxies in from its own LXC. Exposure here is narrowed
+> with scoped nftables (`roles/nft_scoped_fw`), never with a loopback bind. The
+> old "Home Assistant needs network access" comment was also false: HA has never
+> used this port (#133).
 
 ---
 
 ## Port Security Best Practices
 
-1. **InfluxDB Port (8089)**:
-   - ✅ Keep open if Home Assistant is on different machine
-   - ✅ No authentication required (VictoriaMetrics trusts your network)
-   - ⚠️  Put Home Assistant and VictoriaMetrics on same VLAN
-   - ⚠️  Use firewall to restrict to Home Assistant IP only
+1. **InfluxDB line-protocol port (8089)**:
+   - ⚠️  **Unauthenticated write endpoint**, on TCP *and* UDP. `--httpAuth.*`
+     guards :8428 only. This is a liability, not a convenience.
+   - ⚠️  Restricted by the scoped nftables table `inet observability_fw` to the
+     sources in `observability_firewall.ports[8089]` (#122). It is the ONLY thing
+     standing between this port and the LAN.
+   - ⚠️  No client writes to it today (#133). If HA export is ever set up, use the
+     authenticated 8428 HTTP path instead — see above.
 
 2. **HTTP APIs (8428, 9428)**:
-   - ✅ No authentication by default (simple for homelabs)
-   - ⚠️  Add reverse proxy with auth if exposing to internet
+   - ✅ **Authenticated since #88** (`--httpAuth.username/password`, mandatory —
+     an empty value means "auth disabled", which is why the role asserts all four
+     credentials non-empty before deploying). The line this replaces claimed "no
+     authentication by default"; that has not been true since #88.
+   - ⚠️  Add a reverse proxy with its own auth if exposing to the internet
    - ⚠️  Use VPN if accessing remotely
 
 3. **Grafana (3000)**:
@@ -204,16 +268,19 @@ ports:
 │  Home Assistant     │
 │  (Remote Machine)   │
 └──────────┬──────────┘
-           │
-           │ InfluxDB Protocol
-           │ Port 8089 TCP/UDP
+           ┆
+           ┆ NOT WIRED (#133): HA has no influxdb: block and
+           ┆ has never sent a byte. If ever set up, it must
+           ┆ target :8428 (InfluxDB v1 HTTP API, authenticated),
+           ┆ NOT :8089 (raw line-protocol socket).
            ▼
 ┌─────────────────────────────────┐
 │    VictoriaMetrics              │
-│    :8428 (HTTP API, Web UI)     │──┐
-│    :8089 (InfluxDB)             │  │
-│    :2003 (Graphite)             │  │
-│    :4242 (OpenTSDB)             │  │
+│    :8428 (HTTP API, Web UI,     │──┐
+│           InfluxDB v1 HTTP API) │  │
+│    :8089 (InfluxDB raw socket,  │  │
+│           enabled, unused)      │  │
+│    :2003 / :4242 NOT ENABLED    │  │
 └─────────────────────────────────┘  │
            ▲                         │
            │ Prometheus              │
@@ -264,7 +331,9 @@ ports:
 # Test VictoriaMetrics HTTP API
 curl http://localhost:8428/health
 
-# Test VictoriaMetrics InfluxDB port
+# Test the InfluxDB raw line-protocol socket. nc is the right tool BECAUSE 8089
+# is not HTTP. Note what this demonstrates: an unauthenticated write, accepted
+# from anything the nftables scope lets through (#122).
 echo "test_metric value=42" | nc localhost 8089
 
 # Test VictoriaLogs
@@ -280,13 +349,18 @@ curl http://localhost:3000/api/health
 ### From Remote Machine (e.g., Home Assistant)
 
 ```bash
-# Replace YOUR_DOCKER_HOST_IP with actual IP
-# Test InfluxDB write (Home Assistant uses this)
-curl -X POST http://YOUR_DOCKER_HOST_IP:8089/write \
-  -d 'homeassistant,entity_id=test value=123'
+# Replace YOUR_DOCKER_HOST_IP with actual IP.
 
-# Test VictoriaMetrics query
-curl 'http://YOUR_DOCKER_HOST_IP:8428/api/v1/query?query=up'
+# InfluxDB v1 HTTP write — port 8428, authenticated. This is the path an
+# InfluxDB HTTP client (including Home Assistant's integration) must use.
+# 8089 does NOT answer HTTP: curl'ing it is meaningless, which is why the
+# example that used to sit here could never have proved anything (#133).
+curl -u "$VM_USER:$VM_PASS" -X POST \
+  'http://YOUR_DOCKER_HOST_IP:8428/write?db=homeassistant' \
+  --data-binary 'homeassistant,entity_id=test value=123'    # → 204
+
+# Test VictoriaMetrics query (also authenticated since #88)
+curl -u "$VM_USER:$VM_PASS" 'http://YOUR_DOCKER_HOST_IP:8428/api/v1/query?query=up'
 
 # Test Grafana
 curl http://YOUR_DOCKER_HOST_IP:3000/api/health
@@ -323,32 +397,50 @@ docker port victoriametrics
 
 ### Home Assistant Can't Connect
 
-1. **Verify VictoriaMetrics is running**:
+**Check first: is there anything to connect?** As of the #133 diagnosis
+(2026-08-20) Home Assistant has **no `influxdb:` block at all** and has never
+written a metric here. "Cannot connect" is almost certainly "was never
+configured".
+
+1. **Confirm HA is even configured to export**:
 
    ```bash
-   docker logs victoriametrics
-   curl http://localhost:8428/health
+   # On the HA VM, /config/configuration.yaml — an influxdb: block must exist.
+   # There is no UI path; the integration is YAML-only.
+   grep -rn -i influx /config/*.yaml
    ```
 
-2. **Test InfluxDB port from Home Assistant machine**:
+2. **Confirm whether the sink has EVER received a row** — this is the check that
+   distinguishes "stopped" from "never started", and it is the only one that
+   would have caught #133:
 
    ```bash
-   # From Home Assistant host
-   telnet YOUR_DOCKER_HOST_IP 8089
+   curl -s -u "$VM_USER:$VM_PASS" \
+     'http://192.168.25.15:8428/api/v1/query?query=vm_rows_inserted_total' | grep influx
+   # type="influx" stuck at 0 => no InfluxDB client has ever written, ever.
    ```
 
-3. **Check Home Assistant logs**:
+3. **Test the write path HA actually uses** (HTTP on 8428, not 8089):
+
+   ```bash
+   # From the HA host
+   curl -u "$VM_USER:$VM_PASS" -X POST \
+     'http://192.168.25.15:8428/write?db=homeassistant' \
+     --data-binary 'probe,src=manual value=1'          # → 204
+   ```
+
+4. **Check Home Assistant logs**:
 
    ```bash
    # In Home Assistant
    cat /config/home-assistant.log | grep influx
    ```
 
-4. **Common issues**:
+5. **Common issues**:
+   - No `influxdb:` block in `configuration.yaml` at all (the #133 case)
+   - Pointed at **8089**, which cannot answer an HTTP client — use 8428
+   - Missing `username`/`password`: 8428 rejects unauthenticated writes with 401
    - Wrong IP address in Home Assistant config
-   - Firewall blocking port 8089
-   - Docker not exposing port correctly
-   - Network isolation between containers
 
 ---
 
@@ -369,4 +461,6 @@ ss -s
 
 ---
 
-**Last Updated**: October 19, 2025
+**Last Updated**: August 20, 2026 — the Home Assistant / :8089 sections were
+corrected against measured evidence from the #133 diagnosis, and 2003/4242 were
+marked not-enabled. No runtime configuration was changed; #133 remains open.
