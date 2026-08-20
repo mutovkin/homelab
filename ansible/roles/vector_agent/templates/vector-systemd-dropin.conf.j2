@@ -1,0 +1,64 @@
+# {{ ansible_managed }} — roles/vector_agent (#134)
+# -> /etc/systemd/system/vector.service.d/10-homelab.conf
+#
+# Four overrides, each fixing a specific trap in the unit the .deb ships. None of
+# them is cosmetic; three of them are the difference between a shipper that heals
+# itself and one that latches `failed` and is never heard from again.
+
+[Unit]
+# TRAP 3. The shipped unit sets `StartLimitInterval=10` / `StartLimitBurst=5` — and
+# it sets them in [Service], the LEGACY spelling. systemd maps those onto the unit's
+# start rate limit, so five failed starts in ten seconds make systemd give up
+# PERMANENTLY. Combined with trap 1 below, one reboot of eq12_docker would have left
+# every hypervisor shipper dead until a human noticed.
+#
+# 0 disables the rate limit outright. A shipper that retries forever every ten
+# seconds is strictly better than one that latches `failed`: the per-host recency
+# alert (obs-host-log-ingest-stalled-per-host) is what makes a genuinely broken
+# config visible, not a systemd state nobody polls.
+#
+# A drop-in [Unit] key overriding a base-unit [Service] key is exactly the kind of
+# thing that silently does not apply, so the role ASSERTS it took:
+#   systemctl show vector -p StartLimitIntervalUSec -p StartLimitBurst
+# NOTE the USec spelling: the unit-file DIRECTIVE is StartLimitIntervalSec, but the
+# property systemctl reports is StartLimitIntervalUSec, and asking for the Sec name
+# prints nothing at all. Measured against modprobe@.service, which ships
+# StartLimitIntervalSec=0 and reports StartLimitIntervalUSec=0.
+StartLimitIntervalSec=0
+
+[Service]
+# TRAP 2. `/etc/default/vector`, which the base unit reads, is a dpkg CONFFILE.
+# Writing it would make every future `apt install ./vector_<ver>.deb` a
+# modified-conffile prompt. Our environment goes in /etc/vector/vector.env instead,
+# which dpkg does not own. Drop-in EnvironmentFile= entries are additive and later
+# entries win, so the base unit's `EnvironmentFile=-/etc/default/vector` staying in
+# place is harmless.
+#
+# No `-` prefix here on purpose: if this file is missing, the unit must fail loudly
+# rather than start Vector with no credentials and no hostname.
+EnvironmentFile=/etc/vector/vector.env
+
+# TRAP 1, and the nastiest one in this batch. The shipped unit runs
+# `ExecStartPre=/usr/bin/vector validate`, and `vector validate` RUNS SINK
+# HEALTHCHECKS BY DEFAULT. The sink here is VictoriaLogs on another host. So if
+# eq12_docker is down, rebooting, or merely slower than this host to come back, the
+# ExecStartPre fails, the unit fails, the start limit above is consumed, and the
+# shipper is dead for good — precisely when logs matter most.
+#
+# The empty assignment CLEARS the inherited list; without it ours would be appended
+# to the original, which would still run the healthcheck.
+#
+# Config errors are still caught: --skip-healthchecks drops only sink REACHABILITY
+# from the start preconditions. The sink's own runtime healthcheck stays enabled —
+# it logs, it does not block.
+ExecStartPre=
+ExecStartPre=/usr/bin/vector validate --skip-healthchecks --config /etc/vector/vector.yaml
+
+# The base unit's ExecStart is a bare `/usr/bin/vector` with no --config. That
+# happens to resolve to the same file, but the two Exec lines must not be able to
+# disagree about which config was validated and which one is running.
+ExecStart=
+ExecStart=/usr/bin/vector --config /etc/vector/vector.yaml
+
+Restart=always
+RestartSec=10s

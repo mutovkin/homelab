@@ -1,0 +1,41 @@
+---
+# Native Vector log shipper for hosts that have no observability compose stack (#134).
+#
+# VERSION + CHECKSUM ARE PINNED IN EXACTLY ONE PLACE and bumped deliberately. This
+# is the `get_url` + `checksum:` + NO stat-exists gate rule from CLAUDE.md: the
+# module hashes whatever is already on disk, skips the fetch when it matches, and
+# re-downloads on mismatch. A `when: not <stat>.stat.exists` guard on the download
+# would defeat exactly that — a truncated or tampered .deb already in the cache
+# would be trusted forever.
+#
+# The sha256 below is the one published in the release's own
+# vector-0.57.0-SHA256SUMS, re-verified against the downloaded file. Bumping means
+# changing BOTH lines; see roles/vector_agent/README.md for the procedure and for
+# why watchtower does not cover this package.
+#
+# 0.57.0 is also what the eq12_docker CONTAINER runs today
+# (timberio/vector:latest-distroless-static, measured 2026-08-19). That equality is
+# a coincidence of timing, not a mechanism — the container floats and this pin does
+# not, so they WILL drift. Tracked as its own follow-up issue.
+vector_agent_version: "0.57.0"
+vector_agent_deb_sha256: "ee24ecf72292ce965b2fefc5439efa9281c75a982c4a90a2295e30561311e88e"
+vector_agent_deb_url: "https://github.com/vectordotdev/vector/releases/download/v{{ vector_agent_version }}/vector_{{ vector_agent_version }}-1_amd64.deb"
+
+# Where the pinned .deb is cached on the target. Kept out of /tmp on purpose: the
+# checksum-verified artefact is what makes a re-run cheap, and /tmp is cleaned.
+vector_agent_deb_cache_dir: /var/cache/vector
+vector_agent_deb_filename: "vector_{{ vector_agent_version }}-1_amd64.deb"
+vector_agent_deb_path: "{{ vector_agent_deb_cache_dir }}/{{ vector_agent_deb_filename }}"
+
+# Collect local Docker container logs as well as host logs. TRUE only where Docker
+# actually runs — n5pro_docker (CT 201), set in its host_vars. It is false here
+# because a `docker_logs` source on a host with no /var/run/docker.sock makes Vector
+# log a connection error on a loop forever while still shipping host records: a
+# permanently noisy, permanently green shipper.
+vector_agent_docker_logs: false
+
+# How long to let a restarted Vector run before asserting it is still alive. Same
+# reasoning and same value as observability_settle_seconds: Vector exits about a
+# second after a malformed config, so an immediate check lands inside the crash
+# window as often as not.
+vector_agent_settle_seconds: 15

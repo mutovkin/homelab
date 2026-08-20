@@ -1,0 +1,298 @@
+# {{ ansible_managed }}
+# Vector configuration for the NATIVE (systemd) log shipper — {{ inventory_hostname }} (#134)
+#
+# THIS FILE IS A DELIBERATE NEAR-DUPLICATE of
+# ansible/roles/services/observability/files/data/vector/vector.yaml, which is the
+# same pipeline for the CONTAINER on eq12_docker. The record schema both produce is
+# documented in ONE place — roles/services/observability/README.md, section
+# "Log record schema". CHANGE ONE, CHANGE BOTH, and change the README with them.
+#
+# Only three things differ from the container's copy, and they are the only three
+# that may differ:
+#   1. the sink endpoint is the LAN address of VictoriaLogs, not a compose service
+#      name (there is no docker network here);
+#   2. the docker_logs source and its parse_docker transform exist only where
+#      vector_agent_docker_logs is true;
+#   3. this file is templated, so `{{ '{{' }} ... {{ '}}' }}` sink templates have to
+#      be escaped from Jinja.
+# Everything else — every VRL line, every comment explaining WHY a coercion is
+# defaulted rather than fallible — was copied across verbatim rather than
+# "improved", because a difference between the two files is a difference in the
+# stored record schema and nothing would report it.
+#
+# Unifying the two into one templated source is a follow-up issue, not this change.
+
+# Data directory for buffers. Created by the .deb's preinst as vector:vector.
+data_dir: "/var/lib/vector"
+
+# Sources - Where logs come from
+sources:
+{% if vector_agent_docker_logs %}
+  # Docker container logs. Present only on hosts where Docker runs; the `vector`
+  # user is added to the `docker` group by this role so it can read the socket.
+  docker_logs:
+    type: docker_logs
+    docker_host: "unix:///var/run/docker.sock"
+    # No include/exclude filters - collect all containers by default
+    # This ensures you don't miss logs when adding new services
+
+{% endif %}
+  # Host system logs, RFC5424 side-stream.
+  #
+  # NOT /var/log/syslog + /var/log/auth.log: Debian writes those in
+  # RSYSLOG_FileFormat, which carries no PRI header, so facility and severity are
+  # unrecoverable from them and every host record had to be hardcoded
+  # `level: info` (#143). /var/log/structured.log is the SAME messages re-emitted
+  # in RFC5424 by /etc/rsyslog.d/40-vector-structured.conf (deployed by
+  # roles/rsyslog_structured, which this role includes before templating this
+  # file), whose <PRI> header carries facility*8+severity.
+  #
+  # syslog and auth.log must stay OUT of this list: the drop-in's `*.*` selector
+  # is Debian's `*.*;auth,authpriv.none` (syslog) plus auth,authpriv (auth.log),
+  # so tailing them as well would ingest every host event twice.
+  #
+  # /var/log/kern.log is deliberately absent HERE TOO, and for a different reason
+  # than on eq12_docker. That host cannot have one (unprivileged LXC, no kernel
+  # ring buffer). This host DOES have one — but the `*.*` selector above already
+  # carries the `kern` facility into structured.log, so adding kern.log as a second
+  # source would double-ingest every kernel line. Kernel and OOM-kill events reach
+  # VictoriaLogs from this host precisely because of that selector, not because of
+  # a kern.log source. Do not "fix" this by adding one.
+  host_syslog:
+    type: file
+    include:
+      - /var/log/structured.log
+    # read_from: beginning, and NO ignore_older_secs (#143 item 4). The old
+    # `end` + `ignore_older_secs: 600` pair made any Vector outage longer than ten
+    # minutes a permanent hole even though the file on disk was intact the whole
+    # time — exactly what the wedged-buffer runbook recovers from
+    # (docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md).
+    # Cost, accepted: after a buffer reset (which wipes checkpoints) this file is
+    # re-read from its start, so up to one logrotate period of duplicates. Bounded
+    # by /etc/logrotate.d/vector-structured (weekly, rotate 4).
+    read_from: beginning
+
+  # Package-change audit trail (#143 item 7). Not syslog-shaped and not written
+  # through rsyslog, so these files reach VictoriaLogs only by being tailed
+  # directly. This is the half of #134 that #99 was actually about: with
+  # `Unattended-Upgrade::SyslogEnable "true"` the RUN RESULT goes through rsyslog
+  # (and therefore through structured.log, with a real severity), while the verbose
+  # detail stays in these files. Both paths are wanted.
+  #
+  # /var/log/unattended-upgrades is `drwxr-x--- root adm` with 0644 files, and the
+  # .deb's postinst puts the `vector` user in `adm`, so these are readable without
+  # this role widening anything.
+  host_pkg_logs:
+    type: file
+    include:
+      - /var/log/dpkg.log
+      - /var/log/apt/history.log
+      - /var/log/unattended-upgrades/unattended-upgrades.log
+      - /var/log/unattended-upgrades/unattended-upgrades-dpkg.log
+    read_from: beginning
+
+# Transforms - Process and enrich logs
+transforms:
+{% if vector_agent_docker_logs %}
+  # Parse Docker logs and add metadata
+  parse_docker:
+    type: remap
+    inputs:
+      - docker_logs
+    source: |
+      # Add standard fields for filtering/grouping
+      .source = "docker"
+
+      # NOT get_hostname!(): on the container this returned the CONTAINER ID, which
+      # is not a host and changed on every recreate — churning _stream_id in
+      # VictoriaLogs and making per-host alerting impossible (#143). A native agent
+      # would return the OS hostname instead (n5pro-docker, pve), which is a SECOND
+      # hand-maintained mapping away from the name the inventory and the alert rules
+      # use. VECTOR_HOSTNAME is Ansible's inventory_hostname, templated into
+      # /etc/vector/vector.env and read by systemd's EnvironmentFile. `host` is set
+      # to the same value because VictoriaLogs stores BOTH keys and both were wrong
+      # before.
+      .hostname = "${VECTOR_HOSTNAME}"
+      .host = "${VECTOR_HOSTNAME}"
+
+      # Defaulted, not `string!()`. A fallible-abort coercion aborts the whole VRL
+      # program, and an aborted remap DROPS the event: drop_on_abort defaults true,
+      # reroute_dropped defaults false, so there is no dead-letter and no exported
+      # counter — the event simply never existed. Unreachable today (docker_logs
+      # always sets container_name), but "unreachable by construction" is exactly
+      # the claim that ages badly, and a visible "unknown" beats a vanished event.
+      .container_name = to_string(.container_name) ?? "unknown"
+
+      # Docker gives us no severity; the container's own line may contain one but
+      # parsing arbitrary application formats is out of scope here.
+      .level = "info"
+
+{% endif %}
+  # Parse host system logs (RFC5424 from /var/log/structured.log)
+  parse_host:
+    type: remap
+    inputs:
+      - host_syslog
+    source: |
+      .source = "host"
+      .hostname = "${VECTOR_HOSTNAME}"
+      .host = "${VECTOR_HOSTNAME}"
+
+      # `?? {}` rather than a fallible assignment: parse_syslog's error branch
+      # returns null, and indexing null is a VRL compile error. An empty object is
+      # the "did not parse" sentinel checked immediately below.
+      parsed = parse_syslog(to_string(.message) ?? "") ?? {}
+      if length(parsed) > 0 {
+        # The whole point of the RFC5424 side-stream: a real severity per record,
+        # one of emerg/alert/crit/err/warning/notice/info/debug. Kept as a plain
+        # field, NOT a Loki label — VictoriaLogs makes JSON body fields queryable
+        # (`level:err` works), so labelling it would multiply _stream cardinality
+        # by eight for nothing.
+        .level = parsed.severity
+        .facility = parsed.facility
+        .appname = parsed.appname
+        .procid = parsed.procid
+        # This host's own OS hostname, preserved because `hostname` now carries the
+        # Ansible inventory name instead. On eq12 these two genuinely differ: the
+        # OS/Proxmox node name is `pve` and the inventory name is `eq12`.
+        .syslog_hostname = parsed.hostname
+        # A real timestamp VALUE, and deliberately not format_timestamp!().
+        # format_timestamp! returns a String; the loki sink matches the timestamp
+        # field only on the timestamp type and silently falls back to Utc::now()
+        # on anything else (and strips the key from the body — remove_timestamp
+        # defaults true). So the string form is a no-op that CANNOT be detected
+        # from process state: vector starts, ships, and every _time is ingest
+        # time. Do not "simplify" this back to a formatted string.
+        .timestamp = parsed.timestamp
+        # Drop the RFC5424 header from the body — its parts are now fields.
+        .message = parsed.message
+      } else {
+        # "unknown", NOT "info". Fabricating a severity is the exact defect #143
+        # exists to remove, and an unparseable line is MORE likely to be a
+        # malformed emergency than a routine one — defaulting it to info would hide
+        # precisely the record worth seeing. `parse_failed:*` is queryable.
+        .level = "unknown"
+        .parse_failed = "syslog"
+      }
+
+  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own
+  # line formats with no severity and no syslog header, so these keep the file
+  # source's ingestion time as their timestamp (the in-line timestamps are not
+  # syslog-shaped). Noted in the observability README as a known limitation, and it
+  # applies identically here.
+  parse_pkg:
+    type: remap
+    inputs:
+      - host_pkg_logs
+    source: |
+      .source = "pkg"
+      .hostname = "${VECTOR_HOSTNAME}"
+      .host = "${VECTOR_HOSTNAME}"
+      .level = "info"
+
+  # Normalise the timestamp and build the Loki label set
+  finalize:
+    type: remap
+    inputs:
+{% if vector_agent_docker_logs %}
+      - parse_docker
+{% endif %}
+      - parse_host
+      - parse_pkg
+    source: |
+      # Stamp now() ONLY when nothing upstream supplied a timestamp. Overwriting
+      # EVERY event with now() unconditionally is what made host records carry
+      # ingest time instead of the time in the line (#143); precision is the tell
+      # (nanoseconds = now(), exactly six digits = rsyslog's microseconds).
+      #
+      # It does NOT rescue the package-audit files: parse_pkg sets no timestamp, so
+      # those records land in a millisecond-wide window at first-tail time while
+      # their _msg values carry dates going back days. Their in-line timestamps are
+      # not syslog-shaped; parsing them is tracked separately.
+      #
+      # .timestamp_source records the provenance so it is QUERYABLE: a host record
+      # reading "ingest" fell through the syslog parse, which is otherwise visible
+      # only in stderr.
+      ts = .timestamp
+      if !is_timestamp(ts) {
+        .timestamp = now()
+        .timestamp_source = "ingest"
+      } else {
+        .timestamp_source = "event"
+      }
+
+      # Map message field to _msg for VictoriaLogs
+      # VictoriaLogs requires _msg field: https://docs.victoriametrics.com/victorialogs/keyconcepts/#message-field
+      if exists(.message) {
+        ._msg = del(.message)
+      }
+
+      # Loki labels, built per-event, consumed by the sink's `"*"` expansion.
+      # Host and pkg events genuinely have no container_name, and templating a
+      # label that cannot render made Vector log a warning for EVERY such event —
+      # 88% of its own stderr in 30 minutes (#143 item 3). A conditional object has
+      # nothing to fail to render.
+      # Do NOT invent a synthetic container_name for host events: that puts a fake
+      # value in a real field.
+      # Every coercion defaulted, none fallible-abort. `.source` especially: an
+      # abort in an upstream remap leaves the event unmodified, so `.source` would
+      # be absent here, `to_string!()` would abort a SECOND time and the event is
+      # dropped silently — or, surviving, the sink's "*" expansion would find no
+      # loki_labels and write an entry with an EMPTY label set. A defaulted
+      # "unknown" surfaces the anomaly as a queryable label instead of vanishing
+      # the record.
+      labels = {
+        "source": to_string(.source) ?? "unknown",
+        "hostname": to_string(.hostname) ?? "unknown"
+      }
+      if exists(.container_name) {
+        labels = set(labels, ["container_name"], to_string(.container_name) ?? "unknown") ?? labels
+      }
+      .loki_labels = labels
+
+# Sinks - Where logs go
+sinks:
+  # Send to VictoriaLogs on eq12_docker, over the LAN.
+  #
+  # Cleartext HTTP with basic auth, same as every other internal hop in this
+  # homelab. It is stated in roles/services/observability/README.md rather than
+  # quietly shipped; TLS on the ingest path is a follow-up issue.
+  victorialogs:
+    type: loki
+    inputs:
+      - finalize
+    endpoint: {{ victorialogs_ingest_endpoint }}
+    auth:
+      strategy: basic
+      user: "${VL_AUTH_USERNAME}"
+      password: "${VL_AUTH_PASSWORD}"
+    encoding:
+      codec: json
+    # Vector 0.57 requires templated fields to carry a literal prefix ("template
+    # confinement"), so that event data cannot resolve outside an intended
+    # namespace — on sinks that template a path or key, that means arbitrary
+    # writes. Here the templated field is a Loki label OBJECT, not a path, and its
+    # contents are built by the `finalize` remap above from a literal, the Docker
+    # daemon's container_name and an Ansible-supplied env var — none
+    # attacker-controlled. This flag also covers the `"*"` dynamic-label expansion
+    # below, whose key names come from the same object. Opting out keeps the
+    # existing label values intact; adding a prefix would rewrite every stored
+    # label and break existing Grafana queries. Scoped to this sink only.
+    dangerously_allow_unconfined_template_resolution: true
+    labels:
+      # Dynamic label expansion: every key of the `loki_labels` object becomes a
+      # Loki label. The Jinja escapes are only so this templated file emits the
+      # literal Vector template `{{ '{{ loki_labels }}' }}`.
+      "*": "{{ '{{ loki_labels }}' }}"
+    # Strips the field the label template referenced (`loki_labels`) from the JSON
+    # body, so the object is not also stored as duplicate keys on every record.
+    remove_label_fields: true
+    compression: gzip
+    out_of_order_action: accept
+    batch:
+      max_bytes: 1048576      # 1MB batches (good balance)
+      timeout_secs: 5         # Flush every 5 seconds
+    buffer:
+      type: disk
+      max_size: 268435488     # 256MB disk buffer
+      when_full: block
