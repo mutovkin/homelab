@@ -86,7 +86,39 @@ and publishes neither port. Nothing is listening.
 
 | Port     | Protocol | Purpose                             | Used By                                   |
 | -------- | -------- | ----------------------------------- | ----------------------------------------- |
-| **9428** | HTTP     | **HTTP API and Web UI** (`/select/vmui`) | Grafana queries, Vector writes, Manual queries |
+| **9428** | HTTP     | **HTTP API and Web UI** (`/select/vmui`) | Grafana queries, Vector writes (local **and 3 remote**), NPM, manual queries |
+
+#### Port 9428 has REMOTE writers since #134
+
+Until #134 the only writer was the `vector` container on this host, reaching
+VictoriaLogs over the compose network — nothing crossed the LAN to write. Three
+native Vector agents now do:
+
+| Writer | Source address | Path |
+| ------ | -------------- | ---- |
+| `vector` container (eq12_docker) | compose network `172.20.0.0/24` | `http://victorialogs:9428/insert` |
+| `vector` agent on **eq12** | 192.168.25.5 | `http://192.168.25.15:9428/insert` |
+| `vector` agent on **n5pro** | 192.168.30.5 | `http://192.168.25.15:9428/insert` |
+| `vector` agent on **n5pro_docker** | 192.168.30.15 | `http://192.168.25.15:9428/insert` |
+
+The endpoints are built in `ansible/inventory/group_vars/all/vars.yml` from
+eq12_docker's inventory address, so a re-IP of this CT moves them automatically.
+
+Two properties of that, both deliberate and both stated rather than shipped
+quietly:
+
+- **:9428 was not narrowed and no port was opened.** It is already reachable from
+  the flat `192.168.0.0/18` LAN — Grafana is here, but NPM and operator
+  workstations query it too, and `roles/services/observability`'s
+  `nft_scoped_fw` table governs **:8089 only**. #134 adds writers to an existing
+  exposure; it does not widen it. Narrowing it needs its own establishment of who
+  legitimately reaches it and its own from-a-blocked-source verification —
+  tracked as a follow-up issue, not smuggled into a logging change.
+- **The ingest path is cleartext HTTP with basic auth**, like every other internal
+  hop in this homelab. VictoriaLogs' `--httpAuth` is one credential pair for the
+  whole instance, so each shipping host necessarily holds read+write credentials
+  (which is why they live in `group_vars/all/vault.yml`). TLS on the ingest path
+  is a follow-up issue.
 
 #### Port 9428 - Main HTTP API
 

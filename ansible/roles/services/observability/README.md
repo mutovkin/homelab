@@ -133,18 +133,65 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-Four provisioned rules, all in the **Observability** folder, all delivered by
-email.
+Six provisioned rules, all in the **Observability** folder, all delivered by
+email. (This table listed four and omitted `obs-host-log-ingest-stalled`, which has
+existed since #143; #134 added the sixth and corrected the count.)
 
 | uid | rule | fires when | noData |
 | --- | ---- | ---------- | ------ |
 | `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
+| `obs-host-log-ingest-stalled` | Host log ingest stalled (fleet-wide) | `_time:10m source:host \| count()` < 1, `for: 10m` | **Alerting** |
+| `obs-host-log-ingest-stalled-per-host` | A host stopped shipping logs | `_time:24h source:host \| stats by (hostname) count() if (_time:15m)` < 1, `for: 10m` | OK |
 | `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
 | `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
 | `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
 
-`execErrState: Alerting` on all four — a datasource that cannot be reached is not
+`execErrState: Alerting` on all six — a datasource that cannot be reached is not
 evidence of health.
+
+### The two-rule split for log ingest, and why the per-host query looks odd (#134)
+
+`obs-host-log-ingest-stalled` counts host records **across the whole fleet**.
+eq12_docker alone contributes on the order of a thousand records per fifteen
+minutes, so a hypervisor's shipper can die completely and that rule stays Normal
+forever. That is why `obs-host-log-ingest-stalled-per-host` exists: the fleet-wide
+rule owns **total** absence, the per-host rule owns **partial** absence.
+
+Hence the `noData` column: the per-host rule is `noDataState: OK`, because absence
+is owned by exactly one rule and one dead VictoriaLogs must not fire both.
+
+**The naive per-host query cannot work**, and this is the same defect review caught
+in #139's `[1h]` lookbehind. Written the obvious way —
+`_time:15m source:host | stats by (hostname) count()` — a host that stopped
+shipping produces **no row at all**, so its alert instance vanishes, Grafana marks
+it stale and *resolves* the alert. It would fire for one evaluation and then
+declare the dead host healthy.
+
+The working form keeps a 24 h outer window and counts recency inside it:
+
+```
+_time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
+```
+
+A dead shipper is still in the 24 h window, so it returns a row with `recent = 0` —
+which a `< 1` threshold can fire on. Verified live before the rule was written:
+
+```
+{"hostname":"d7d7d4e8c59e","recent":"0","total":"10526"}   <- a shipper that stopped
+{"hostname":"eq12_docker","recent":"94","total":"5545"}    <- a shipper that is alive
+```
+
+The `victoriametrics-logs-datasource` plugin returns this as a **multi-series**
+frame — one frame per hostname, carrying `hostname` as a field label — so Grafana
+produces one alert instance per host and the notification names which one.
+Confirmed empirically through `POST /api/ds/query`, not read off a doc page.
+
+**Adding a host to the fleet needs no rule edit.** There is deliberately no
+`hostname:` matcher, the same property #139 established for the probe rules. The
+price is the mirror of `obs-http-probe-absent`'s: a **retired** hostname keeps
+returning `recent = 0` and keeps alerting for up to 24 h. Accepted for the same
+reason — a shipper dead longer than a day has already paged and been ignored, and
+`7d` would be alert fatigue after an intentional decommission.
 
 **Absence is owned by exactly one RULE — which is not the same as one email.**
 `obs-http-probe-absent` owns it: its query returns a row for every probe seen in the
@@ -304,11 +351,22 @@ duplicated.
 
 ### Known limitations (four, all deliberate)
 
-1. **No kernel or OOM-kill events.** There is no kernel ring buffer in an LXC, so
-   `imklog` produces nothing and `/var/log/kern.log` can never exist on this host —
-   the glob that used to list it was implying coverage that does not exist. Kernel
-   events are visible only on the PVE host; closing that is #134 (Vector on
-   `eq12`/`n5pro`), not a `vector.yaml` change.
+1. **No kernel or OOM-kill events — on eq12_docker. PARTIALLY CLOSED fleet-wide by
+   #134.** This entry used to say "there is no kernel ring buffer in an LXC", and
+   that generalisation is wrong; the corrected, measured claim (2026-08-19) is:
+
+   | Host | `/var/log/kern.log` | Kernel events reach VictoriaLogs |
+   | ---- | ------------------- | -------------------------------- |
+   | `eq12_docker` (CT 101, **unprivileged**) | does not exist | **no** — `imklog` produces nothing here |
+   | `n5pro_docker` (CT 201, **privileged**) | exists, carries live `veth*`/`docker0` lines | yes, since #134 |
+   | `eq12`, `n5pro` (hypervisors) | exist | yes, since #134 |
+
+   So it is privilege, not LXC-ness, that decides it. On the three hosts that do
+   get kernel messages, they arrive **through the `*.*` selector in the structured
+   drop-in**, which carries the `kern` facility — *not* through a `kern.log`
+   source. `roles/vector_agent`'s config deliberately does not tail `kern.log`
+   either: that would double-ingest every kernel line the selector already carries.
+   The gap that remains is eq12_docker's, and it is structural.
 2. **Boot-window blind spot — NOT closed.** #143 asked for a `journald` source to
    fix two things at once: the lost structured metadata, and units that log before
    `rsyslog.service` starts. Only the first half is solved (RFC5424 gives us
@@ -352,16 +410,41 @@ duplicated.
    `_msg` values carry dates back to 2026-08-16. Host records are the opposite — their
    `_time` is the line's own timestamp, to the microsecond.
 
-## Coverage gap
+## Fleet coverage (#134)
 
-The log collector (`vector`) runs on **eq12_docker only**. `pve`, `n5pro` and
-`n5pro_docker` ship no logs to VictoriaLogs at all — their syslog and container
-output are invisible in Grafana. This is a known fleet gap with its own issue; it is
-not a misconfiguration of this role.
+This section used to say the collector ran on eq12_docker only and that the other
+three hosts shipped nothing. **That gap is closed.** All four hosts now ship to
+this VictoriaLogs, with the same record schema:
 
-On eq12_docker, `vector.yaml` tails `/var/log/structured.log` with **no filtering**
+| `hostname` label | Host | Shipper | Deployed by |
+| ---------------- | ---- | ------- | ----------- |
+| `eq12_docker` | CT 101, 192.168.25.15 | the `vector` **container**, in this compose stack | this role |
+| `eq12` | Proxmox hypervisor, 192.168.25.5 | native systemd `vector.service` | [`roles/vector_agent`](../../vector_agent/README.md) |
+| `n5pro` | Proxmox hypervisor, 192.168.30.5 | native systemd `vector.service` | `roles/vector_agent` |
+| `n5pro_docker` | CT 201, 192.168.30.15 | native systemd `vector.service` (+ its docker logs) | `roles/vector_agent` |
+
+**`pve` is not a hostname label.** #134's issue text calls that host "pve", which is
+its Proxmox node name and its OS hostname; the *inventory* name is `eq12`, and
+`VECTOR_HOSTNAME` is `inventory_hostname`. `pve` appears in records only as the
+`syslog_hostname` field. A query or alert written against `hostname:pve` matches
+nothing, forever, silently.
+
+On every host, `vector.yaml` tails `/var/log/structured.log` with **no filtering**
 (so every syslog-writing daemon reaches VictoriaLogs automatically) plus the four
-package-audit files listed above.
+package-audit files listed above. The three agents deploy that stream from the same
+shared [`roles/rsyslog_structured`](../../rsyslog_structured/README.md) this role
+uses.
+
+The agents' config is a near-duplicate of `files/data/vector/vector.yaml`, living at
+`roles/vector_agent/templates/vector.yaml.j2`. **Change one, change both**, and keep
+the schema table above in step with them. Unifying the two is a follow-up issue.
+
+`:9428` gained three remote writers and no new exposure — see
+[PORT_REFERENCE.md](PORT_REFERENCE.md#port-9428-has-remote-writers-since-134) for
+the writer table, why the port was not narrowed, and the cleartext-basic-auth
+posture. The `vault_vl_auth_*` credentials moved from `host_vars/eq12_docker` to
+`group_vars/all/vault.yml` so the three agents can see them (moved, not copied — a
+second copy of a secret rots independently).
 
 ## Home Assistant integration
 
