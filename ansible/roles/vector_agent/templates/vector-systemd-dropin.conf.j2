@@ -6,6 +6,25 @@
 # itself and one that latches `failed` and is never heard from again.
 
 [Unit]
+# ORDERING. Both of these only close a startup-error WINDOW — Vector recovers from
+# either race on its own (the file source rediscovers by glob; the docker source
+# retries the socket), so neither is load-bearing for correctness. They are here to
+# stop a boot producing a burst of errors that look like a real fault, and because
+# the cost is one line each.
+#
+# After= in a drop-in APPENDS to the fragment's list rather than replacing it, so
+# the base unit's After=network-online.target is untouched.
+After=rsyslog.service
+{% if vector_agent_docker_logs | bool %}
+# Only where the docker_logs source exists. Wants=, not Requires=: if Docker is
+# genuinely down, this host's HOST logs must still ship — a shipper that refuses to
+# start because one of its two sources is unavailable is strictly worse than one
+# that ships half the data and says so. The role's own docker_logs assertions are
+# what turn "half the data" into a failed deploy rather than a silent gap.
+After=docker.service
+Wants=docker.service
+{% endif %}
+
 # TRAP 3. The shipped unit sets `StartLimitInterval=10` / `StartLimitBurst=5` — and
 # it sets them in [Service], the LEGACY spelling. systemd maps those onto the unit's
 # start rate limit, so five failed starts in ten seconds make systemd give up
@@ -18,7 +37,11 @@
 # config visible, not a systemd state nobody polls.
 #
 # A drop-in [Unit] key overriding a base-unit [Service] key is exactly the kind of
-# thing that silently does not apply, so the role ASSERTS it took:
+# thing that silently does not apply, so the role reads the EFFECTIVE MERGED unit
+# back and asserts on it. Note what that can and cannot prove: it proves this value
+# is in force and that this file is loaded (DropInPaths), but Ansible parses
+# `systemctl show` into a dict, so it cannot prove the ExecStartPre= empty reset
+# removed the base entry — see the comment on that assert in tasks/main.yml.
 #   systemctl show vector -p StartLimitIntervalUSec -p StartLimitBurst
 # NOTE the USec spelling: the unit-file DIRECTIVE is StartLimitIntervalSec, but the
 # property systemctl reports is StartLimitIntervalUSec, and asking for the Sec name

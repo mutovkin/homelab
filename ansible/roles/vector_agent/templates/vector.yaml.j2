@@ -27,7 +27,7 @@ data_dir: "/var/lib/vector"
 
 # Sources - Where logs come from
 sources:
-{% if vector_agent_docker_logs %}
+{% if vector_agent_docker_logs | bool %}
   # Docker container logs. Present only on hosts where Docker runs; the `vector`
   # user is added to the `docker` group by this role so it can read the socket.
   docker_logs:
@@ -93,7 +93,7 @@ sources:
 
 # Transforms - Process and enrich logs
 transforms:
-{% if vector_agent_docker_logs %}
+{% if vector_agent_docker_logs | bool %}
   # Parse Docker logs and add metadata
   parse_docker:
     type: remap
@@ -194,7 +194,7 @@ transforms:
   finalize:
     type: remap
     inputs:
-{% if vector_agent_docker_logs %}
+{% if vector_agent_docker_logs | bool %}
       - parse_docker
 {% endif %}
       - parse_host

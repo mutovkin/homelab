@@ -165,6 +165,28 @@
   register: vector_agent_deb
   when: not vector_agent_preview_only
 
+# Every version bump otherwise leaves another ~36 MB artefact in the cache
+# forever. Deleting the superseded ones is the role's job, not a line in a bump
+# procedure someone has to remember — but ONLY the superseded ones: the current
+# file is what makes a re-run cheap and what `apt` installs from, and removing it
+# would force a re-download on every single run.
+- name: Find superseded Vector packages in the cache
+  ansible.builtin.find:
+    paths: "{{ vector_agent_deb_cache_dir }}"
+    patterns: "vector_*_amd64.deb"
+    excludes: "{{ vector_agent_deb_filename }}"
+  register: vector_agent_stale_debs
+  when: not vector_agent_preview_only
+
+- name: Remove superseded Vector packages from the cache
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ vector_agent_stale_debs.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not vector_agent_preview_only
+
 - name: Report what a real run would do here (check mode, Vector not installed yet)
   ansible.builtin.debug:
     msg: >-
@@ -276,7 +298,7 @@
   changed_when: false
   failed_when: false
   check_mode: false
-  when: vector_agent_docker_logs
+  when: vector_agent_docker_logs | bool
 
 # Fail by NAME rather than letting the `user` module create the group implicitly —
 # a `docker` group this role invented would have the wrong gid and would not grant
@@ -292,7 +314,7 @@
       Docker is not installed here or the host does not belong in the
       vector_agents group with docker collection enabled.
     quiet: true
-  when: vector_agent_docker_logs
+  when: vector_agent_docker_logs | bool
 
 - name: Add the vector user to the docker group
   ansible.builtin.user:
@@ -301,7 +323,7 @@
     append: true
   register: vector_agent_docker_group
   when:
-    - vector_agent_docker_logs
+    - vector_agent_docker_logs | bool
     - not vector_agent_preview_only
 
 # --- systemd -----------------------------------------------------------------
@@ -353,22 +375,71 @@
   failed_when: false
   when: not ansible_check_mode
 
-# Pre-flight, BEFORE a working shipper is restarted onto the new file. Sourced
-# through the env file so interpolation is ON exactly as it is under systemd — a
-# renamed or missing env var is caught here rather than by a unit that fails to
-# come back. --skip-healthchecks for the same reason the drop-in uses it: sink
-# reachability is not a config error.
+# Pre-flight, BEFORE a working shipper is restarted onto the new file: a renamed
+# or missing env var, or a broken config, is caught here rather than by a unit
+# that fails to come back. --skip-healthchecks for the same reason the drop-in
+# uses it — sink reachability is not a config error.
 #
-# The credential is never on the command line; it is read from the 0600 file.
+# RUN THROUGH systemd-run, NOT THROUGH A SHELL. This task used to be
+# `set -a; . /etc/vector/vector.env; vector validate …` under bash as root, and
+# that was wrong twice over. Both were measured on n5pro_docker, not argued:
+#
+#  1. WRONG USER. The play is `become: true` and ansible.cfg sets
+#     become_user=root, so the validate ran as root while the unit runs as
+#     User=vector. --skip-healthchecks disables only the HEALTH checks; the
+#     COMPONENT checks still build the topology, which builds the sink, which
+#     opens its `buffer: {type: disk}` under data_dir=/var/lib/vector. A root
+#     validate can therefore create the buffer ledger root-owned in a directory
+#     the .deb's preinst made vector:vector — and the very next task starts the
+#     unit as vector, whose own ExecStartPre opens that ledger read-write and
+#     gets EACCES. On a converged host the same thing drops root-owned files into
+#     a healthy buffer, which is the wedged-buffer runbook's failure. Beyond the
+#     specific mechanism: a pre-flight that runs as a different user than the unit
+#     is not validating what will run.
+#
+#  2. WRONG PARSER, and this one is a root code-execution path. /etc/vector/vector.env
+#     is written for SYSTEMD's grammar, in which a double-quoted value is literal.
+#     Bash's `.` is a different grammar: it expands $VAR, $( ) and backticks inside
+#     double quotes. Measured, same file, same host:
+#         file:    PROBE_A="lit-dollar-$HOME-and-backtick-`id`"
+#         systemd: lit-dollar-$HOME-and-backtick-`id`        <- literal
+#         bash:    lit-dollar-/root-and-backtick-uid=0(root) gid=0(root) …
+#     The backtick EXECUTED, as root. Today's credential is 64 alphanumerics so
+#     nothing happened; that is luck, not correctness. The next rotation to a
+#     value containing a backtick would run it, and a value containing $X would
+#     make this pre-flight validate a DIFFERENT credential than the one Vector
+#     receives — the exact silent divergence this role exists to eliminate.
+#
+# systemd-run kills both: same User/Group as the unit, and the env file parsed by
+# systemd's own parser with no shell anywhere in the path. It is also a faithful
+# rehearsal of ExecStartPre rather than an approximation of it.
+#
+# --pipe --wait --collect --quiet verified on all three hosts (systemd 255 on
+# n5pro_docker, 257 on both hypervisors): stdout, stderr AND the exit code all
+# propagate (probe returned RC=7 with both streams intact), and --collect garbage
+# collects the transient unit. If a future host ever lacks systemd-run, the
+# fallback is `runuser -u vector -- /usr/bin/vector validate …` with the
+# environment exported by root first — it invokes no shell, so /sbin/nologin is
+# not in the way — but that fixes only (1), and (2) would then need the assert
+# above hardened to reject `$` and backticks as well.
+#
+# The credential is never on the command line; systemd reads it from the 0600 file.
 - name: Validate the deployed Vector configuration before restarting
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail
-      set -a
-      . /etc/vector/vector.env
-      set +a
-      exec /usr/bin/vector validate --skip-healthchecks --config /etc/vector/vector.yaml
-    executable: /bin/bash
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-run
+      - --pipe
+      - --wait
+      - --collect
+      - --quiet
+      - --property=User=vector
+      - --property=Group=vector
+      - --property=EnvironmentFile=/etc/vector/vector.env
+      - /usr/bin/vector
+      - validate
+      - --skip-healthchecks
+      - --config
+      - /etc/vector/vector.yaml
   changed_when: false
   when: not ansible_check_mode
 
@@ -429,6 +500,19 @@
     quiet: true
   when: not ansible_check_mode
 
+# SCOPE OF THIS ASSERT, stated honestly because the drop-in comment used to claim
+# more than it delivers. Ansible's systemd_service parses `systemctl show` into a
+# DICT, so when a property appears on several lines only the LAST survives — and
+# with our drop-in the last ExecStartPre is ours either way. This assert therefore
+# proves OUR entry is present and last; it CANNOT prove the `ExecStartPre=` empty
+# reset removed the base unit's healthcheck-running entry. What covers that is
+# systemd's own documented reset semantics (an empty assignment clears the
+# inherited list, and drop-ins parse after the fragment) plus the DropInPaths
+# check below, which proves the file is loaded at all. If the reset ever silently
+# stopped working, the symptom would be the unit failing to start whenever
+# VictoriaLogs is unreachable — loud, and exactly what the drop-in exists to
+# prevent.
+#
 # PROPERTY NAMES ARE MEASURED, NOT GUESSED, and one of them is a trap:
 # the unit-file DIRECTIVE is `StartLimitIntervalSec` but the property `systemctl
 # show` reports is `StartLimitIntervalUSec`. `systemctl show -p
@@ -448,6 +532,7 @@
 - name: Assert the homelab systemd drop-in is in force
   ansible.builtin.assert:
     that:
+      - "'10-homelab.conf' in vector_agent_unit.status.DropInPaths"
       - vector_agent_unit.status.StartLimitIntervalUSec == '0'
       - "'--skip-healthchecks' in vector_agent_unit.status.ExecStartPre"
       - "'--config /etc/vector/vector.yaml' in vector_agent_unit.status.ExecStart"
@@ -462,7 +547,8 @@
       RestartUSec={{ vector_agent_unit.status.RestartUSec }},
       EnvironmentFiles={{ vector_agent_unit.status.EnvironmentFiles }},
       ExecStartPre={{ vector_agent_unit.status.ExecStartPre }},
-      ExecStart={{ vector_agent_unit.status.ExecStart }}.
+      ExecStart={{ vector_agent_unit.status.ExecStart }},
+      DropInPaths={{ vector_agent_unit.status.DropInPaths }}.
       Without StartLimitIntervalUSec=0 systemd gives up on this shipper
       permanently after five failed starts; without --skip-healthchecks a
       VictoriaLogs outage IS five failed starts. Try `systemctl daemon-reload` and
@@ -650,7 +736,7 @@
   register: vector_agent_docker_groups
   changed_when: false
   when:
-    - vector_agent_docker_logs
+    - vector_agent_docker_logs | bool
     - not ansible_check_mode
 
 - name: Assert the running Vector process can actually reach the docker socket
@@ -673,7 +759,7 @@
       inside the vector_agent_docker_logs conditional. Do not weaken this assert.
     quiet: true
   when:
-    - vector_agent_docker_logs
+    - vector_agent_docker_logs | bool
     - not ansible_check_mode
 
 # QUESTION 2: is Vector actually STORING container records? Group membership is
@@ -707,7 +793,7 @@
   changed_when: false
   failed_when: false
   when:
-    - vector_agent_docker_logs
+    - vector_agent_docker_logs | bool
     - not ansible_check_mode
 
 - name: Assert container log records from this host actually reached VictoriaLogs
@@ -731,5 +817,5 @@
       HTTP status was {{ vector_agent_docker_ingest.status | default('none') }}.
     quiet: true
   when:
-    - vector_agent_docker_logs
+    - vector_agent_docker_logs | bool
     - not ansible_check_mode

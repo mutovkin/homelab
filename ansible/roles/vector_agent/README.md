@@ -104,6 +104,30 @@ nothing is the default failure mode here.
    running process's `/proc/<pid>/environ`, hashes it on the host, and asserts the
    digest matches the vault value's. Neither value is ever printed.
 
+### What the VictoriaLogs credential may contain
+
+One hard constraint, asserted before anything is written:
+**`vault_vl_auth_username` and `vault_vl_auth_password` may not contain a double
+quote, CR or LF.** Those break the *file format* — values are double-quoted, so a
+`"` truncates or swallows the rest of the line and a newline reads as the start of
+a new assignment. The result would be a credential Vector holds that is not the
+credential in the vault, with a silent 401 as the only symptom.
+
+Everything else is allowed, **including `$` and backticks**, and that is a
+deliberate property rather than an omission. systemd does not interpolate inside
+double quotes, so those characters are literal. The role only gets to say that
+because nothing but systemd ever parses the file:
+
+- the pre-flight validate runs via `systemd-run --property=EnvironmentFile=`, not
+  a shell (see trap 4 and the note at the top of `templates/vector.env.j2`);
+- the byte-for-byte digest assert is the universal backstop — whatever a future
+  parser or a rotated value does to the credential, that assert fails the deploy
+  loudly rather than letting a mangled value 401 in silence.
+
+If you ever add a second reader of `/etc/vector/vector.env`, it must use systemd's
+parser. Sourcing it from bash expands `$VAR` and **executes backticks as root** —
+measured, not theorised.
+
 ## Verification the role performs on every run
 
 In order, and none of it is optional:
@@ -112,8 +136,11 @@ In order, and none of it is optional:
    — asserted **by variable name**, under `--check` too.
 2. The rsyslog structured stream is live *right now* — a `logger` marker must reach
    `/var/log/structured.log` within 10 s (`roles/rsyslog_structured`).
-3. `vector validate --skip-healthchecks`, sourcing the real env file, **before** a
-   working shipper is restarted onto the new config.
+3. `vector validate --skip-healthchecks` **before** a working shipper is restarted
+   onto the new config — run through `systemd-run` as `User=vector` with
+   `EnvironmentFile=`, so it is a faithful rehearsal of `ExecStartPre` rather than
+   an approximation: same user as the unit, same parser for the env file, no shell
+   anywhere in the path.
 4. `systemctl is-active vector` → `active`, after a 15 s settle (Vector exits about
    a second after a bad config, so an immediate check proves nothing).
 5. The drop-in is in force in the *effective merged unit*.
@@ -167,6 +194,12 @@ There is deliberately **no stat-exists gate** on the download. `get_url` hashes 
 file already on disk, skips the fetch on a match and re-downloads on a mismatch; a
 `when: not stat.exists` guard would make a corrupt cached `.deb` trusted forever
 (CLAUDE.md).
+
+The role prunes the cache itself: after the download it removes every
+`vector_*_amd64.deb` in `/var/cache/vector` **except the pinned one**, so a bump
+does not leave another ~36 MB artefact behind forever. Only superseded files go —
+keeping the current one is what makes a re-run cheap and is what `apt` installs
+from.
 
 ### Version skew with the container
 

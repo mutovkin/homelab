@@ -32,6 +32,11 @@ vector_agent_deb_path: "{{ vector_agent_deb_cache_dir }}/{{ vector_agent_deb_fil
 # because a `docker_logs` source on a host with no /var/run/docker.sock makes Vector
 # log a connection error on a loop forever while still shipping host records: a
 # permanently noisy, permanently green shipper.
+# `| bool` at every use site (both templates and every `when:`), not just here.
+# A host_vars value written as `"true"` is a STRING, and a non-empty string is
+# truthy in Jinja — so a quoted `"false"` would silently ENABLE docker collection
+# on a host with no Docker. Verified: rendering the drop-in with the string
+# "false" emitted the docker block; with a real boolean it did not.
 vector_agent_docker_logs: false
 
 # How long to let a restarted Vector run before asserting it is still alive. Same
