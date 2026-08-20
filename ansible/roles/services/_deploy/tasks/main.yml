@@ -23,15 +23,45 @@
 # after #94 pinned the main connection (TOFU). These two options put rsync on the
 # same footing. The play's normal ssh connection has already run by this point, so
 # the key is pinned in known_hosts before rsync ever dials (#94).
+#
+# --checksum/times:false (#138): rsync's default archive-mode comparison is
+# size + mtime, and a fresh clone or a new git worktree gives every file a new
+# mtime. Without these two options the shared deploy path reported `changed` for
+# byte-identical content across every service that deploys through this role
+# whenever the operator switched machine or worktree — and `compose up` then ran
+# against a "changed" payload. This repo treats `changed` as evidence (the
+# watchtower and idempotency gotchas in CLAUDE.md both turn on that), so a false
+# `changed` here erodes the signal everywhere at once. `times: false` is the
+# other half: without it rsync "touches" mtimes on content-identical files,
+# flipping `changed` for nothing. Same treatment the observability role's two
+# Grafana syncs have carried since they hit this; `_deploy` never got it.
+#
+# The cost, taken consciously: --checksum reads BOTH sides in full on every
+# deploy. These payloads are compose files and small configs, so it is cheap. A
+# service that ever syncs something LARGE must revisit this rather than inherit
+# it — that is a decision point, not a default.
+#
+# --checksum goes first in rsync_opts so it reads as an option rather than
+# getting lost among the excludes; svc_rsync_extra stays last so a calling role
+# can still append.
+#
+# LIMIT, measured: --checksum makes this content-idempotent, not idempotent. It
+# covers file CONTENT only — mode and ownership are compared separately, so a
+# checkout whose files carry a different group still reports `changed` with an
+# rsync itemization of `.f.....g...` (content identical, group differs). Seen
+# for real while verifying #138 from a clone under /private/tmp (group `wheel`)
+# against a host copy owned `staff`. If a deploy reports `changed` for a payload
+# you believe is identical, read the itemized flags before blaming the content.
 - name: Synchronize deploy payload for {{ svc }}
   become: false
   ansible.posix.synchronize:
     src: "{{ role_path | dirname }}/{{ svc }}/files/"
     dest: "{{ svc_deploy_dir }}/"
     delete: true
+    times: false
     verify_host: true
     use_ssh_args: true
-    rsync_opts: "{{ ['--exclude=.env', '--exclude=README.md'] + svc_rsync_extra }}"
+    rsync_opts: "{{ ['--checksum', '--exclude=.env', '--exclude=README.md'] + svc_rsync_extra }}"
 
 - name: Template .env for {{ svc }}
   ansible.builtin.template:

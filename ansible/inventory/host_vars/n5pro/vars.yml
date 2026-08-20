@@ -203,10 +203,13 @@ proxmox_lxcs:
       # NOTE: /etc/pve/lxc/201.conf carries a [pve:pending] mp0 that is a
       # semantically identical reorder of the live value — likely residue of the
       # pre-#86 blind update-PUT era (origin unconfirmed; that PUT did send
-      # allocation form) — plus the pending `features: mount=nfs,nesting=1` from
-      # #86's fix. Both merge harmlessly at the CT's next operator-chosen
-      # restart — do NOT restart the CT to "clean" them, and do not try to
-      # reconcile them.
+      # allocation form). It merges harmlessly at the CT's next operator-chosen
+      # restart — do NOT restart the CT to "clean" it, and do not try to
+      # reconcile it.
+      # The `features: mount=nfs,nesting=1` that #86 queued alongside it is NO
+      # LONGER pending: as of 2026-08-19 `pct config 201`, `pct config 201
+      # --current` and `pct pending 201` all read `mount=nfs,nesting=1` (pending
+      # prints a `cur` line only), so that feature set is in force, not queued.
       mp0: "local-zfs:200,mp=/data"
     netif:
       net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:FC:95:51,ip=192.168.30.15/18,type=veth"
