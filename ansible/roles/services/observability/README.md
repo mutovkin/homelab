@@ -62,7 +62,12 @@ roles/services/observability/
         ├── dashboards/             hot-reloaded by Grafana, no restart needed
         └── provisioning/
             ├── datasources/datasources.yaml   uids pinned — alerts reference them
-            └── alerting/ingest-health.yaml    "log ingest stalled" rule (#108)
+            └── alerting/
+                ├── ingest-health.yaml         "log ingest stalled" rule (#108)
+                ├── probe-health.yaml          three http_response rules (#139)
+                └── notification-policies.yaml root policy → homelab-email (#139)
+                    (contact-points.yaml is TEMPLATED, not a file here — see
+                     templates/grafana-contact-points.yaml.j2)
 ```
 
 ## Deploy
@@ -124,19 +129,69 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-`provisioning/alerting/ingest-health.yaml` provisions **VictoriaLogs ingest
-stalled**: `_time:5m | count()` over VictoriaLogs, alerting when fewer than 1 row
-arrived in 5 minutes, `for: 10m`. `noDataState` and `execErrState` are both
-`Alerting` — for a rule whose whole job is detecting absence, "no data" is the
-failure, not the healthy case.
+Four provisioned rules, all in the **Observability** folder, all delivered by
+email.
 
-**No contact point is provisioned.** The rule fires and is visible under
-_Alerting → Alert rules_, but nothing delivers it anywhere yet. Wiring notifications
-is deliberately out of scope for #108.
+| uid | rule | fires when | noData |
+| --- | ---- | ---------- | ------ |
+| `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
+| `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
+| `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
+| `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[1h]))` > 600, `for: 5m` | **Alerting** |
+
+`execErrState: Alerting` on all four — a datasource that cannot be reached is not
+evidence of health.
+
+**Absence is alerted on exactly once.** `obs-http-probe-absent` owns it: its query
+returns a row for every probe seen in the last hour, so an empty result means not
+one probe has reported in an hour — telegraf or its write path is dead. The two
+threshold rules therefore use `noDataState: OK`; if they alerted on NoData too, one
+dead telegraf would page three times.
+
+**Adding a probe needs no rule edit.** The probe rules carry no `server` matcher —
+they aggregate `by (server, check_type)`. Add a URL to `[[inputs.http_response]]` in
+`files/data/telegraf/telegraf.conf` and it becomes its own alert instance on the
+next collection. Never write a `server=` matcher into those queries; that property
+is the point (#139).
+
+Detection latency: ~5 min for a failing probe (1 m interval x `for: 5m`), ~15 min
+for one that goes silent (600 s of `lag` plus `for: 5m`).
+
+### Notification channel
+
+The root notification policy (`provisioning/alerting/notification-policies.yaml`)
+routes **everything in this folder** to the `homelab-email` contact point, which is
+templated by `templates/grafana-contact-points.yaml.j2` because its address is a
+vault value.
+
+That contact point and Grafana's `GF_SMTP_*` settings reuse the host's **shared
+Gmail relay** — the `vault_watchtower_email_*` vars, the same relay watchtower
+sends release notifications through. Deliberate: it is the one SMTP path this CT
+has and it is already proven to deliver from here; a second copy of the same Gmail
+app password would rot independently. The coupling is enforced, not just
+documented — all six var names are in the credential assert at the top of
+`tasks/main.yml`, so renaming one fails the play by name instead of producing a
+silent no-send.
+
+Two mechanical consequences, both of which have bitten this repo's shape before:
+
+- `Deploy Grafana provisioning` runs `synchronize` with `delete: true` over that
+  directory, so it carries `--exclude=alerting/contact-points.yaml`. Remove the
+  exclude and the rsync deletes the templated file every run, the template writes it
+  back, and Grafana restarts on every deploy forever.
+- A provisioned root policy and provisioned contact points are **read-only in the
+  Grafana UI**. Routing changes go in these files.
 
 Datasource **uids are pinned** in `provisioning/datasources/datasources.yaml`
 because alert rules reference datasources by uid, never by name. Those strings are
 identities: changing one re-points every dashboard and alert that uses it.
+
+> `http://grafana:3000` reports **301**, and 301 is inside the accepted range on
+> purpose: `grafana.ini` sets `enforce_domain = true`, so every request that does
+> not use the configured domain is redirected. Do not "fix" the bad-status rule by
+> narrowing it to 2xx. The same setting means every Grafana **API** call by IP must
+> send `-H 'Host: grafana.moutovkin.com'` (`/api/health` is exempt, which is why the
+> role's readiness gate works without it).
 
 ## Firewall (:8089)
 

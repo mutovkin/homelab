@@ -9,10 +9,11 @@ apiVersion: 1
 # Nothing in the stack notices absence, so absence is what this rule measures: not
 # "is Vector healthy" but "did ANY log line land in the last few minutes".
 #
-# NOTE — there is no contact point provisioned (out of scope for #108, and inventing
-# SMTP config here would be guesswork). The rule fires and is visible in
-# Alerting > Alert rules; it does not yet page anyone. Wiring a contact point is the
-# follow-up.
+# ROUTING: this rule now delivers. #139 provisioned the `homelab-email` contact
+# point (templates/grafana-contact-points.yaml.j2) and made it the ROOT
+# notification policy receiver (notification-policies.yaml), so everything in this
+# folder — including this rule — is emailed. Until then there was no contact point
+# at all and this rule paged nobody, which was the follow-up #108 left open.
 groups:
   - orgId: 1
     name: ingest-health
@@ -79,8 +80,9 @@ groups:
               settings:
                 mode: dropNN
           # C: the condition. < 1 row in 5 minutes on a host that logs continuously
-          # (syslog, auth.log, kern.log and every container's stdout) means ingestion
-          # has stopped, not that the host went quiet.
+          # (/var/log/structured.log — every syslog facility, see #143 — plus every
+          # container's stdout) means ingestion has stopped, not that the host went
+          # quiet.
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:

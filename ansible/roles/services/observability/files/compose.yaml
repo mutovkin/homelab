@@ -299,6 +299,25 @@ services:
       VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
       VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}
       VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}
+      # SMTP for Grafana alerting (#139). An alert rule with a contact point that
+      # cannot send is the same silent-failure defect as a rule with no contact
+      # point at all, so every one of these is `:?` and not `:-` — alerting must
+      # never be quietly unable to deliver. Values come from the host's shared
+      # Gmail relay (also used by watchtower); see templates/env.j2.
+      #
+      # DOUBLE-QUOTED, and that is not decoration: an unquoted YAML scalar ends at
+      # a ` #`, so `${VAR:?required - see #139}` parses as `${VAR:?required - see`
+      # plus a comment and compose then rejects the whole file with "invalid
+      # interpolation format". Measured, not theorised — it failed the first apply.
+      # (`(#143)` on VECTOR_HOSTNAME above survives unquoted only because its `#`
+      # follows `(` rather than a space. Quote the value; do not rely on that.)
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: "${GRAFANA_SMTP_HOST:?required - alerting must never be silently unable to send, see #139}"
+      GF_SMTP_USER: "${GRAFANA_SMTP_USER:?required - see #139}"
+      GF_SMTP_PASSWORD: "${GRAFANA_SMTP_PASSWORD:?required - see #139}"
+      GF_SMTP_FROM_ADDRESS: "${GRAFANA_SMTP_FROM_ADDRESS:?required - see #139}"
+      GF_SMTP_FROM_NAME: Grafana (homelab)
+      GF_SMTP_STARTTLS_POLICY: OpportunisticStartTLS
     deploy:
       resources:
         limits:

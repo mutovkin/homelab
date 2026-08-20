@@ -1,0 +1,278 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — service-health probes (#139)
+#
+# The failure this exists for: telegraf's [[inputs.http_response]] probes were
+# collected and stored, and nothing turned a failing one into a notification. A
+# probe pointed at a container name on another compose project's network was
+# therefore permanently red for the life of the deployment and nobody noticed —
+# the only way to see it was to open a dashboard and look. Same family as #108:
+# signal collected, green everywhere, nobody told.
+#
+# SELECTOR POLICY, and it is load-bearing: no label selector at all on
+# http_response_*, aggregated `by (server, check_type)`. Adding a URL to
+# [[inputs.http_response]] in files/data/telegraf/telegraf.conf produces a new
+# `server` value, which becomes its own alert instance with NO edit to this file.
+# Never write a `server=` matcher into these queries — that is the property.
+#
+# `result` and `status_code` are telegraf TAGS, so a probe changing outcome
+# changes series identity. Everything below aggregates across that churn rather
+# than matching on it.
+groups:
+  - orgId: 1
+    name: service-probes
+    folder: Observability
+    # telegraf collects every 60s, so evaluate at the same cadence. `for: 5m`
+    # below = five consecutive bad evaluations, which rides out the seconds-long
+    # red window every deploy of grafana/searxng produces.
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      - uid: obs-http-probe-failing
+        title: HTTP probe failing
+        condition: C
+        for: 5m
+        # OK, not Alerting, and this is deliberate: absence must be alerted on
+        # EXACTLY ONCE. obs-http-probe-absent below owns absence. If this rule
+        # also alerted on NoData, one dead telegraf would page three times.
+        noDataState: OK
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: A telegraf HTTP probe is failing (connection, DNS or timeout).
+          description: >-
+            http_response_result_code is non-zero for {{ $labels.server }} — the
+            probe could not complete the request at all (DNS failure, connection
+            refused, or timeout), as opposed to getting a bad status code.
+            Detection latency is ~5 minutes (1m interval x `for: 5m`).
+            Check `docker logs telegraf` on eq12_docker and try the URL from
+            inside the telegraf container. A red
+            `http://172.20.0.1:18080` (SearXNG) is very often NOT SearXNG being
+            down: 172.20.0.1 is the observability network's gateway, pinned in
+            ansible/inventory/host_vars/eq12_docker/vars.yml, and a subnet
+            renumber (#126) silently invalidates the URL. Probe URLs live in
+            ansible/roles/services/observability/files/data/telegraf/telegraf.conf.
+        labels:
+          severity: critical
+          component: service-probe
+        data:
+          # A: instant query, aggregated across the result/status_code label
+          # churn. `max`, not `avg`/`last`: while a probe flips outcome the
+          # pre-flip series (result="success", code 0) is still inside the
+          # lookbehind window, and max picks the failing value. Cost, accepted:
+          # recovery is reported up to 5 minutes late.
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "max by (server, check_type) (http_response_result_code)"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # B: collapse to one number per series. dropNN, not replaceNN — a null
+          # must not silently become a 0 and read as "healthy" (#108).
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # C: result_code 0 == success in telegraf; anything else is a failure
+          # (1 timeout, 2 DNS, 3 connection failed, 4 response string mismatch).
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+
+      # ---------------------------------------------------------------------
+      - uid: obs-http-probe-bad-status
+        title: HTTP probe returning a bad status
+        condition: C
+        for: 5m
+        # See obs-http-probe-failing: absence is obs-http-probe-absent's job.
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: A telegraf HTTP probe is answering with a non-2xx/3xx status.
+          description: >-
+            http_response_http_response_code for {{ $labels.server }} is outside
+            200-399 — the service is reachable but unhealthy (5xx, 401, 404).
+            Detection latency is ~5 minutes.
+            NOTE: 301 is IN range on purpose. `http://grafana:3000` reports 301
+            because grafana.ini sets `enforce_domain = true`, so every request by
+            IP/service-name is redirected to grafana.moutovkin.com. That is
+            expected and must not be "fixed" by narrowing the range to 2xx.
+            Probe URLs: files/data/telegraf/telegraf.conf.
+        labels:
+          severity: warning
+          component: service-probe
+        data:
+          # Deliberately NOT `status_code!~"2..|3.."`: a connection failure emits
+          # no status_code tag at all, and an absent label matches a negative
+          # regex in PromQL/MetricsQL — so that formulation would double-fire with
+          # obs-http-probe-failing on every DNS failure. The numeric field has no
+          # such trap.
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "max by (server, check_type) (http_response_http_response_code)"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: outside_range
+                    params:
+                      - 200
+                      - 399
+
+      # ---------------------------------------------------------------------
+      - uid: obs-http-probe-absent
+        title: HTTP probe stopped reporting
+        condition: C
+        for: 5m
+        # THE one rule that alerts on absence, and the reason the other two do
+        # not. Its query returns a row for every probe seen in the last hour, so
+        # an empty result means not a single probe has reported in an hour —
+        # telegraf is dead, or its write path to VictoriaMetrics is. That is a
+        # real emergency, and NoData defaulting to OK is exactly how a dead
+        # pipeline stays invisible.
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: A telegraf HTTP probe has stopped producing samples.
+          description: >-
+            No new sample for {{ $labels.server }} in over 10 minutes, while
+            telegraf collects every 60s. This is the case a threshold rule cannot
+            catch: a probe that cannot resolve its target may stop producing the
+            series altogether rather than producing a bad value. Total detection
+            latency ~15 minutes (600s of lag plus `for: 5m`).
+            If NO instance is present and the rule is firing on NoData, telegraf
+            itself is down or cannot write to VictoriaMetrics — check
+            `docker logs telegraf` on eq12_docker.
+        labels:
+          severity: critical
+          component: service-probe
+        data:
+          # lag() is the "seconds since the previous sample" of each series.
+          # `min` across a server's series = time since ANY series for that server
+          # reported, which is the question being asked. `max` would fire forever
+          # on every series retired by a result/status_code tag change.
+          # The [1h] window is what makes this rule return rows for probes that
+          # have gone quiet — a plain selector would return nothing.
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "min by (server, check_type) (lag(http_response_result_code[1h]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 600s = ten missed 60s collections. Loose enough that a telegraf
+          # restart or a single slow scrape cannot trip it.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600

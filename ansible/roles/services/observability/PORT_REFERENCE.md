@@ -114,6 +114,21 @@ without the other does nothing. Only then do these become reachable:
 - **Data Sources**: http://localhost:3000/datasources
 - **Explore**: http://localhost:3000/explore
 
+#### Outbound: SMTP 587 (alert notifications, #139)
+
+Grafana's only outbound port. `GF_SMTP_HOST` is `smtp.gmail.com:587` with
+`OpportunisticStartTLS`, templated into `.env` from the host's shared Gmail relay
+credentials (`vault_watchtower_email_*` — the same relay watchtower uses). It
+carries the four provisioned alert rules to the `homelab-email` contact point.
+
+Nothing listens on 587 here; egress to it must stay open or alerting silently
+stops delivering. Rules, routing and the shared-relay coupling:
+[README.md → Alerting](README.md#alerting).
+
+> Every Grafana **API** call by IP must send `-H 'Host: grafana.moutovkin.com'`.
+> `grafana.ini` sets `enforce_domain = true`, so anything else gets a 301 to the
+> configured domain. `/api/health` is the one exemption.
+
 ---
 
 ### Telegraf (Metrics Collector)
