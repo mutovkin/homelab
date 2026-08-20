@@ -53,8 +53,6 @@ roles/services/observability/
 ├── tasks/vector-buffer-reset.yml   opt-in, destructive; tagged `never` (see below)
 ├── templates/env.j2                the .env, templated from vault + host_vars
 ├── files/compose.yaml              the five services
-├── files/rsyslog-vector-structured.conf  → /etc/rsyslog.d/40-vector-structured.conf
-├── files/logrotate-structured            → /etc/logrotate.d/vector-structured
 └── files/data/                     bind-mounted config, rsync'd to {{ data_mount }}
     ├── vector/vector.yaml
     ├── telegraf/telegraf.conf
@@ -70,6 +68,11 @@ roles/services/observability/
                     (contact-points.yaml is TEMPLATED, not a file here — see
                      templates/grafana-contact-points.yaml.j2)
 ```
+
+The rsyslog drop-in and its logrotate policy used to live in `files/` here. #134
+moved them to the shared **[`roles/rsyslog_structured`](../../rsyslog_structured/README.md)**,
+which this role now `include_role`s (before the Vector config copy, as before).
+They are host-log plumbing and all four hosts need the identical stream.
 
 ## Deploy
 
@@ -280,7 +283,7 @@ against the name the inventory uses or it needs a second, hand-maintained mappin
 Debian writes `/var/log/syslog` and `/var/log/auth.log` in `RSYSLOG_FileFormat`,
 which carries **no `<PRI>`** — severity and facility are simply not in those lines
 and cannot be parsed out. So the role deploys
-`/etc/rsyslog.d/40-vector-structured.conf` (from `files/rsyslog-vector-structured.conf`),
+`/etc/rsyslog.d/40-vector-structured.conf` (from `roles/rsyslog_structured/files/rsyslog-vector-structured.conf`),
 which re-emits every message in **RFC5424** to `/var/log/structured.log`, and Vector
 tails *that* instead. `parse_syslog()` then yields severity, facility, appname,
 procid, hostname and the real timestamp.

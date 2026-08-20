@@ -100,129 +100,18 @@
     - "{{ data_mount }}/grafana/provisioning"
 
 # --- Structured host-log stream for Vector (#143) -----------------------------
-# Debian's RSYSLOG_FileFormat carries no <PRI>, so severity and facility are
-# unrecoverable from /var/log/syslog and /var/log/auth.log — Vector had to store
-# every host record as `level: info`. These tasks make rsyslog emit the same
-# messages a SECOND time in RFC5424 to /var/log/structured.log, which is what
-# vector.yaml's `host_syslog` source now tails INSTEAD of syslog+auth.log.
-# Full reasoning: files/rsyslog-vector-structured.conf.
+# Lifted to the shared roles/rsyslog_structured in #134: eq12/n5pro/n5pro_docker
+# need the byte-identical stream for their native Vector agents, and the drop-in
+# and the Vector config that reads it must travel together. The block that used to
+# be inlined here moved VERBATIM — copy the drop-in, copy the logrotate policy,
+# `rsyslogd -N1`, restart-if-changed, ensure-running-ungated, then the end-to-end
+# `logger` freshness probe and its assert. See roles/rsyslog_structured/README.md.
 #
 # Ordered before the config copy below on purpose: the file must exist and be
 # written before Vector restarts onto a config that reads only that file.
-- name: Deploy rsyslog structured-stream config for Vector
-  ansible.builtin.copy:
-    src: rsyslog-vector-structured.conf
-    dest: /etc/rsyslog.d/40-vector-structured.conf
-    mode: "0644"
-  register: vector_rsyslog_conf
-
-- name: Deploy logrotate policy for the structured stream
-  ansible.builtin.copy:
-    src: logrotate-structured
-    dest: /etc/logrotate.d/vector-structured
-    mode: "0644"
-
-# The one genuine outage risk in this change: a drop-in rsyslog rejects takes
-# rsyslog down on restart, and with it ALL host logging — syslog, auth.log and the
-# new stream at once. `rsyslogd -N1` parses the whole config without touching the
-# running daemon.
-#
-# Scope of the guarantee, narrowed after review because the earlier wording claimed
-# more than was tested: it is VERIFIED to exit non-zero on a PARSE error. Semantic
-# errors — an unknown template name, a bad omfile parameter — are NOT confirmed to
-# fail it, which is precisely why the end-to-end `logger` probe below exists rather
-# than this task being the only gate.
-#
-# It also validates EVERY drop-in in /etc/rsyslog.d, not just ours, so a pre-existing
-# break in an unrelated file (postfix.conf) now fails this role's play. That is loud
-# rather than silent and worth the coupling.
-#
-# Skipped in check mode, where the copy above has not happened and there would be
-# nothing new to validate.
-- name: Validate the rsyslog configuration before restarting
-  ansible.builtin.command: rsyslogd -N1
-  changed_when: false
-  when: not ansible_check_mode
-
-- name: Restart rsyslog to pick up the structured stream
-  ansible.builtin.systemd_service:
-    name: rsyslog
-    state: restarted
-  when:
-    - vector_rsyslog_conf.changed
-    - not ansible_check_mode
-
-# UNGATED on purpose — no `changed` condition. The restart above only fires when the
-# drop-in itself changed, i.e. once. If rsyslog is dead on an otherwise-converged
-# host, nothing else in this role would start it, and Vector's only host-log input
-# stops growing while every task reports ok. Same shape as the nftables
-# RemainAfterExit trap in CLAUDE.md: state that can be invalidated from outside,
-# guarded by something that cannot see the invalidation.
-- name: Ensure rsyslog is running and enabled
-  ansible.builtin.systemd_service:
-    name: rsyslog
-    state: started
-    enabled: true
-  when: not ansible_check_mode
-
-# LOAD-BEARING GUARD, not a nicety. vector.yaml no longer tails syslog/auth.log, so
-# a drop-in that loads cleanly but routes nothing leaves Vector with an empty input
-# and the host silently stops shipping logs entirely — the exact green-but-dead
-# shape this whole issue family is about.
-#
-# This is an END-TO-END FRESHNESS probe, and the freshness is the entire point. The
-# guard this replaces asserted the file existed and was non-empty, which a file
-# untouched since last week satisfies instantly — so it could only ever fail on the
-# very first run that deployed the drop-in, and was inert on every converged run
-# afterwards. Writing a marker through `logger` and then waiting for that exact
-# marker to appear in the file exercises the whole path: rsyslog is alive, it is
-# reading its socket, the `*.*` selector still reaches our action, and omfile is
-# still writing to this path. It fails when rsyslog is dead, when the drop-in loads
-# but routes nothing, and when a `stop` rule added upstream of us swallows the
-# selector — none of which existence-plus-size can see.
-#
-# The marker is unique per run so a stale match from an earlier deploy cannot
-# satisfy it. local0.notice is used because Debian's config routes it to
-# /var/log/syslog as well, so the probe line is visible to a human debugging this.
-- name: Generate a unique marker for the structured-stream probe
-  ansible.builtin.set_fact:
-    vector_structured_probe: "ansible-structured-probe-{{ ansible_date_time.iso8601_micro | regex_replace('[^0-9]', '') }}"
-  when: not ansible_check_mode
-
-# changed_when: false — this writes one line to the log stream, which is the probe,
-# not a state change. Skipped in check mode: a dry run must not write.
-- name: Emit the structured-stream probe marker
-  ansible.builtin.command: logger -p local0.notice "{{ vector_structured_probe }}"
-  changed_when: false
-  when: not ansible_check_mode
-
-- name: Wait for the probe marker to reach the structured stream
-  ansible.builtin.wait_for:
-    path: /var/log/structured.log
-    search_regex: "{{ vector_structured_probe }}"
-    timeout: 10
-  register: vector_structured_probe_result
-  failed_when: false
-  when: not ansible_check_mode
-
-# Separate assert rather than letting wait_for fail, so the failure message can
-# explain what to check. failed_when:false above hands us the result either way;
-# deliberately NO no_log anywhere on this chain — censoring it would blind exactly
-# the diagnostic this guard exists to print (#88).
-- name: Assert the structured stream is being written right now
-  ansible.builtin.assert:
-    that:
-      - vector_structured_probe_result is not failed
-    fail_msg: >-
-      A marker written with `logger` did not reach /var/log/structured.log within
-      10s, so rsyslog is not currently routing to it and Vector — which tails ONLY
-      this file for host logs — is shipping nothing from this host. The file may
-      still exist and be non-empty; that proves only that it was written once.
-      Check `systemctl status rsyslog`, `journalctl -u rsyslog`, and that
-      /etc/rsyslog.d/40-vector-structured.conf is still present and that no drop-in
-      sorting before it ends the ruleset with `stop`.
-    quiet: true
-  when: not ansible_check_mode
+- name: Deploy the RFC5424 structured host-log stream Vector tails
+  ansible.builtin.include_role:
+    name: rsyslog_structured
 
 # The compose file bind-mounts these paths directly (not from the deploy dir), so
 # without these tasks a config edited in the repo never reaches the container and
@@ -315,14 +204,18 @@
     name: services/_deploy
   vars:
     svc: observability
-    # These two live in files/ so the `copy` tasks above can find them, but they
-    # are HOST config (/etc/rsyslog.d, /etc/logrotate.d) — not part of the compose
-    # payload. Without the excludes _deploy's `delete: true` synchronize would also
-    # drop them into {{ data_mount }}/deploy/observability/, where they mean
-    # nothing and only invite someone to "fix" the wrong copy (#143).
-    svc_rsync_extra:
-      - "--exclude=rsyslog-vector-structured.conf"
-      - "--exclude=logrotate-structured"
+    # NO svc_rsync_extra any more, and that is a consequence of the #134 lift rather
+    # than a relaxation. Until then this role's files/ held two HOST config files
+    # (/etc/rsyslog.d, /etc/logrotate.d) that are not part of the compose payload, so
+    # _deploy's `delete: true` synchronize had to be told to leave them out of
+    # {{ data_mount }}/deploy/observability/ — where they mean nothing and would only
+    # invite someone to "fix" the wrong copy (#143). Both files now live in
+    # roles/rsyslog_structured/files/, so there is nothing in this role's files/ for
+    # those excludes to match and keeping them would name paths that no longer exist.
+    # Verified a no-op on the live host before removal: the excludes worked from the
+    # day they were added, so neither file was ever present in the deploy dir
+    # (`ls /data/deploy/observability/` → compose.yaml, data/, .env), and dropping
+    # them therefore deletes nothing.
 
 # Single source of truth for the restart decision, shared by the check-mode
 # preview, the restart itself and the readiness gates (postgresql/lms/frigate
