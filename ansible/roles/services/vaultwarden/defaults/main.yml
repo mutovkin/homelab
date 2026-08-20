@@ -4,10 +4,17 @@ vaultwarden_backup_retention: 7
 
 # Firewall scoping for the Vaultwarden HTTP port (shared role: roles/nft_scoped_fw).
 # Plain-HTTP origin for the password vault — LAN exposure allows credential capture, so
-# only the NPM reverse proxy and operator workstations may reach it (#81).
+# only approved sources may reach it (#81).
+#
+# DELIBERATELY EMPTY (#140). The allowlist is PER-HOST and lives in
+# inventory/host_vars/<host>/vars.yml, next to postgres_firewall /
+# observability_firewall. As a role default it was inherited fleet-wide, so any
+# host that ever runs vaultwarden would silently get eq12_docker's NPM grant
+# (192.168.25.20/32) whether or not NPM proxies that host. `{}` routes a host
+# that deploys the role without declaring an allowlist into nft_scoped_fw's
+# existing "nft_fw_ports must be a non-empty {port: [source, ...]} mapping"
+# assert instead of into another host's proxy IP.
+#
 # Per-port shape ({port: [source, ...]}, #114): sources are approved for THIS
 # port only. Entries must be IPv4 CIDRs of prefix /1../32 (asserted).
-vaultwarden_fw_ports:
-  8086:
-    - 192.168.25.20/32 # NPM LXC (CT 104) — reverse-proxy upstream reach
-    - 192.168.48.0/24 # operator workstation subnet
+vaultwarden_fw_ports: {}
