@@ -12,8 +12,9 @@ carry did the opposite and are gone.
 ## Why this stack
 
 - **VictoriaMetrics** (metrics) — Apache 2.0, ~10-20x better compression than
-  InfluxDB, single binary, PromQL/MetricsQL, and a native InfluxDB line-protocol
-  listener that Home Assistant writes to directly. 5-year retention.
+  InfluxDB, single binary, PromQL/MetricsQL. 5-year retention. It also runs a
+  native InfluxDB line-protocol listener on `:8089` — **nothing writes to it**;
+  see [Home Assistant integration](#home-assistant-integration).
 - **VictoriaLogs** (logs) — Apache 2.0, LogsQL, far lighter than Loki. 90-day
   retention.
 - **Vector** (log shipper), **Telegraf** (metrics collector), **Grafana** (UI).
@@ -48,10 +49,12 @@ if the stat is undefined and compose uses `${DOCKER_GID:?}`.
 
 ```
 roles/services/observability/
-├── tasks/main.yml                  firewall → data dirs → configs → deploy → restarts
+├── tasks/main.yml                  firewall → rsyslog stream → data dirs → configs → deploy → restarts
 ├── tasks/vector-buffer-reset.yml   opt-in, destructive; tagged `never` (see below)
 ├── templates/env.j2                the .env, templated from vault + host_vars
 ├── files/compose.yaml              the five services
+├── files/rsyslog-vector-structured.conf  → /etc/rsyslog.d/40-vector-structured.conf
+├── files/logrotate-structured            → /etc/logrotate.d/vector-structured
 └── files/data/                     bind-mounted config, rsync'd to {{ data_mount }}
     ├── vector/vector.yaml
     ├── telegraf/telegraf.conf
@@ -60,7 +63,12 @@ roles/services/observability/
         ├── dashboards/             hot-reloaded by Grafana, no restart needed
         └── provisioning/
             ├── datasources/datasources.yaml   uids pinned — alerts reference them
-            └── alerting/ingest-health.yaml    "log ingest stalled" rule (#108)
+            └── alerting/
+                ├── ingest-health.yaml         "log ingest stalled" rule (#108)
+                ├── probe-health.yaml          three http_response rules (#139)
+                └── notification-policies.yaml root policy → homelab-email (#139)
+                    (contact-points.yaml is TEMPLATED, not a file here — see
+                     templates/grafana-contact-points.yaml.j2)
 ```
 
 ## Deploy
@@ -122,19 +130,91 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-`provisioning/alerting/ingest-health.yaml` provisions **VictoriaLogs ingest
-stalled**: `_time:5m | count()` over VictoriaLogs, alerting when fewer than 1 row
-arrived in 5 minutes, `for: 10m`. `noDataState` and `execErrState` are both
-`Alerting` — for a rule whose whole job is detecting absence, "no data" is the
-failure, not the healthy case.
+Four provisioned rules, all in the **Observability** folder, all delivered by
+email.
 
-**No contact point is provisioned.** The rule fires and is visible under
-_Alerting → Alert rules_, but nothing delivers it anywhere yet. Wiring notifications
-is deliberately out of scope for #108.
+| uid | rule | fires when | noData |
+| --- | ---- | ---------- | ------ |
+| `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
+| `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
+| `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
+| `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
+
+`execErrState: Alerting` on all four — a datasource that cannot be reached is not
+evidence of health.
+
+**Absence is owned by exactly one RULE — which is not the same as one email.**
+`obs-http-probe-absent` owns it: its query returns a row for every probe seen in the
+last 24 hours, so an empty result means not one probe has reported in a day —
+telegraf or its write path is dead. The two threshold rules therefore use
+`noDataState: OK`; if they alerted on NoData too, one dead telegraf would fire three
+rules instead of one.
+Per *incident*, though, a dead telegraf sends **one email per probed target** —
+four today — then four resolved notices, because `server` is in the root policy's
+`group_by`. That is deliberate: two different services failing must be two
+notifications, not one merged digest whose subject names only the first. The cost is
+paid when the common cause is telegraf itself.
+
+**Adding a probe needs no rule edit.** The probe rules carry no `server` matcher —
+they aggregate `by (server, check_type)`. Add a URL to `[[inputs.http_response]]` in
+`files/data/telegraf/telegraf.conf` and it becomes its own alert instance on the
+next collection. Never write a `server=` matcher into those queries; that property
+is the point (#139).
+
+Detection latency: ~5 min for a failing probe (1 m interval x `for: 5m`), ~15 min
+for one that goes silent (600 s of `lag` plus `for: 5m`).
+
+The `[24h]` lookbehind on the absence rule is load-bearing and was `[1h]` until
+review caught it: a series with no sample inside the lookbehind is not returned at
+all, so with `[1h]` a dead probe was alertable only between 10 and 60 minutes of
+silence — past an hour its instance vanished, Grafana marked it stale and
+**resolved** the alert. Partial absence (one target dead, the rest healthy) is the
+likely case and had no coverage at all past an hour; `noDataState: Alerting` only
+catches *total* absence. Proven against the retired `http://searxng:8080` probe from
+#94, which `lag[1h]` cannot see and `lag[24h]` can.
+The deliberate cost: **removing a URL from `telegraf.conf` alerts for up to 24 h
+afterwards** (two emails at `repeat_interval: 12h`). `[7d]` was rejected — a week of
+firing after an intentional removal is alert fatigue, and a probe dead for more than
+a day has already paged and been ignored.
+
+### Notification channel
+
+The root notification policy (`provisioning/alerting/notification-policies.yaml`)
+routes **everything in the org** — not just this folder — to the `homelab-email`
+contact point, which is templated by `templates/grafana-contact-points.yaml.j2`
+because its address is a vault value. A `policies:` entry with no `routes:` IS the
+root route, so every rule in every folder inherits it, including #108's. That is the
+intent; adding a folder matcher to "scope" it would orphan every rule outside this
+folder back to Grafana's stub receiver.
+
+That contact point and Grafana's `GF_SMTP_*` settings reuse the host's **shared
+Gmail relay** — the `vault_watchtower_email_*` vars, the same relay watchtower
+sends release notifications through. Deliberate: it is the one SMTP path this CT
+has and it is already proven to deliver from here; a second copy of the same Gmail
+app password would rot independently. The coupling is enforced, not just
+documented — all six var names are in the credential assert at the top of
+`tasks/main.yml`, so renaming one fails the play by name instead of producing a
+silent no-send.
+
+Two mechanical consequences, both of which have bitten this repo's shape before:
+
+- `Deploy Grafana provisioning` runs `synchronize` with `delete: true` over that
+  directory, so it carries `--exclude=alerting/contact-points.yaml`. Remove the
+  exclude and the rsync deletes the templated file every run, the template writes it
+  back, and Grafana restarts on every deploy forever.
+- A provisioned root policy and provisioned contact points are **read-only in the
+  Grafana UI**. Routing changes go in these files.
 
 Datasource **uids are pinned** in `provisioning/datasources/datasources.yaml`
 because alert rules reference datasources by uid, never by name. Those strings are
 identities: changing one re-points every dashboard and alert that uses it.
+
+> `http://grafana:3000` reports **301**, and 301 is inside the accepted range on
+> purpose: `grafana.ini` sets `enforce_domain = true`, so every request that does
+> not use the configured domain is redirected. Do not "fix" the bad-status rule by
+> narrowing it to 2xx. The same setting means every Grafana **API** call by IP must
+> send `-H 'Host: grafana.moutovkin.com'` (`/api/health` is exempt, which is why the
+> role's readiness gate works without it).
 
 ## Firewall (:8089)
 
@@ -167,6 +247,108 @@ ssh root@192.168.25.15 'nft list table inet observability_fw'   # read-only chec
 Verify from a **blocked** source, not an allowed one — an allowed source proves
 nothing about the drop rule.
 
+## Log record schema
+
+What Vector stores in VictoriaLogs, per record (#143). Only the **labels** become
+part of `_stream`; everything else is a plain JSON field — which VictoriaLogs still
+makes queryable, so `level:err` works without paying for stream cardinality.
+
+| Field | Label? | Sources | Example | Origin |
+| ----- | ------ | ------- | ------- | ------ |
+| `source` | **label** | all | `host` / `docker` / `pkg` | literal, set per transform |
+| `hostname` | **label** | all | `eq12_docker` | `VECTOR_HOSTNAME` from `.env` (Ansible `inventory_hostname`) |
+| `host` | no | all | `eq12_docker` | same value; VictoriaLogs stores both keys and both used to be wrong |
+| `container_name` | **label** (docker only) | docker | `grafana` | Docker daemon metadata |
+| `level` | no | all | `err`, `warning`, `notice`, `info` | RFC5424 `<PRI>`; literal `info` for docker/pkg |
+| `facility` | no | host | `authpriv`, `daemon` | RFC5424 `<PRI>` |
+| `appname` | no | host | `sshd` | RFC5424 header |
+| `procid` | no | host | `1234` (`null` when the header says `-`) | RFC5424 header |
+| `syslog_hostname` | no | host | `deb-docker` | RFC5424 header — the CT's real OS hostname |
+| `parse_failed` | no | host | `syslog` | set only when a line is not RFC5424; `level` is then `unknown`, never a fabricated `info` |
+| `timestamp_source` | no | all | `event` / `ingest` | provenance of `_time`, so a host record that fell through the syslog parse is queryable |
+| `file`, `source_type` | no | host, pkg | `/var/log/structured.log`, `file` | Vector's file source |
+| `_msg` | — | all | the message text | `message`, with the RFC5424 header stripped on host records |
+| `_time` | — | all | — | host: the line's own timestamp, to the microsecond. docker: the **Docker daemon's** log timestamp. pkg: ingestion time (see limitation 4) |
+
+`hostname` is deliberately the **Ansible inventory name**, not the container ID
+(`get_hostname!()`, the old value — it changed on every recreate) and not the CT's
+OS hostname. Per-host alerting (#134) keys on it, and an alert must be written
+against the name the inventory uses or it needs a second, hand-maintained mapping.
+
+### How host records get a severity
+
+Debian writes `/var/log/syslog` and `/var/log/auth.log` in `RSYSLOG_FileFormat`,
+which carries **no `<PRI>`** — severity and facility are simply not in those lines
+and cannot be parsed out. So the role deploys
+`/etc/rsyslog.d/40-vector-structured.conf` (from `files/rsyslog-vector-structured.conf`),
+which re-emits every message in **RFC5424** to `/var/log/structured.log`, and Vector
+tails *that* instead. `parse_syslog()` then yields severity, facility, appname,
+procid, hostname and the real timestamp.
+
+`*.*` in that drop-in is exactly Debian's `*.*;auth,authpriv.none` (syslog) plus
+`auth,authpriv.*` (auth.log), so the one file replaces both — and `vector.yaml` must
+**not** also tail syslog/auth.log or every host event is ingested twice. The
+human-facing files are untouched in format and content; growth of the duplicate is
+bounded by `/etc/logrotate.d/vector-structured` (weekly, `rotate 4`).
+
+Backfill posture: both file sources use `read_from: beginning` with **no**
+`ignore_older_secs`. The old `end` + 600 s pair made any Vector outage longer than
+ten minutes a permanent hole even though the files on disk were intact — including
+after a [buffer reset](#recovering-a-wedged-vector-buffer), which is supposed to be
+the recovery. The cost is the mirror image: a reset wipes checkpoints, so
+`structured.log` is re-read from its start and up to one logrotate period is
+duplicated.
+
+### Known limitations (four, all deliberate)
+
+1. **No kernel or OOM-kill events.** There is no kernel ring buffer in an LXC, so
+   `imklog` produces nothing and `/var/log/kern.log` can never exist on this host —
+   the glob that used to list it was implying coverage that does not exist. Kernel
+   events are visible only on the PVE host; closing that is #134 (Vector on
+   `eq12`/`n5pro`), not a `vector.yaml` change.
+2. **Boot-window blind spot — NOT closed.** #143 asked for a `journald` source to
+   fix two things at once: the lost structured metadata, and units that log before
+   `rsyslog.service` starts. Only the first half is solved (RFC5424 gives us
+   `level`, `facility`, `appname`, `procid`, `syslog_hostname`). The second half
+   stands: pre-rsyslog units are in the journal and reach neither file. A journald
+   source cannot close it here, because Vector's journald source shells out to the
+   `journalctl` binary and the image we run
+   (`timberio/vector:latest-distroless-static`) has no shell and no `journalctl` —
+   proven, not assumed:
+   `docker exec vector journalctl --version` → `executable file not found in $PATH`
+   (rc=127). `latest-debian` does not ship it either, so closing this gap means
+   building a custom image. Measured 2026-08-18, journal and syslog+auth agreed
+   exactly (968 lines each), so today's practical loss is a handful of early-boot
+   lines — but it is a real gap, not a solved one.
+3. **This change INTRODUCED Vector self-ingestion; it did not eliminate it.** Say it
+   that way round, because the comfortable phrasing gets it backwards. #143 item 3 was
+   filed about a self-amplifying loop — Vector re-ingesting its own noisy stderr.
+   Measured, that loop was **not** happening before: zero records with
+   `container_name:vector` across all seven prior container-ID hostname labels, and
+   zero containing the old label-render warning, verified against control phrases from
+   Vector's own stderr that *do* return hits. Measured after: **77 records and
+   counting**, all under the new `eq12_docker` label, starting the moment the
+   post-change container came up. `docker_logs` does not self-exclude.
+   **Why self-ingestion began with this change was not determined**, and no guess is
+   recorded here.
+   Today it is harmless — the volume is trivial, almost all of it startup lines, and
+   Vector's own internal flood suppression bounds repeats. But the honest conclusion
+   is the uncomfortable one: the amplification hazard the issue was filed about is now
+   **live rather than hypothetical**, and because we cannot explain why it started, we
+   cannot promise it stays bounded.
+   `exclude_containers: ["vector"]` on the `docker_logs` source is the one-line
+   mitigation and is deliberately NOT applied: it would also delete Vector's own
+   diagnostics from VictoriaLogs, the first place anyone looks when this pipeline
+   misbehaves, and the only copy that survives a container recreate. Tracked as its own
+   issue rather than left to this paragraph.
+4. **Package-audit records carry ingestion time, not line time.** `dpkg.log`,
+   `apt/history.log` and the two `unattended-upgrades` logs are not syslog-shaped and
+   are tailed directly, so `_time` is when Vector read the line. This is a known
+   property, not a defect: on the backfill run all 293 records landed inside a 3.8 ms
+   window (`min(_time)` 2026-08-20T03:39:20.421Z, `max(_time)` …20.424Z) while their
+   `_msg` values carry dates back to 2026-08-16. Host records are the opposite — their
+   `_time` is the line's own timestamp, to the microsecond.
+
 ## Coverage gap
 
 The log collector (`vector`) runs on **eq12_docker only**. `pve`, `n5pro` and
@@ -174,16 +356,48 @@ The log collector (`vector`) runs on **eq12_docker only**. `pve`, `n5pro` and
 output are invisible in Grafana. This is a known fleet gap with its own issue; it is
 not a misconfiguration of this role.
 
-On eq12_docker, `vector.yaml`'s `host_logs` source tails `/var/log/syslog`,
-`/var/log/auth.log` and `/var/log/kern.log` with **no filtering**, so
-`unattended-upgrades` and every other syslog-writing daemon reaches VictoriaLogs
-automatically.
+On eq12_docker, `vector.yaml` tails `/var/log/structured.log` with **no filtering**
+(so every syslog-writing daemon reaches VictoriaLogs automatically) plus the four
+package-audit files listed above.
 
 ## Home Assistant integration
 
-HA writes over the InfluxDB v1 line protocol to `192.168.25.15:8089` (no database,
-user or token needed). It must be listed under `observability_firewall.ports[8089]` —
-it is, as `192.168.25.10/32`.
+**There isn't one.** This section used to say HA writes over the InfluxDB v1 line
+protocol to `192.168.25.15:8089`. It never has — proven four independent ways by
+the #133 diagnosis (2026-08-20):
+
+- `vm_rows_inserted_total{type="influx"} = 0` since process start, against
+  `{type="promremotewrite"} = 734277` (telegraf's path);
+- no HA-shaped series has ever existed over the full 5 y store — `entity_id`,
+  `domain`, `friendly_name` label values are all `[]`, and the complete
+  `__name__` set is 162 telegraf metrics;
+- the DOCKER-chain DNAT counters on both `:8089` rules read `packets 0`, while
+  the `:8428` rule on the same chain shows traffic (so the counters work);
+- a 90 s tcpdump on CT 101's eth0 saw zero packets, and HA's own 258 MB archived
+  log contains zero occurrences of "influx".
+
+`configuration.yaml` on VM 100 has no `influxdb:` block and never has, back to the
+earliest snapshot in version control. So the `:8089` listener, its TCP+UDP port
+publishes, the 5-year retention "for HA historical data",
+`--dedup.minScrapeInterval=15s` "smooths HA transients", and #122's
+`observability_firewall` allowlist for `192.168.25.10/32` are all real
+infrastructure built for a writer that does not exist. **#122's allowlist is not
+implicated** — `192.168.25.10` is explicitly accepted for both protocols and its
+drop rules have never been reached; HA can reach the box fine
+(`curl http://192.168.25.15:8428/health` from inside VM 100 → 200 in 0.7 ms).
+
+If the export is ever wanted, it must target **8428** — the authenticated
+InfluxDB v1 HTTP API — not 8089, which is a raw line-protocol socket that cannot
+answer HA's HTTP client. Config snippet and the verified endpoint behaviour:
+[PORT_REFERENCE.md](PORT_REFERENCE.md#the-working-path-for-an-influxdb-http-client-port-8428).
+
+**#133 stays open** and nothing about the running configuration was changed by
+this correction: it removes a recipe the repo documented and we proved cannot
+work. The two decisions the human still owns are whether to keep
+`--dedup.minScrapeInterval=15s` (it silently collapses HA state changes < 15 s
+apart, which is lossy for event-driven entities) and whether to drop the `:8089`
+listener entirely, which would delete an unauthenticated write endpoint and make
+#122 moot.
 
 ## Troubleshooting
 

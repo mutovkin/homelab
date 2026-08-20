@@ -1,0 +1,43 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — root notification policy (#139)
+#
+# Without this, every rule in this folder routed to Grafana's stock
+# `grafana-default-email` receiver, whose address is the literal placeholder
+# `<example@email.com>`. A rule wired to that is indistinguishable from a rule
+# wired to nothing — which is the defect #139 is about, one layer up from the
+# missing rules themselves.
+#
+# The receiver is provisioned from templates/grafana-contact-points.yaml.j2 (the
+# address is a vault value, so it cannot be a static file in this repo).
+#
+# SCOPE, stated precisely because the wording here used to be wrong: a `policies:`
+# entry with no `routes:` is the ROOT route for the whole ORG, not for one folder.
+# Every rule in every folder inherits `homelab-email` — including #108's existing
+# rule, which is exactly why this wires it up. It is org-wide on purpose; do NOT
+# add a folder matcher to "scope" it, that would orphan every rule outside the
+# folder back to the stub receiver.
+#
+# NOTE: a provisioned root policy is READ-ONLY in the Grafana UI, so this file is
+# now the only editable source of routing. Editing it means editing this file and
+# re-running the deploy. Before this
+# landed, the root policy was Grafana's stock default and nothing hand-made
+# existed here — verified against /api/v1/provisioning/policies immediately
+# before the first apply. If someone later builds routing in the UI, this file
+# will replace it.
+policies:
+  - orgId: 1
+    receiver: homelab-email
+    # `server` is in group_by on purpose: the probe rules (#139) carry one
+    # instance per probed URL, and without it two different services failing
+    # would be merged into ONE notification whose subject names only the first.
+    group_by:
+      - grafana_folder
+      - alertname
+      - server
+    # 30s: long enough to batch instances of the same rule that trip together,
+    # short enough that a real outage is not sat on.
+    group_wait: 30s
+    group_interval: 5m
+    # 12h: these are homelab alerts on a mailbox a human reads, not a pager.
+    repeat_interval: 12h
