@@ -355,3 +355,25 @@ the configuration that describes it. The hardest variant is a control that never
 functioned at all: it leaves no regression, no failing run, and no drift, so there is
 nothing to notice and the only defence is verifying a control the first time it is
 introduced.
+
+### Pre-deploy dump
+A backup a service role takes of its own data immediately before handing that data to a
+possibly newer image, so a one-way schema migration always has something to go back to.
+
+Gated on the DATA existing, never on an upgrade being pending: the dump is cheap and
+online, while a wrong gate computation means no backup at all in front of an
+irreversible migration. Fail-safe over-backup is the deliberate trade, which is why a
+routine redeploy legitimately reports work done here and why an idempotency check must
+not chase this task to zero. Scope is the data the migration can destroy — not
+everything that happens to share the same database server.
+
+### Restore drill
+An exercise that proves a backup by restoring it under a scratch identity and comparing
+object counts against the live source, then discarding the copy.
+
+Restoring is not the drill; *counting* is. A restore that aborts partway still leaves a
+database that exists, carries the right owner, and holds nothing — so identity-level
+checks are guaranteed to pass and therefore carry no information. The drill is also
+version-coupled: it reads the backup tool's output format, so a server major-version
+upgrade can silently turn it into a ritual that proves nothing. Re-run it after such an
+upgrade, not only after the backup code changes.
