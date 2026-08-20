@@ -245,12 +245,27 @@ showed.
   sink's timestamp handling is type-sensitive and silently degrades instead of
   erroring — the same "fails at the wrong layer" shape as vector-057's env-var
   interpolation bug, where the pipeline runs clean and only the destination is wrong.
-- The stderr flood was real, but its assumed cause was not. #143 stated it was
-  "self-amplifying" — vector's `docker_logs` source re-ingesting its own noisy
-  stderr. `docker_logs` auto-excludes vector's own container: 7 days of VictoriaLogs
-  held **zero** records with `container_name:vector` and **zero** containing "Failed
-  to render template". Checking it cost one query and prevented fixing the wrong
-  mechanism.
+- The stderr flood was real, but the loop it was said to feed was not happening.
+  #143 stated the flood was "self-amplifying" — vector's `docker_logs` source
+  re-ingesting its own noisy stderr. Measured: over 7 days VictoriaLogs held **zero**
+  records containing "Failed to render template", against control phrases from
+  vector's own stderr that DO return hits ("Capturing logs from now on" → 4,
+  "is being suppressed to avoid flooding" → 18), so the zero is a real absence and
+  not a query artifact. The flood never re-entered the store; there was no loop.
+
+  **The reason is not `docker_logs` self-exclusion** — an earlier draft of this doc
+  said so and was wrong. Vector's own container IS ingested, and self-ingestion
+  began with this change: 77 records with `container_name:vector`, every one under
+  the new `eq12_docker` hostname and split across the two container instances that
+  have existed since the deploy, against **zero** under all seven prior
+  container-ID hostnames. The container still carries its own short id as its
+  hostname (`Config.Hostname=b279c3448027`), so it is not that vector lost the
+  ability to recognise itself. **Why self-ingestion began here was not determined**,
+  and is deliberately left unexplained rather than replaced with a second guess.
+  Volume is trivial (77 records in 7 days, almost all startup lines) and vector's
+  internal flood suppression bounds it, so this is not a regression — but it does
+  mean a future flood WOULD amplify, which is the scenario item 3 was worried about.
+  Recorded in the role README's limitations.
 
 ## Verification
 
@@ -288,6 +303,19 @@ End state proven from the destination's own output, never from container state:
   `hostname` still `eq12_docker`, and `_stream_id` unchanged at
   `0000000000000000ee5a1f009399851b5ed8b7cadf597c8b` across the recreate — the churn
   the issue described is gone, not merely relabelled.
+- **The churn it replaces, measured over the preceding week.**
+  `_time:7d source:docker | stats by (hostname) count()` returns eight values: seven
+  container ids — `7485c2fbc7bc` (280,491 records), `8e3ca0265b10` (201,149),
+  `d7d7d4e8c59e` (106,695), `1c632b6c7513` (29,544), `6ded69366fe8` (4,428),
+  `9bf2af7d7121` (76), `9903f1e0cba7` (69) — plus the single post-change value
+  `eq12_docker`. Seven identities for one host in seven days is what a per-host alert
+  would have had to key on; it is now one, and stable.
+- **Timestamp precision alone distinguishes the two code paths**, without pairing
+  samples. Pre-change `_time` values carry nanoseconds —
+  `2026-08-20T03:39:16.199046817Z`, nine fractional digits, the signature of `now()`.
+  Post-change they carry exactly six — `2026-08-20T04:18:51.312372Z` — matching
+  rsyslog's microsecond timestamp. A record cannot acquire six-digit precision from a
+  nanosecond clock, so the precision is proof the parsed value is the one being used.
 
 ## Prevention
 
@@ -316,6 +344,14 @@ End state proven from the destination's own output, never from container state:
 - **A stated root cause in an issue is a claim, not a given — check it when checking is
   cheap.** The "self-amplifying noise loop" claim cost one query to falsify. The flood
   was still worth fixing; the wrong mechanism would have led to fixing the wrong thing.
+  Check the control case too: a zero result only means "absent" if a phrase you expect
+  to be there does return hits.
+- **Refuting a mechanism is not the same as knowing the real one, and a doc must not
+  blur them.** The first draft of this entry paired the correct measurement (the flood
+  never reached the store) with an invented explanation (`docker_logs` self-excludes) —
+  which a reviewer disproved in one query. `docs/solutions/` is searched *instead of*
+  re-debugging, so a confidently-worded wrong mechanism there is worse than no entry
+  at all. Write "measured, unexplained" and leave it.
 - **A label whose value comes from inside the container answers a question about the
   container.** If the label has to identify a host, inject it from the deploy layer
   and guard it with `${VAR:?}` so a missing value fails the parse instead of labelling

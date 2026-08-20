@@ -173,9 +173,12 @@ transforms:
       # 216 of 245 lines (88%) of its own stderr in 30 minutes (#143 item 3).
       # A conditional object has nothing to fail to render.
       # NOTE, because #143 said otherwise: this was NOT a self-amplifying loop.
-      # Vector's docker_logs source auto-excludes its own container, so none of
-      # those warnings were re-ingested — 7 days of VictoriaLogs held zero records
-      # with container_name:vector. Worth fixing; not for the reason stated.
+      # Zero of those warnings ever reached VictoriaLogs (7 days, and control
+      # phrases from vector's own stderr DO return hits, so the zero is real).
+      # The reason is NOT that docker_logs self-excludes — it does not, and vector's
+      # own stderr IS ingested now; why that started with this change is
+      # undetermined. Do not write a mechanism here that has not been measured.
+      # See the role README's limitations and the docs/solutions entry.
       # Do NOT invent a synthetic container_name for host events: that puts a fake
       # value in a real field.
       labels = {"source": to_string!(.source), "hostname": to_string!(.hostname)}

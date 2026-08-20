@@ -276,7 +276,7 @@ the recovery. The cost is the mirror image: a reset wipes checkpoints, so
 `structured.log` is re-read from its start and up to one logrotate period is
 duplicated.
 
-### Known limitations (three, all deliberate)
+### Known limitations (four, all deliberate)
 
 1. **No kernel or OOM-kill events.** There is no kernel ring buffer in an LXC, so
    `imklog` produces nothing and `/var/log/kern.log` can never exist on this host —
@@ -297,7 +297,21 @@ duplicated.
    building a custom image. Measured 2026-08-18, journal and syslog+auth agreed
    exactly (968 lines each), so today's practical loss is a handful of early-boot
    lines — but it is a real gap, not a solved one.
-3. **Package-audit records carry ingestion time, not line time.** `dpkg.log`,
+3. **Vector now ingests its own container's stderr, and that is new.** Measured after
+   this change: 77 records with `container_name:vector` over 7 days, every one under
+   the new `eq12_docker` hostname, against **zero** under all seven prior container-ID
+   hostnames. `docker_logs` does not self-exclude; why self-ingestion began with this
+   change was not determined, and no guess is recorded here. It is not a regression —
+   the volume is trivial (almost all startup lines) and Vector's own internal flood
+   suppression bounds it — but the consequence matters: **if Vector ever floods its
+   stderr again, it will now amplify**, which is exactly the loop #143 item 3 was
+   worried about (and which, measured, was NOT happening before). Zero of the old
+   label-render warnings ever reached VictoriaLogs.
+   `exclude_containers: ["vector"]` on the `docker_logs` source would stop it, and is
+   deliberately NOT applied: it would also remove Vector's own diagnostics from
+   VictoriaLogs, which is the first place anyone looks when this pipeline misbehaves.
+   Revisit if a real flood occurs.
+4. **Package-audit records carry ingestion time, not line time.** `dpkg.log`,
    `apt/history.log` and the two `unattended-upgrades` logs are not syslog-shaped and
    are tailed directly, so `_time` is when Vector read the line. This is a known
    property, not a defect: on the backfill run all 293 records landed inside a 3.8 ms
