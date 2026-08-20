@@ -38,12 +38,18 @@ The service provides:
 Because a read-write docker socket is root-equivalent on the host, access to the
 UI port is restricted by an Ansible-managed **fail-open nftables table**
 (`inet portainer_fw`, built by the shared `roles/nft_scoped_fw` from the per-port
-allowlist `portainer_fw_ports` in `defaults/main.yml` — #114). Only these sources
-may reach tcp/9000:
+allowlist `portainer_fw_ports` — #114). That allowlist is **per-host** and lives in
+`inventory/host_vars/<host>/vars.yml` (#140); the role default is `{}`, so a host
+that deploys this role without declaring one fails the `nft_scoped_fw` assert
+rather than silently inheriting another host's reverse-proxy IP. Allowed sources
+today:
 
-- `192.168.25.20/32` — NPM LXC (CT 104), reverse-proxy upstream reach
-- `192.168.48.0/24` — operator workstation subnet
-- loopback
+| Host | Sources allowed on tcp/9000 |
+| ---- | --------------------------- |
+| `eq12_docker` (192.168.25.15) | `192.168.25.20/32` — NPM LXC (CT 104), which proxies `portainer.moutovkin.com` -> `deb-docker.lan:9000`; `192.168.48.0/24` — operator workstation subnet |
+| `n5pro_docker` (192.168.30.15) | `192.168.48.0/24` — operator workstation subnet only. NPM has no proxy host for this port (its only n5pro-docker upstream is `lms.moutovkin.com` -> `:9001`), so the inherited NPM grant was removed in #140 |
+
+Loopback is always allowed on both.
 
 Everything else is dropped, including all external IPv6. The table hooks
 `prerouting` at priority `-150` (before Docker's DNAT at `dstnat`/-100): the IPv4

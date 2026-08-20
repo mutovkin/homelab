@@ -60,3 +60,26 @@ observability_firewall:
     # InfluxDB line protocol, tcp AND udp (nft_fw_protocols: [tcp, udp] in the role).
     8089:
       - 192.168.25.10/32  # Home Assistant VM (VM 100, MAC 02:ab:9f:1f:cd:8c)
+
+# Scoped fail-open nftables allowlists for the portainer (#80) and vaultwarden
+# (#81) roles' published ports. Per-host since #140: these used to live in the
+# role defaults, so EVERY host running the role inherited this host's NPM grant.
+# The role defaults are now `{}` — an undeclared host fails the nft_scoped_fw
+# assert instead of silently borrowing another host's proxy IP.
+#
+# The 192.168.25.20/32 grant here is CHOSEN, not inherited: verified 2026-08-19
+# against NPM's own proxy_host table in CT 104 — portainer.moutovkin.com ->
+# deb-docker.lan:9000 and bw/wv.moutovkin.com -> deb-docker.lan:8086, where
+# deb-docker.lan resolves to this host (192.168.25.15).
+#
+# Per-port shape ({port: [source, ...]}, #114): a source approved for one port
+# gets no access to the others. Entries must be IPv4 CIDRs of prefix /1../32
+# (asserted by roles/nft_scoped_fw).
+portainer_fw_ports:
+  9000:
+    - 192.168.25.20/32 # NPM LXC (CT 104) — proxies portainer.moutovkin.com -> deb-docker.lan:9000
+    - 192.168.48.0/24 # operator workstation subnet
+vaultwarden_fw_ports:
+  8086:
+    - 192.168.25.20/32 # NPM LXC (CT 104) — proxies bw/wv.moutovkin.com -> deb-docker.lan:8086
+    - 192.168.48.0/24 # operator workstation subnet
