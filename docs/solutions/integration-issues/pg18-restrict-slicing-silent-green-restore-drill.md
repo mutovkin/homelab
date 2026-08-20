@@ -153,6 +153,16 @@ kept running and kept reporting success while proving nothing.
 - **Never judge a restore by identity.** Count objects — tables, indexes, and at least one
   row count from a real table — and compare against the source. Explicitly ignore
   `pg_database_size`.
+- **Two measurements taken at different times do not measure your change.** The same trap
+  that makes `pg_database_size` a bad comparison key (dead tuples) bites harder across
+  time: this is a live sync server growing ~62 KB/h, so two dumps 20 h apart differ by
+  ~1.27 MB — orders of magnitude more than the ~2 KB the #142 format change was worth.
+  Comparing them and attributing the delta to the change "proves" a regression that does
+  not exist. Compare artifacts captured seconds apart, and predict the drift from a
+  measured rate before believing any residue. Related: a database's `pg_database_size` is
+  mostly catalog and index storage that `pg_dump` never emits — `template1` is 7750 kB on
+  disk and 720 bytes dumped — so sizing a dump from `pg_database_size` is a category
+  error.
 - **Assert your slice anchor is unique before slicing** (`grep -c '^…$'` must be 1). A
   regexp that matches a second, unintended line is the same defect wearing a different
   hat.

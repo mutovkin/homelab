@@ -60,13 +60,33 @@ with was incidental. Two design points that are not stylistic:
   very same restore command creates joplin's tables inside the `postgres` database — a
   silent, plausible-looking wrong restore.
 
-**This narrowing saved no disk, and the commit does not claim it did.** Measured before
-the change: `joplin` 1369 MB of a cluster whose other databases (`template0`,
-`template1`, `postgres`) total ~15 MB — 99.7% joplin. `pg_dump joplin` came out at
-633 MB against `pg_dumpall`'s 632 MB. What it buys is scope (dump what the guard
-protects), decoupling from cluster growth (the day a second service lands in this shared
-postgres, a cluster dump would start dumping it on every routine joplin deploy), and
-restore ergonomics.
+**This narrowing is size-neutral, and the commit does not claim otherwise.** Measured
+2026-08-19 on artifacts taken 32 seconds apart on the same host:
+
+| Artifact | Bytes |
+| -------- | ----- |
+| `pg_dumpall` (the old behaviour), 20:17:55 | 633,247,291 |
+| globals + `pg_dump --create joplin` (this role), 20:18:27 | 633,245,733 |
+| difference | **1,558 bytes smaller** |
+
+~2 KB is the entire achievable saving, and always was. The other databases look
+substantial by `pg_database_size` — `postgres` 7702 kB, `template0` 7678 kB, `template1`
+7750 kB, ~22.6 MiB together — but that is **catalog and index storage, which `pg_dump`
+never emits**. Their dumpable content is `pg_dump template1` = 720 B and
+`pg_dump postgres` = 1,443 B; `template0` has `datallowconn = false` and is skipped
+entirely. 2,163 B of dumpable content in, ~2 KB of saving out.
+
+**Compare the two sizes at the same instant, or you will measure the wrong thing.**
+Joplin is a live sync server: two consecutive dumps from this role, 230 s apart, differ by
+3,968 B — about 62 KB/h. Over a 20.5 h gap that is ~1.27 MB, which dwarfs the ~2 KB the
+format change is worth. Comparing a dump taken today against one from yesterday and
+attributing the delta to the change is exactly how you would "prove" a regression that
+does not exist. (Measured: predicted growth over that gap 1,272,003 B vs actual difference
+1,273,206 B — the growth accounts for 99.9% of it, leaving nothing for the format change.)
+
+What the change actually buys is scope (dump what the guard protects), decoupling from
+cluster growth (the day a second service lands in this shared postgres, a cluster dump
+would start dumping it on every routine joplin deploy), and restore ergonomics.
 
 **The file contains SCRAM password hashes** (in the globals half) and Joplin session
 tokens. `umask 077` / mode `0600` on it is not cosmetic, and it must never be routed
