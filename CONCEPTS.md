@@ -271,6 +271,49 @@ hypervisor reports; only the other one actually builds anything. It follows that
 ordinary converged run says nothing about these fields, so their correctness cannot be
 inferred from the absence of drift — the opposite of how a Reconcile task is verified.
 
+### Inventory-name label
+The identity a per-host signal is tagged with, which is by convention the name the
+inventory uses for that host and not any name the host can discover about itself.
+
+A machine knows several names — its OS hostname, the id of whatever container the
+collector happens to be running in, whatever DNS says — and a collector asked for
+"the hostname" will return one of those. None of them is the name an alert or a
+playbook is written against, and two of them change without anyone editing anything.
+Because the correct value cannot be derived on the host, it is injected from the
+deploy layer and made mandatory there: a missing value must abort the deployment
+rather than resolve to an empty label, since a signal labelled wrongly-but-plausibly
+is harder to notice than one that is missing.
+
+### Structured log stream
+A second, machine-parseable copy of a host's system log, emitted alongside the
+human-facing log files rather than replacing them, because the default file format
+omits fields the collector needs.
+
+It exists for the case where data is not merely hard to extract but absent: the
+routine format drops the priority that carries severity and facility, so no parser
+can recover them and the collector is reduced to asserting a single hardcoded level
+for every record. The human-facing files are deliberately left in their original
+format — they are what an operator reads during an incident — so the two streams
+carry the same messages under different formats, and the collector must read exactly
+one of them or every event is stored twice. Because the stream is a duplicate, its
+growth is bounded on the same rotation cadence as the original.
+
+### Absence-owning rule
+Among several alert rules watching the same signal, the single rule designated to
+fire when the signal stops arriving at all, so that every other rule treats
+no-data as healthy.
+
+Absence and badness are different questions and they are usually answered by
+different queries: a threshold rule sees nothing when a collector dies, and a rule
+written to detect "nothing" must ask a question that still returns rows for a source
+that has gone quiet. Without a designated owner, either every rule treats no-data as
+an alert — so one dead collector pages once per rule — or every rule treats it as
+healthy, and a dead collector is indistinguishable from a healthy system. A separate
+failure mode the owner does not cover is a source that never started: absence
+measured against a signal that has never existed returns nothing and is
+indistinguishable from a mistyped query, so that case has to be watched at the
+receiving end instead, where a counter exists whether or not anyone is writing to it.
+
 ### Blank-credential disable
 A credential whose empty value is read by the consuming software as an instruction to
 switch the protection off, rather than as a malformed value to reject.
