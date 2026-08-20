@@ -45,20 +45,46 @@
 # is not the credential in the vault, and the only symptom is a silent 401.
 #
 # This is the systemd-side twin of #117's compose-dotenv `$` truncation, and it is
-# asserted rather than assumed for the same reason. Note `$` is NOT rejected: inside
-# double quotes systemd does not interpolate, and the task near the end of this file
-# proves that empirically against the running process.
+# asserted rather than assumed for the same reason.
+#
+# THE CHARACTER SET IS MEASURED, and the boundary is "what systemd's parser
+# actually transforms" — not a defensive guess. One probe value through systemd's
+# own EnvironmentFile parser, bytes read back with od -c:
+#
+#   on disk    P_BS="tab\there-nl\nend-lit\qX-dq\"Y-bs\\Z"
+#   systemd -> tab\there-nl\nend-lit\qX-dq"Y-bs\Z
+#
+# So: `\t`, `\n`, `\q` pass through UNTOUCHED — systemd does not do C-escape
+# expansion, which refutes the plausible-sounding worry that a rotated password
+# containing `\n` becomes a newline. But `\"` collapsed to `"` and `\\` collapsed
+# to `\`, so a BACKSLASH is consumed when it escapes a quote or another backslash.
+# Hence backslash is rejected here alongside `"`, CR and LF.
+#
+# `$` and backticks are deliberately NOT rejected. systemd does not interpolate
+# inside double quotes (measured: a value containing $HOME and a backtick came
+# back literal), and nothing but systemd parses this file — the pre-flight
+# validate runs through `systemd-run --property=EnvironmentFile=`, never a shell.
+# Rejecting them would constrain the operator's password choice to defend against
+# a parser this role does not use.
+#
+# NONE OF THIS IS THE REAL GUARANTEE. The character class only covers mangling
+# someone thought to look for; the /proc/<pid>/environ digest assert near the end
+# of this file compares what the running process holds against the vault value
+# byte for byte, and catches mangling from any cause. Do not weaken that one.
 #
 # Value never prints: quiet:true, and the failure names the variable.
 - name: Assert the VictoriaLogs credentials are representable in a systemd EnvironmentFile
   ansible.builtin.assert:
     that:
-      - lookup('vars', item, default='') | string is not search('["\r\n]')
+      - lookup('vars', item, default='') | string is not search('["\r\n\\\\]')
     fail_msg: >-
-      {{ item }} contains a double quote or a newline. /etc/vector/vector.env is a
-      systemd EnvironmentFile whose values are double-quoted, so such a value would
-      be silently mangled and Vector would 401 against VictoriaLogs while staying
-      up. Rotate the credential to one without those characters.
+      {{ item }} contains a double quote, a newline or a backslash.
+      /etc/vector/vector.env is a systemd EnvironmentFile whose values are
+      double-quoted, and systemd's parser transforms all three: a `"` truncates or
+      swallows the rest of the line, a newline starts a new assignment, and a
+      backslash is consumed when it escapes a quote or another backslash. Vector
+      would then 401 against VictoriaLogs while staying up. Rotate the credential
+      to one without those characters — `$` and backticks ARE allowed.
     quiet: true
   loop:
     - vault_vl_auth_username

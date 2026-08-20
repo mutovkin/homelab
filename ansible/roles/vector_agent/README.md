@@ -108,10 +108,12 @@ nothing is the default failure mode here.
 
 One hard constraint, asserted before anything is written:
 **`vault_vl_auth_username` and `vault_vl_auth_password` may not contain a double
-quote, CR or LF.** Those break the *file format* — values are double-quoted, so a
-`"` truncates or swallows the rest of the line and a newline reads as the start of
-a new assignment. The result would be a credential Vector holds that is not the
-credential in the vault, with a silent 401 as the only symptom.
+quote, CR, LF or backslash.** Those are the characters systemd's own env-file
+parser transforms — values are double-quoted, so a `"` truncates or swallows the
+rest of the line, a newline reads as the start of a new assignment, and a
+backslash is consumed when it escapes a quote or another backslash (measured
+below). The result would be a credential Vector holds that is not the credential
+in the vault, with a silent 401 as the only symptom.
 
 Everything else is allowed, **including `$` and backticks**, and that is a
 deliberate property rather than an omission. systemd does not interpolate inside
@@ -127,6 +129,37 @@ because nothing but systemd ever parses the file:
 If you ever add a second reader of `/etc/vector/vector.env`, it must use systemd's
 parser. Sourcing it from bash expands `$VAR` and **executes backticks as root** —
 measured, not theorised.
+
+#### What about backslash?
+
+Measured too, because "systemd honours C-style escapes" is a plausible-sounding
+claim that turns out to be only half right. One value through systemd's own
+parser, bytes read back with `od -c`:
+
+```
+on disk    P_BS="tab\there-nl\nend-lit\qX-dq\"Y-bs\\Z"
+systemd -> tab\there-nl\nend-lit\qX-dq"Y-bs\Z
+```
+
+`\t`, `\n` and `\q` come through **completely untouched** — systemd does *not* do
+C-escape expansion on them, which refutes the "a rotated password containing `\n`
+could be silently turned into a newline" concern. But `\"` collapsed to `"` and
+`\\` collapsed to `\`: systemd *does* consume a backslash used to escape a quote
+or another backslash.
+
+A backslash is therefore mangle-able, so it is rejected alongside `"`, CR and LF.
+That is not hardening against a hypothetical — it is the parser we actually use,
+demonstrably transforming the value.
+
+#### The thing that actually guarantees the credential arrived intact
+
+Not the character class. **The `/proc/<pid>/environ` digest assert.** The character
+rules only cover the mangling someone thought to look for; the digest compares what
+the running Vector process holds against the vault value byte for byte, so it
+catches mangling from *any* cause — a parser change in a future systemd, a
+templating bug, a character nobody considered. If you are ever tempted to relax or
+extend the character class, that digest assert is the control that must not be
+touched.
 
 ## Verification the role performs on every run
 
