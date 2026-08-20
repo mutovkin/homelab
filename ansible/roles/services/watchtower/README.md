@@ -157,8 +157,11 @@ exists to defend against. Do not "correct" it to match the image reference.
 
 To bump (the release-watch job above tells you when): edit the tag in
 `files/compose.yaml`, update the digest in the comment above it, then
-`task deploy:service -- --tags watchtower` and confirm the next session still reports the
-expected `scanned=N`. (Digest-pinning instead of a tag was considered and not taken: it
+`task deploy:service -- --tags watchtower`, confirm the next session still reports the
+expected `scanned=N`, **and run the delivery probe below on every host** — a bump can
+break notification delivery while leaving the container healthy, and that failure is
+invisible until an update you needed to hear about goes unreported (#145). Record both
+results in the bump log. (Digest-pinning instead of a tag was considered and not taken: it
 costs readability and `monitor-only` already prevents the unattended path. A deliberate
 deploy would still adopt a re-pushed `1.21.0`.)
 
@@ -166,7 +169,7 @@ deploy would still adopt a re-pushed `1.21.0`.)
 
 | Date | From → To | Notes |
 | ---- | --------- | ----- |
-| 2026-08-19 | 1.20.3 → 1.21.0 | First bump driven by the release-watch job, which went red the day it landed. Release delta is fixes plus one behavioural change worth knowing: **logging moved from logrus to zerolog** (#2128), so log *format* changed — the `Update session completed … scanned=N` line survives it (re-verified by probe on both hosts), but anything parsing watchtower logs by shape should be re-checked. Notification field validation was tightened (#2124) and shoutrrr went to v0.17.1; our `smtp://` URL still starts clean. No change to `enable` / `monitor-only` / `WATCHTOWER_LABEL_ENABLE` semantics, so the posture model above is untouched. |
+| 2026-08-19 | 1.20.3 → 1.21.0 | First bump driven by the release-watch job, which went red the day it landed. Release delta is fixes plus one behavioural change worth knowing: **logging moved from logrus to zerolog** (#2128), so log *format* changed — the `Update session completed … scanned=N` line survives it (re-verified by probe on both hosts), but anything parsing watchtower logs by shape should be re-checked. Notification field validation was tightened (#2124) and shoutrrr went to v0.17.1; our `smtp://` URL still starts clean. No change to `enable` / `monitor-only` / `WATCHTOWER_LABEL_ENABLE` semantics, so the posture model above is untouched. **Delivery probed 2026-08-20 03:24–03:25 UTC on BOTH hosts (#145)** — one real mail each, `Mail successfully sent`, probe exit 0, `scanned=12`/`scanned=3` matching the labelled counts, no live container touched. Startup-message forcing worked on both; the session-report path rendered an empty message on n5pro_docker and was skipped, which is exactly why the probe must not rely on it. |
 
 ### Verification
 
@@ -208,6 +211,80 @@ Two things make this safe and repeatable:
 - `--monitor-only` guarantees the probe updates nothing, whatever the labels say. It is a
   read-only count. `--rm` and the missing `enable` label on the probe itself keep it out
   of its own scan.
+
+#### Prove notification DELIVERY, not just URL validity (#145)
+
+**Validation passing is not delivery.** The scan-scope probe above, and a healthy
+container with `RestartCount 0`, prove only that the `smtp://` URL *parses* — a malformed
+URL fails fast at startup. They say nothing about whether a message arrives. And the
+routine scan cannot tell you either: watchtower's report-mode template renders an **empty**
+message when nothing was updated or failed, and an empty message is skipped, so at
+`updated=0` no send is attempted at all. A notification that never arrives is
+indistinguishable from "nothing needed updating".
+
+That matters most for the `monitor-only` class, where the email **is** the update
+mechanism — there is no auto-apply to fall back on. Run this after every version bump,
+on every host:
+
+```bash
+# Take the URL from the RUNNING container — that is the value watchtower actually uses.
+# Exported and passed as a bare `-e NAME` pass-through, so it never enters the argv.
+export WATCHTOWER_NOTIFICATION_URL=$(docker inspect watchtower \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's/^WATCHTOWER_NOTIFICATION_URL=//p')
+[ -n "$WATCHTOWER_NOTIFICATION_URL" ] || { echo "no URL on the running container"; exit 1; }
+
+docker run --rm \
+  --security-opt apparmor=unconfined \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e WATCHTOWER_NOTIFICATION_URL \
+  nickfedor/watchtower:1.21.0 \
+  --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1 \
+  | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
+```
+
+**How it forces a send at `updated=0`:** production sets
+`WATCHTOWER_NO_STARTUP_MESSAGE=true`; the probe simply omits it, so watchtower queues its
+startup notification and flushes it through shoutrrr at shutdown. That path does **not**
+depend on the report template rendering anything — which is the point. Measured on
+2026-08-20, the report path behaved differently on the two hosts (`msg_length=54` on
+eq12_docker, `msg_length=0` and `Message empty, skipping send` on n5pro_docker) and yet
+both hosts sent exactly one mail. A probe built on the report template would have proved
+delivery on one host and silently proved nothing on the other.
+
+The invariants are not optional:
+
+- `--security-opt apparmor=unconfined` — required on these Docker-in-LXC hosts; without
+  it the probe will not start.
+- `--monitor-only` — the probe can never update anything, whatever the labels say.
+- `--rm`, and no `watchtower.enable` label on the probe, so it is discarded and stays out
+  of its own scan.
+- **Redact every captured line before it is written to a file, pasted, or quoted.** The
+  URL is a live mail credential and `--debug` is verbose.
+
+**Do NOT use `--env-file /data/deploy/watchtower/.env`.** That file writes every value
+single-quoted on purpose (#117 — compose dotenv interpolates `$` in unquoted values).
+Compose's dotenv parser strips those quotes; **the docker CLI's `--env-file` parser does
+not.** shoutrrr would receive a URL wrapped in literal `'…'`, fail to parse it, and you
+would misdiagnose a quoting bug as a shoutrrr regression.
+
+What counts as evidence, in order of strength:
+
+1. `Mail successfully sent to "…"!` — shoutrrr's own positive confirmation. This is what
+   to look for; the 1.21.0 build does print it.
+2. `Notification send completed successfully … total_urls=1` and a probe exit code of 0.
+3. `Update session completed … scanned=N` with N equal to the labelled count.
+
+"No `Failed to send notification` line" is **weaker** evidence than a positive
+confirmation and must never be written up as if it were the same thing.
+
+Finally: the probe proves the **send side**. Delivery is only fully confirmed once the
+mail is seen in the destination inbox — note the UTC timestamp and host of each probe so
+they can be matched there. If the probe reports a send failure, this stops being a docs
+question: read shoutrrr's changelog for percent-encoding / auth-field handling changes and
+compare against the URL *shape* in `templates/env.j2` (never a rendered value). Changing
+`env.j2` re-templates a secret-bearing file on every host and needs a deploy — and never
+run `--diff` on a play that templates it.
 
 A monitor-only service with a pending update shows up as a notification email and **no**
 container change. If a container you expected to see is missing from `scanned=N`, it is
