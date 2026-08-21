@@ -79,8 +79,14 @@ table inet {{ nft_fw_name }}_fw {
 {% endfor %}
 {% endif %}
     # Any other source reaching a governed port is dropped.
+{% if nft_fw_count_drops %}
+    # `counter` here is OBSERVABILITY, not proof (#134): it says a packet matched
+    # this rule, never that a blocked source exists to produce one. A counter of 0
+    # reads identically to "nothing ever tried". Verify a narrowing from a blocked
+    # source; use these to see the rule still firing after a reload.
+{% endif %}
 {% for proto in nft_fw_protocols %}
-    {% if nft_fw_scope_guard == 'host_addr' %}ip daddr {{ nft_fw_host_addr }} {% endif %}{{ proto }} dport { {{ nft_fw_ports.keys() | join(', ') }} } drop
+    {% if nft_fw_scope_guard == 'host_addr' %}ip daddr {{ nft_fw_host_addr }} {% endif %}{{ proto }} dport { {{ nft_fw_ports.keys() | join(', ') }} } {% if nft_fw_count_drops %}counter {% endif %}drop
 {% endfor %}
   }
 }

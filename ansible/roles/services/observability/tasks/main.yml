@@ -77,6 +77,11 @@
     # is non-local and exits before the drop.
     nft_fw_scope_guard: fib
     nft_fw_lan_iface: "{{ observability_firewall.lan_iface }}"
+    # Opt in to drop counters on THIS table only (#134). Scoped to this consumer
+    # so the other four scoped firewalls keep byte-identical .nft files and do not
+    # reload for a diagnostic this batch wanted. See the variable's comment in
+    # roles/nft_scoped_fw/defaults/main.yml for why a counter is not evidence.
+    nft_fw_count_drops: true
 
 - name: Stat Docker socket
   ansible.builtin.stat:

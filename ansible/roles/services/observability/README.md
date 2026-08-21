@@ -293,6 +293,25 @@ identities: changing one re-points every dashboard and alert that uses it.
 
 ## Firewall (:8089 and :9428)
 
+### Port manifest — what is governed, what is open, and why
+
+Every port this stack publishes, with its posture stated explicitly. The point of
+the table is that "not in the allowlist" is a **decision with a reason**, never an
+oversight — an ungoverned port here has been looked at and left open on purpose.
+
+| Port | Posture | Auth | Why |
+| ---- | ------- | ---- | --- |
+| **8089** VM InfluxDB | **governed** (tcp+udp) | **none** — `--httpAuth` guards `:8428` only | An unauthenticated *write* endpoint. Nothing but the allowlist stands between the LAN and it (#122). |
+| **9428** VictoriaLogs | **governed** (tcp+udp) | basic, cleartext | Became a fleet ingest endpoint in #134: machine-to-machine writes, on a schedule, carrying cleartext credentials. The allowlist is the compensating control until TLS lands. |
+| **8428** VictoriaMetrics | open | basic, cleartext | Authenticated read surface. Same credential-over-cleartext class as `:9428` **minus** the scheduled machine traffic. Its client set has not been established the way `:9428`'s was; narrowing it needs the same NPM-table check and its own blocked-source proof. Tracked separately. |
+| **3000** Grafana | open | admin user/password | Authenticated UI, reached by humans and by NPM. Same reasoning as `:8428`. |
+
+The asymmetry between `:9428` and `:8428` is deliberate and is the whole content
+of this table: they carry the same class of credential, and only one of them
+changed what kind of traffic it receives. Do not extend the `:9428` allowlist to
+the other two by analogy — establish their clients first.
+
+
 `--influxListenAddr=:8089` is an **unauthenticated write endpoint** on TCP *and*
 UDP — `--httpAuth.username/password` guards `:8428` only. Its one intended client is
 the Home Assistant VM, so the role installs a scoped nftables table
@@ -364,7 +383,18 @@ ssh root@192.168.25.15 'nft list table inet observability_fw'   # read-only chec
 ```
 
 Verify from a **blocked** source, not an allowed one — an allowed source proves
-nothing about the drop rule.
+nothing about the drop rule. Two traps here, both real:
+
+- **This repo's operator workstations are inside `192.168.48.0/24`, which is on the
+  allowlist.** A `curl` from the machine running Ansible is an *allowed* source and
+  proves nothing. The blocked source used for `:9428` was the **Home Assistant VM**
+  (`192.168.25.10`), reached over the hypervisor console — it is granted `:8089`
+  only, so it exercises the per-port shape at the same time.
+- **The drop rules carry a `counter` (`nft_fw_count_drops`), and a counter is not
+  the proof.** It shows a packet *matched* the rule, not that a blocked source
+  exists to generate one; a counter sitting at 0 reads exactly like a rule nothing
+  ever tried to traverse. Use it to confirm the rule keeps firing after later
+  reloads, never as the verification itself.
 
 ## Log record schema
 
