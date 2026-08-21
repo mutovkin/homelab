@@ -412,16 +412,22 @@
 #
 #  1. WRONG USER. The play is `become: true` and ansible.cfg sets
 #     become_user=root, so the validate ran as root while the unit runs as
-#     User=vector. --skip-healthchecks disables only the HEALTH checks; the
-#     COMPONENT checks still build the topology, which builds the sink, which
-#     opens its `buffer: {type: disk}` under data_dir=/var/lib/vector. A root
-#     validate can therefore create the buffer ledger root-owned in a directory
-#     the .deb's preinst made vector:vector — and the very next task starts the
-#     unit as vector, whose own ExecStartPre opens that ledger read-write and
-#     gets EACCES. On a converged host the same thing drops root-owned files into
-#     a healthy buffer, which is the wedged-buffer runbook's failure. Beyond the
-#     specific mechanism: a pre-flight that runs as a different user than the unit
-#     is not validating what will run.
+#     User=vector.
+#
+#     HONEST CORRECTION, because the first version of this comment claimed more
+#     than was true: it predicted that a root validate would create the disk
+#     buffer ledger root-owned under data_dir=/var/lib/vector, and that the unit
+#     would then fail with EACCES. MEASURED on n5pro_docker, that does NOT happen
+#     — `vector validate --skip-healthchecks` leaves /var/lib/vector completely
+#     empty and still vector:vector, before and after. The predicted mechanism is
+#     refuted; do not repeat it as fact.
+#
+#     What stands is the principle, which is enough on its own: a pre-flight that
+#     runs as a different user than the unit is not validating what will run. Any
+#     permission-shaped difference — a config file mode, a data_dir, a socket —
+#     would be invisible to a root rehearsal and would surface only when the unit
+#     starts. Reason 2 below is the one that was measured, and it is the one that
+#     makes this non-negotiable.
 #
 #  2. WRONG PARSER, and this one is a root code-execution path. /etc/vector/vector.env
 #     is written for SYSTEMD's grammar, in which a double-quoted value is literal.
@@ -462,11 +468,25 @@
       - --property=Group=vector
       - --property=EnvironmentFile=/etc/vector/vector.env
       - /usr/bin/vector
+      # `validate` takes the config path POSITIONALLY. There is no --config on
+      # this SUBCOMMAND, and passing one is a hard `error: unexpected argument
+      # '--config' found` — measured on n5pro_docker, where it failed the first
+      # real apply. `vector --config <path>` (the TOP-LEVEL command, as used by
+      # ExecStart) does exist, which is exactly what makes the mistake easy:
+      #   vector          --config <path>     valid   (-c)
+      #   vector validate --config <path>     INVALID (positional [PATHS]...)
+      # Read off the binary: `vector validate --help` -> `Usage: vector validate
+      # [OPTIONS] [PATHS]...`.
       - validate
       - --skip-healthchecks
-      - --config
       - /etc/vector/vector.yaml
   changed_when: false
+  # NOT PROVABLE BY --check, and that is structural rather than an oversight:
+  # this task validates a file that only exists after a real apply, so a dry run
+  # skips it entirely. It is therefore in the class of task whose first execution
+  # is its first test — which is precisely how the --config bug above reached a
+  # live host. When editing this invocation, verify it against the binary on a
+  # host, not against a dry run.
   when: not ansible_check_mode
 
 # UNGATED on purpose — no `changed` condition, exactly like the "Ensure rsyslog is

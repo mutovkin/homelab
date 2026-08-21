@@ -75,8 +75,19 @@ EnvironmentFile=/etc/vector/vector.env
 # from the start preconditions. The sink's own runtime healthcheck stays enabled —
 # it logs, it does not block.
 ExecStartPre=
-ExecStartPre=/usr/bin/vector validate --skip-healthchecks --config /etc/vector/vector.yaml
+ExecStartPre=/usr/bin/vector validate --skip-healthchecks /etc/vector/vector.yaml
 
+# NOTE THE ASYMMETRY between the two lines below, because it is a real trap and
+# it cost this batch a failed apply on n5pro_docker:
+#   ExecStartPre  vector validate <path>            POSITIONAL — there is no
+#                                                   --config on the subcommand
+#   ExecStart     vector --config <path>            the TOP-LEVEL flag, -c, which
+#                                                   does exist
+# `vector validate --config <path>` fails hard with `unexpected argument`, so an
+# ExecStartPre written that way makes the unit permanently unstartable. Verified
+# against the binary: `vector validate --help` -> `Usage: vector validate
+# [OPTIONS] [PATHS]...`.
+#
 # The base unit's ExecStart is a bare `/usr/bin/vector` with no --config. That
 # happens to resolve to the same file, but the two Exec lines must not be able to
 # disagree about which config was validated and which one is running.
