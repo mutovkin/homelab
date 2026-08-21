@@ -869,17 +869,93 @@
     - vector_agent_docker_logs | bool
     - not ansible_check_mode
 
-# QUESTION 2: is Vector actually STORING container records? Group membership is
-# necessary, not sufficient — the same "assert the data arrived, not that the
-# process is running" rule the host proof follows, applied to the one source the
-# host proof cannot see.
+# QUESTION 2: is Vector actually STORING container records?
 #
-# No unique marker here, unlike the host proof: producing one would mean starting
-# a throwaway container on a live host. This asserts on ORGANIC volume in a
-# 15-minute window instead. CT 201's three containers (lms, portainer, watchtower)
-# log continuously enough for that today. If a future quieter fleet makes 15m
-# marginal, WIDEN the window and record the measurement here — do not delete the
-# check.
+# THIS ASSERT USED TO BE WRONG, in the same way the alert rule this batch
+# rebuilt was wrong, and the two mistakes are worth reading together.
+#
+# It required `source:docker` records in a 15-minute window, unconditionally.
+# That asserts CONTINUOUS CONTAINER TRAFFIC, which this host does not have.
+# Measured on n5pro_docker: lms, portainer and watchtower produced 0 log lines
+# between them over 20 minutes. lms serves music without logging, portainer is an
+# idle un-initialised UI (#149), and watchtower speaks once a day at 04:30. Zero
+# `source:docker` records is the CORRECT state here, not a defect — so the assert
+# failed a healthy deploy.
+#
+# That is exactly the category error behind obs-host-log-ingest-stalled: inferring
+# liveness from incidental traffic on a quiet subject. The same batch made it
+# twice, once in an alert rule and once here, and the second instance was only
+# found because the first had taught us to look. Note the old fail_msg even NAMED
+# this case — "if every container really has been silent this is a false alarm,
+# but VERIFY that rather than assuming it" — and then asserted anyway. Documenting
+# a failure mode is not the same as handling it.
+#
+# THE FIX IS TO MEASURE THE PREMISE, not to delete the check. The docker path
+# genuinely needs proving, and the Groups assert above only proves CAPABILITY (the
+# process holds the gid) rather than DELIVERY. So: ask Docker whether anything
+# actually logged, and require records only if something did.
+#
+# WINDOW ASYMMETRY IS DELIBERATE: Docker is queried over 10m, VictoriaLogs over
+# 15m. The larger store-side window strictly contains the smaller source-side one,
+# so a line that Docker reports cannot fall outside the window we search — which
+# would otherwise be a race that fails a healthy deploy at the boundary. Never
+# make these equal.
+#
+# TWO ALTERNATIVES CONSIDERED AND REJECTED, both on measurement rather than taste:
+#
+#   * "Assert the docker_logs source is connected/healthy instead of that events
+#     arrived." There is no positive signal to assert on. Vector's journal on this
+#     host contains ZERO docker_logs lines — not at startup, not while watching
+#     three containers. Only absence-of-error is available, which is rung 2 on the
+#     evidence ladder in
+#     docs/solutions/conventions/prove-notification-delivery-not-just-config-validity.md
+#     and must not be written up as delivery. (Vector's internal metrics WOULD give
+#     rung 3 — component_received_events_total for the source — but that needs the
+#     internal API enabled, which is its own change. Filed as a follow-up.)
+#
+#   * "Emit a synthetic line into a container, like the heartbeat." Measured and
+#     impossible in its cheap form: `docker exec <c> echo MARKER` output does NOT
+#     reach the container's log stream — only PID 1's stdout/stderr is captured, so
+#     `docker logs` showed 0 matches for the probe string. Doing it properly means
+#     RUNNING A THROWAWAY CONTAINER on a production docker host on every deploy,
+#     which buys a phantom container_name in the log store and a hard dependency on
+#     some image staying present. Too much machinery for a deploy gate.
+- name: Measure whether any container on this host has logged recently
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      total=0
+      for c in $(docker ps -q); do
+        # 2>&1 is REQUIRED, not sloppiness: `docker logs` interleaves the
+        # container's stdout AND stderr, plenty of containers log only to
+        # stderr, and Vector's docker_logs captures both. Counting stdout
+        # alone would under-report and skip the assert on a host that is
+        # genuinely talking.
+        #
+        # But a FAILED `docker logs` also writes to stderr, and counting its
+        # error text as container traffic would flip this gate the wrong way —
+        # demanding records on a host that produced none. So the exit status is
+        # checked and a failure counts as zero, which errs toward the loud skip
+        # rather than toward a false failure.
+        if out=$(docker logs --since 10m "$c" 2>&1); then
+          if [ -n "$out" ]; then
+            n=$(printf '%s\n' "$out" | wc -l)
+          else
+            n=0
+          fi
+        else
+          n=0
+        fi
+        total=$((total + n))
+      done
+      echo "$total"
+    executable: /bin/bash
+  register: vector_agent_docker_output
+  changed_when: false
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+
 - name: Wait for container log records from this host to reach VictoriaLogs
   ansible.builtin.uri:
     url: "{{ victorialogs_query_endpoint }}"
@@ -902,6 +978,7 @@
   when:
     - vector_agent_docker_logs | bool
     - not ansible_check_mode
+    - vector_agent_docker_output.stdout | int > 0
 
 - name: Assert container log records from this host actually reached VictoriaLogs
   ansible.builtin.assert:
@@ -909,20 +986,38 @@
       - vector_agent_docker_ingest.status | default(0) == 200
       - (vector_agent_docker_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
     fail_msg: >-
-      VictoriaLogs holds ZERO `source:docker` records for
-      hostname={{ inventory_hostname }} in the last 15 minutes, while host records
-      from the same Vector are arriving (the assert above passed). The process, the
-      credential and the sink are therefore all fine and the docker_logs source
-      specifically is not producing. Check, in order:
+      Docker reports {{ vector_agent_docker_output.stdout | default('?') }} container
+      log lines on {{ inventory_hostname }} in the last 10 minutes, but VictoriaLogs
+      holds ZERO `source:docker` records for it in the last 15. So there IS traffic
+      and it is not arriving — this is not the quiet-host false alarm, it is a real
+      break in the docker path. Host records from the same Vector are arriving (the
+      assert above passed), so the process, the credential and the sink are all fine.
+      Check, in order:
       (1) `journalctl -u vector -n 100` for permission-denied or connection errors
           against /var/run/docker.sock;
       (2) `ls -l /var/run/docker.sock` and compare its group to the effective
-          groups asserted above;
-      (3) `docker ps` — if every container on this host really has been silent for
-          15 minutes this is a false alarm, but VERIFY that rather than assuming
-          it.
+          groups asserted above.
       HTTP status was {{ vector_agent_docker_ingest.status | default('none') }}.
     quiet: true
   when:
     - vector_agent_docker_logs | bool
     - not ansible_check_mode
+    - vector_agent_docker_output.stdout | int > 0
+
+# LOUD, not silent. A skipped check that reads as a pass is how an unproven path
+# gets mistaken for a verified one — so when the premise is absent, SAY the docker
+# path was not exercised rather than letting a green run imply it was.
+- name: Report that the docker log path was NOT exercised this run
+  ansible.builtin.debug:
+    msg: >-
+      DOCKER PATH NOT PROVEN THIS RUN. Every container on {{ inventory_hostname }}
+      was silent for the last 10 minutes (0 log lines across `docker ps`), so there
+      was nothing for Vector to ship and the delivery assert was skipped rather than
+      failed. What IS still proven: the vector process holds the docker gid in its
+      effective groups (asserted above). What is NOT proven: that events actually
+      traverse the socket to VictoriaLogs. If you need that proven on demand, the
+      cheapest honest way is to make a container talk — e.g. restart one and re-run.
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+    - vector_agent_docker_output.stdout | int == 0
