@@ -113,6 +113,40 @@ groups:
       # on this host, so host ingestion can go to exactly zero and that rule stays
       # Normal forever. This is the per-source twin, and it is also precisely the
       # per-host recency rule #134 needs — one host at a time.
+      # ============================ PAUSED, DELIBERATELY ============================
+      # STOPGAP (#134). This rule flapped for ~21 hours and paged a human roughly
+      # every 30 minutes. It is paused, not deleted and not widened, until the
+      # heartbeat lands — at which point it is unpaused in the SAME change, so the
+      # fleet never sits in a state where the rule exists but means nothing.
+      #
+      # WHY IT FLAPS, measured 2026-08-20 rather than guessed:
+      #   host          empty 10m windows      max gap
+      #   eq12_docker   66.2% (VL: 68.1%)      3600.0s
+      #   eq12          39.7%                  3600.0s
+      #   n5pro          0.0%                   448s
+      #   n5pro_docker   0.0%                   396s
+      # `_time:10m source:host | count() < 1` is therefore TRUE about two-thirds of
+      # the time on this very host, in perfect health. The rule is not detecting a
+      # stall; it is detecting that host logs arrive in BURSTS with long silences
+      # between them (one 10m bucket held 1288 records, another held 1).
+      #
+      # WHY NOT JUST WIDEN THE WINDOW. Because the max gap on both offending hosts
+      # is EXACTLY 3600.0s — that is not headroom, it is a single incidental hourly
+      # event holding the window open (on eq12_docker: recurring dockerd
+      # "failed to validate image signature" ERRORS). A 60m window would be one
+      # bugfix away from flapping again, and would cost ~70 min of detection
+      # latency for the privilege.
+      #
+      # THE REAL FIX is a heartbeat: every host emits a marker every 5 minutes, so
+      # absence becomes unambiguous instead of being indistinguishable from a quiet
+      # host. That also REPAIRS this rule rather than retiring it — a guaranteed
+      # floor of ~2 records per 10m per host makes `count() < 1` meaningful again,
+      # which is exactly why it gets unpaused rather than deleted.
+      #
+      # Note the sibling rule above (obs-log-ingest-stalled, ALL sources) is NOT
+      # affected and stays live: measured over the same 24h it had ZERO empty 5m
+      # buckets with a MINIMUM of 88 records per bucket — an ~88x margin, not a 1x
+      # one. Docker traffic is genuinely continuous. Do not pause it by analogy.
       - uid: obs-host-log-ingest-stalled
         title: Host log ingest stalled
         condition: C
@@ -121,7 +155,7 @@ groups:
         # absence, "no data" IS the failure, not the healthy case.
         noDataState: Alerting
         execErrState: Alerting
-        isPaused: false
+        isPaused: true
         annotations:
           summary: No host syslog lines reached VictoriaLogs in the last 10 minutes.
           description: >-
