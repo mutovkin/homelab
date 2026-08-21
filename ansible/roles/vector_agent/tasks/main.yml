@@ -308,6 +308,67 @@
   register: vector_agent_pkg
   when: not vector_agent_preview_only
 
+# --- Can the vector user actually READ its one input? (#134) -------------------
+# THE FAILURE THIS REPLACES took two minutes to surface and pointed nowhere
+# useful. Vector was `active`, the unit was green, rsyslog was writing the file,
+# the network was fine — and the ingest assert at the end of this role timed out
+# with "no records arrived", which is true but says nothing about why.
+#
+# The cause was a permission mismatch that exists ONLY in the native deployment
+# shape: the container on eq12_docker reads the file as root through a bind
+# mount, while the agent runs as User=vector. On Ubuntu, rsyslog drops privileges
+# and could not satisfy the drop-in's old fileOwner="root", so the file landed
+# `syslog:syslog` and vector — which is in `adm`, not `syslog` — got EACCES.
+#
+# This check turns that into an instant, precise failure. It runs as the REAL
+# user with the REAL supplementary groups (systemd applies the group database
+# under User=, measured: vector gets gid 4/adm), and it READS A BYTE rather than
+# testing permission bits, so it cannot be fooled by anything `test -r` would
+# miss. Placed after the package install because the vector user is created by
+# the .deb's preinst, and after the rsyslog include because the file must exist.
+- name: Check that the vector user can read the structured stream
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-run
+      - --pipe
+      - --wait
+      - --collect
+      - --quiet
+      - --property=User=vector
+      - --property=Group=vector
+      - /bin/sh
+      - -c
+      - head -c 1 /var/log/structured.log >/dev/null
+  register: vector_agent_readable
+  changed_when: false
+  failed_when: false
+  when:
+    - not vector_agent_preview_only
+    - not ansible_check_mode
+
+- name: Assert the structured stream is readable by the vector user
+  ansible.builtin.assert:
+    that:
+      - vector_agent_readable.rc == 0
+    fail_msg: >-
+      The `vector` user cannot READ /var/log/structured.log on
+      {{ inventory_hostname }}, which is the only host-log input this agent has.
+      Vector would start, stay `active`, log `Permission denied (os error 13)`
+      every couple of seconds, and ship nothing — a green deploy over a dead
+      pipeline.
+      Check `stat -c '%U:%G %a' /var/log/structured.log` against `id vector`.
+      Expected: group `adm`, mode 0640, and vector in `adm`. The owner differs by
+      packaging and that is fine — root on Debian, syslog on Ubuntu.
+      If the group is wrong, the drop-in must not be asking for a fileOwner the
+      local rsyslog cannot set: on Ubuntu rsyslog drops privileges to `syslog`
+      and a chown to root fails, taking the requested group down with it. See
+      roles/rsyslog_structured/files/rsyslog-vector-structured.conf.
+      systemd-run said: {{ vector_agent_readable.stderr | default('') | trim }}
+    quiet: true
+  when:
+    - not vector_agent_preview_only
+    - not ansible_check_mode
+
 # --- Docker socket access (n5pro_docker only) --------------------------------
 # The `vector` user is created by the package's preinst, so this can only run after
 # the install above.

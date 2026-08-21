@@ -176,6 +176,39 @@
     quiet: true
   when: not ansible_check_mode
 
+# --- Repair an already-created stream (#134) -----------------------------------
+# THE CONVERGENCE GAP, and it is real rather than theoretical: rsyslog's
+# fileOwner/fileGroup settings apply ONLY at create time. Fixing the drop-in does
+# nothing for a file that already exists, so a host that was deployed before the
+# fix keeps a stream Vector cannot read, forever, while every task reports ok.
+# That is exactly what happened on n5pro_docker: the file was created
+# `syslog:syslog` by an earlier run and stayed that way after the conf was
+# corrected.
+#
+# Ordered AFTER the freshness probe on purpose — by that point the file is proven
+# to exist and to be actively written, so there is no create-vs-repair race and no
+# risk of this task conjuring an empty root-owned file that rsyslog then cannot
+# use.
+#
+# `state: file` never creates; group only, so each host keeps its own owner (root
+# on Debian, syslog on Ubuntu). Idempotent: reports changed only when the group is
+# actually wrong. Rotated copies are deliberately not touched — Vector's file
+# source includes the live path only, with no glob.
+- name: Stat the structured stream before repairing its group
+  ansible.builtin.stat:
+    path: /var/log/structured.log
+  register: vector_structured_stat
+  when: not ansible_check_mode
+
+- name: Repair the group of an already-created structured stream
+  ansible.builtin.file:
+    path: /var/log/structured.log
+    group: adm
+    state: file
+  when:
+    - not ansible_check_mode
+    - vector_structured_stat.stat.exists
+
 # --- Host-log heartbeat (#134) ------------------------------------------------
 # THE PROBLEM THIS SOLVES, in one line: on this fleet "no host log lines in the
 # last N minutes" is not evidence of anything. Measured 2026-08-20, 66% of
