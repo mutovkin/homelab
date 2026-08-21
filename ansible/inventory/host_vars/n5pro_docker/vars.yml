@@ -20,6 +20,19 @@ nfs_enabled: true
 # and masks AppArmor inside the container so Docker doesn't attempt to use it.
 docker_lxc: true
 
+# Collect local container logs as well as host logs with the native Vector shipper
+# (roles/vector_agent, #134). TRUE only here: this is the one host in the
+# vector_agents group that runs Docker, and the role's default is false because a
+# docker_logs source on a host with no /var/run/docker.sock makes Vector log a
+# connection error on a loop while still shipping host records — permanently noisy,
+# permanently green.
+#
+# Turning this on puts the `vector` user in the `docker` group, which is
+# root-equivalent access on this host. It is the same posture the vector CONTAINER
+# has on eq12_docker (socket bind-mount) and the same telegraf already holds there:
+# a new holder of an existing grant, not a new kind of grant.
+vector_agent_docker_logs: true
+
 # Services to deploy on this Docker host
 # Each entry corresponds to an Ansible role in roles/services/
 services:

@@ -86,7 +86,44 @@ and publishes neither port. Nothing is listening.
 
 | Port     | Protocol | Purpose                             | Used By                                   |
 | -------- | -------- | ----------------------------------- | ----------------------------------------- |
-| **9428** | HTTP     | **HTTP API and Web UI** (`/select/vmui`) | Grafana queries, Vector writes, Manual queries |
+| **9428** | HTTP     | **HTTP API and Web UI** (`/select/vmui`) | Grafana queries, Vector writes (local **and 3 remote**), NPM, manual queries |
+
+#### Port 9428 has REMOTE writers since #134
+
+Until #134 the only writer was the `vector` container on this host, reaching
+VictoriaLogs over the compose network — nothing crossed the LAN to write. Three
+native Vector agents now do:
+
+| Writer | Source address | Path |
+| ------ | -------------- | ---- |
+| `vector` container (eq12_docker) | compose network `172.20.0.0/24` | `http://victorialogs:9428/insert` |
+| `vector` agent on **eq12** | 192.168.25.5 | `http://192.168.25.15:9428/insert` |
+| `vector` agent on **n5pro** | 192.168.30.5 | `http://192.168.25.15:9428/insert` |
+| `vector` agent on **n5pro_docker** | 192.168.30.15 | `http://192.168.25.15:9428/insert` |
+
+The endpoints are built in `ansible/inventory/group_vars/all/vars.yml` from
+eq12_docker's inventory address, so a re-IP of this CT moves them automatically.
+
+Two properties of that, both deliberate and both stated rather than shipped
+quietly:
+
+- **:9428 IS narrowed, in this same change, and no port was opened.** An earlier
+  draft deferred this to a follow-up; that was overruled, correctly. The LAN is one
+  flat `192.168.0.0/18` with no segmentation, so the `inet observability_fw`
+  nftables table is the only thing constraining reach — and this change is exactly
+  what turns `:9428` from a port only the local container wrote to into a fleet
+  ingest endpoint. The allowlist is the three agents, NPM (**verified** against CT
+  104's `proxy_host` table, not assumed) and the operator subnet; Grafana needs no
+  entry because it reaches VictoriaLogs over the compose network. Full source list
+  and evidence: the README's
+  [Firewall section](README.md#9428-is-governed-too-since-134). `:8428` and `:3000`
+  remain ungoverned and are tracked separately — do not extend this list to them by
+  analogy.
+- **The ingest path is cleartext HTTP with basic auth**, like every other internal
+  hop in this homelab. VictoriaLogs' `--httpAuth` is one credential pair for the
+  whole instance, so each shipping host necessarily holds read+write credentials
+  (which is why they live in `group_vars/all/vault.yml`). TLS on the ingest path
+  is a follow-up issue.
 
 #### Port 9428 - Main HTTP API
 
