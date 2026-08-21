@@ -243,8 +243,69 @@ Hard-won lessons — check here before debugging from scratch.
   *args* (`proxmox_guests` precedent); no_log also censors failure output, which would
   blind a fail-loudly assert (#88 asserts VM/VL/Grafana creds non-empty BY NAME, with
   compose `${VAR:?}` as backstop). Fleet-wide
-  quoting sweep: #117. See
+  quoting sweep: #117. **Sibling trap in `compose.yaml` itself:** an unquoted YAML scalar
+  ends at a ` #`, so `GF_SMTP_USER: ${VAR:?required - see #139}` reaches compose as
+  `${VAR:?required - see` and fails the parse of the WHOLE file with "invalid
+  interpolation format". A `#` after a non-space survives (`(#143)` does) — quote the
+  value rather than relying on that. Measured: it failed the first live apply of #139. See
   [docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md](docs/solutions/security-issues/vaultwarden-admin-token-dollar-truncation-and-plaintext-fallback.md).
+
+- **A guard you have not seen fail is not a guard.** `failed_when: false` does not "let
+  the result through" — it *assigns* `failed: False`, so a paired
+  `assert: <reg> is not failed` is literally `assert: true`. Measured against a `wait_for`
+  that timed out: `failed_when: false` → `failed=False` (assert passes);
+  `ignore_errors: true` → `failed=True` (assert fires). One such guard sat inert in this
+  repo for its whole life while claiming to prove the host log stream was live. Use
+  `ignore_errors` + `register` when an assert must read `failed`, and **verify every new
+  guard against the live defect before trusting it**. Two corollaries. (1) The test of a
+  guard is the **SECOND** run, on an already-converged host — a first apply is the one run
+  where even a broken guard appears to work. (2) A task whose inputs only exist *after* a
+  real apply is invisible to `--check`, so its first execution is its first test; verify
+  those against the binary on a host, never against a dry run (#134 shipped
+  `vector validate --config`, which the CLI rejects — the path is positional — and no
+  dry-run could have caught it).
+- **Absence of incidental traffic is not evidence of anything — measure the empty-window
+  fraction, then make the signal deliberate.** Host logs here arrive in **bursts**:
+  measured 2026-08-20, 66% of eq12_docker's and 40% of eq12's 10-minute windows were
+  legitimately empty in perfect health, while n5pro never had one. Burstiness does **not**
+  track volume — the busiest host was the worst offender. Gap percentiles actively mislead
+  (eq12_docker: p99 gap 15.6s, yet two-thirds of windows empty), so the only
+  decision-relevant statistics are **max gap** and **empty-window fraction**. Widening a
+  window is not a fix: a max gap of *exactly* 3600.0s is one incidental hourly event
+  holding it open, not headroom. The fix is a heartbeat (`roles/rsyslog_structured`, one
+  marker per host per 5 min) so absence becomes a fact. #134 made this same category error
+  **twice** — an alert rule that paged every ~30 min for 21 h, and a deploy assert
+  demanding container traffic from three silent containers — and the second was found only
+  because the first taught us to look. **A caveat in an error string is where a missing
+  conditional hides:** the broken assert's own `fail_msg` named the false-alarm case and
+  asserted anyway.
+- **`--check` overstates `docker_compose_v2` churn: a predicted `Recreate` is not a real
+  one.** Dry-runs of `services/*` roles routinely report `Pulling` + `Recreate` for
+  containers a real run then leaves untouched (`ok`, same container ID, same `.Created`).
+  Do not abandon a change over a check-mode recreate — and do not accept one as proof your
+  change caused a bounce. Diff the dry-run against the SAME dry-run on master (stash the
+  branch; judge the **delta**, not the absolute), then confirm after the fact with
+  container ID + `.Created`, and for anything templated the file's mtime plus the unit's
+  `ActiveEnterTimestamp` (a `template` that renders identical bytes leaves mtime alone —
+  an mtime older than the apply is proof it never rewrote). Real recreates do happen — a
+  Watchtower-created container is recreated by the next `compose up`
+  ([compose-up-recreates-watchtower-created-containers](docs/solutions/integration-issues/compose-up-recreates-watchtower-created-containers.md))
+  — which is exactly why the delta, not the prediction, is the evidence.
+- **A backup is not verified until a RESTORE is, and a restore is not verified by "the
+  database is there."** A partial restore leaves a database that exists with the right
+  owner and zero tables, and psql's default is to continue past errors and exit 0 — so
+  `-v ON_ERROR_STOP=1` plus an object count (tables/indexes/rows, both sides) is the check;
+  `pg_database_size` legitimately differs. Re-run the drill after every PostgreSQL MAJOR
+  upgrade, not just after backup-code changes: PG18 wraps dump sections in nested
+  `\restrict`/`\unrestrict`, which silently invalidated our slice recipe. Marker checks are
+  version- and tool-specific too — `pg_dump` ends `-- PostgreSQL database dump complete`
+  while `pg_dumpall` ends `… cluster dump complete` and contains BOTH, and PG18 writes
+  `\unrestrict` AFTER the marker, so grep the exact string in a bounded region and never
+  assert it is the last line. Also: **never size a dump from `pg_database_size`, and never
+  compare two dumps taken hours apart** — template1 is 7750 kB on disk and 720 bytes
+  dumped, and a live DB's own growth (~62 KB/h here) dwarfs most format changes. See
+  [docs/solutions/integration-issues/pg18-restrict-slicing-silent-green-restore-drill.md](docs/solutions/integration-issues/pg18-restrict-slicing-silent-green-restore-drill.md)
+  and [docs/solutions/conventions/prove-notification-delivery-not-just-config-validity.md](docs/solutions/conventions/prove-notification-delivery-not-just-config-validity.md).
 
 ## Conventions
 
