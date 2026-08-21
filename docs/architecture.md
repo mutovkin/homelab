@@ -55,7 +55,12 @@ task deploy:full
 task infra:hosts      # 1. Configure Proxmox OS + provision VMs/LXCs
 task infra:guests     # 2. Configure guests (Docker, packages)
 task deploy:services  # 3. Deploy compose stacks
+task deploy:logagents # 4. Deploy the native Vector log shippers (#134)
 ```
+
+Step 4 runs **last** on purpose: `roles/vector_agent` finishes by writing a marker
+on the agent host and polling VictoriaLogs for it, and VictoriaLogs is deployed by
+step 3.
 
 ## Docker Network Map
 
@@ -101,6 +106,12 @@ eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 - **Method**: Direct LAN (both machines on the same 192.168.x.x network)
 - **Use cases**:
   - Centralized monitoring: Telegraf on N5 Pro → VictoriaMetrics on EQ12 (or vice versa)
+  - Centralized **logs** (#134): a native Vector shipper on `eq12`, `n5pro` and
+    `n5pro_docker` writes to VictoriaLogs on `192.168.25.15:9428` over the LAN,
+    HTTP + basic auth. No new listening port on any host; `:9428` was already
+    reachable from the LAN. Records are labelled with the **Ansible inventory
+    name** (`eq12`, not `pve`) — see
+    [`roles/vector_agent`](../ansible/roles/vector_agent/README.md).
   - NFS: N5 Pro Docker LXC → TrueNAS VM for the LMS music library today, and for other
     media if a stack that needs it lands. **Not** Frigate recordings:
     `FRIGATE_RECORDINGS_DIR` resolves under `data_mount`

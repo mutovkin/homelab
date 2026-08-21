@@ -1,4 +1,5 @@
-# Managed by Ansible — roles/services/observability (#143). Do not edit on the host.
+# Managed by Ansible — roles/rsyslog_structured (#143, moved here by #134).
+# Do not edit on the host.
 #
 # /var/log/structured.log is a full duplicate of syslog+auth.log in RFC5424, written
 # for Vector (see /etc/rsyslog.d/40-vector-structured.conf). Rotate it on exactly the
@@ -14,6 +15,13 @@
 # logrotate's daily timer rotates early once the file passes the limit, so a chatty
 # daemon cannot fill the rootfs waiting for Sunday. This repo has had two log floods
 # already. Weekly + rotate 4 still governs the normal case.
+#
+# FLEET NOTE (#134): the 74%/6.4 G figure above was measured on eq12_docker, the only
+# host that had this file before Vector went fleet-wide. The other three have far more
+# headroom (measured 2026-08-19: eq12 1.8 T with 23 G used, n5pro 3.5 T with 9.3 G
+# used, n5pro_docker 45 G free), so `maxsize 100M` is the binding constraint there, not
+# the free space. The policy is deliberately identical on all four — one file, one
+# rotation window, and therefore one bound on Vector's post-buffer-reset re-read.
 #
 # The rotation period is also the bound on Vector's re-read window: the file source
 # reads this file from the beginning, so after a buffer reset (which wipes
