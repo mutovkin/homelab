@@ -1,0 +1,310 @@
+---
+# --- Structured host-log stream for Vector (#143, lifted to a shared role in #134) ---
+# Debian's RSYSLOG_FileFormat carries no <PRI>, so severity and facility are
+# unrecoverable from /var/log/syslog and /var/log/auth.log — Vector had to store
+# every host record as `level: info`. These tasks make rsyslog emit the same
+# messages a SECOND time in RFC5424 to /var/log/structured.log, which is what
+# every Vector deployment in the fleet tails INSTEAD of syslog+auth.log.
+# Full reasoning: files/rsyslog-vector-structured.conf.
+#
+# This block moved here VERBATIM from roles/services/observability/tasks/main.yml
+# when #134 took Vector fleet-wide. Both consumers include it (the observability
+# compose stack on eq12_docker, and roles/vector_agent on eq12/n5pro/n5pro_docker)
+# and both include it BEFORE they point Vector at the file. See README.md.
+# PRECONDITION, deliberately explicit. This role writes into /etc/rsyslog.d, then
+# restarts rsyslog and probes it end to end. It does NOT install rsyslog — the
+# `common` role does, fleet-wide, and every host has it today (verified: all four
+# carry /usr/sbin/rsyslogd). But playbooks/log-agents.yml is a single-purpose play
+# that deliberately does not run `common`, so on a host that somehow lacked rsyslog
+# the first symptom would be `copy` failing on a missing directory — which reads as
+# a bug in this role rather than as a missing prerequisite. Name the prerequisite.
+- name: Check that rsyslog is installed
+  ansible.builtin.stat:
+    path: /usr/sbin/rsyslogd
+  register: rsyslog_structured_rsyslogd
+
+- name: Assert rsyslog is installed before configuring a stream through it
+  ansible.builtin.assert:
+    that:
+      - rsyslog_structured_rsyslogd.stat.exists
+    fail_msg: >-
+      /usr/sbin/rsyslogd is not present on {{ inventory_hostname }}, so this role
+      has nothing to configure and Vector would have no host-log input at all. This
+      is a MISSING PREREQUISITE, not a fault in this role: rsyslog is installed by
+      the `common` role (playbooks/configure-guests.yml / proxmox-hosts.yml), which
+      playbooks/log-agents.yml does not run. Run the host through `common` first.
+    quiet: true
+
+- name: Deploy rsyslog structured-stream config for Vector
+  ansible.builtin.copy:
+    src: rsyslog-vector-structured.conf
+    dest: /etc/rsyslog.d/40-vector-structured.conf
+    mode: "0644"
+  register: vector_rsyslog_conf
+
+- name: Deploy logrotate policy for the structured stream
+  ansible.builtin.copy:
+    src: logrotate-structured
+    dest: /etc/logrotate.d/vector-structured
+    mode: "0644"
+
+# The one genuine outage risk in this change: a drop-in rsyslog rejects takes
+# rsyslog down on restart, and with it ALL host logging — syslog, auth.log and the
+# new stream at once. `rsyslogd -N1` parses the whole config without touching the
+# running daemon.
+#
+# Scope of the guarantee, narrowed after review because the earlier wording claimed
+# more than was tested: it is VERIFIED to exit non-zero on a PARSE error. Semantic
+# errors — an unknown template name, a bad omfile parameter — are NOT confirmed to
+# fail it, which is precisely why the end-to-end `logger` probe below exists rather
+# than this task being the only gate.
+#
+# It also validates EVERY drop-in in /etc/rsyslog.d, not just ours, so a pre-existing
+# break in an unrelated file (postfix.conf) now fails this role's play. That is loud
+# rather than silent and worth the coupling.
+#
+# Skipped in check mode, where the copy above has not happened and there would be
+# nothing new to validate.
+- name: Validate the rsyslog configuration before restarting
+  ansible.builtin.command: rsyslogd -N1
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Restart rsyslog to pick up the structured stream
+  ansible.builtin.systemd_service:
+    name: rsyslog
+    state: restarted
+  when:
+    - vector_rsyslog_conf.changed
+    - not ansible_check_mode
+
+# UNGATED on purpose — no `changed` condition. The restart above only fires when the
+# drop-in itself changed, i.e. once. If rsyslog is dead on an otherwise-converged
+# host, nothing else in this role would start it, and Vector's only host-log input
+# stops growing while every task reports ok. Same shape as the nftables
+# RemainAfterExit trap in CLAUDE.md: state that can be invalidated from outside,
+# guarded by something that cannot see the invalidation.
+- name: Ensure rsyslog is running and enabled
+  ansible.builtin.systemd_service:
+    name: rsyslog
+    state: started
+    enabled: true
+  when: not ansible_check_mode
+
+# LOAD-BEARING GUARD, not a nicety. vector.yaml no longer tails syslog/auth.log, so
+# a drop-in that loads cleanly but routes nothing leaves Vector with an empty input
+# and the host silently stops shipping logs entirely — the exact green-but-dead
+# shape this whole issue family is about.
+#
+# This is an END-TO-END FRESHNESS probe, and the freshness is the entire point. The
+# guard this replaces asserted the file existed and was non-empty, which a file
+# untouched since last week satisfies instantly — so it could only ever fail on the
+# very first run that deployed the drop-in, and was inert on every converged run
+# afterwards. Writing a marker through `logger` and then waiting for that exact
+# marker to appear in the file exercises the whole path: rsyslog is alive, it is
+# reading its socket, the `*.*` selector still reaches our action, and omfile is
+# still writing to this path. It fails when rsyslog is dead, when the drop-in loads
+# but routes nothing, and when a `stop` rule added upstream of us swallows the
+# selector — none of which existence-plus-size can see.
+#
+# The marker is unique per run so a stale match from an earlier deploy cannot
+# satisfy it. local0.notice is used because Debian's config routes it to
+# /var/log/syslog as well, so the probe line is visible to a human debugging this.
+#
+# `vector_structured_probe` is a set_fact, so it stays readable by the CALLING role
+# after this one returns — that is deliberate and part of this role's interface
+# (see README.md).
+- name: Generate a unique marker for the structured-stream probe
+  ansible.builtin.set_fact:
+    vector_structured_probe: "ansible-structured-probe-{{ ansible_date_time.iso8601_micro | regex_replace('[^0-9]', '') }}"
+  when: not ansible_check_mode
+
+# changed_when: false — this writes one line to the log stream, which is the probe,
+# not a state change. Skipped in check mode: a dry run must not write.
+- name: Emit the structured-stream probe marker
+  ansible.builtin.command: logger -p local0.notice "{{ vector_structured_probe }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+# ignore_errors, NOT failed_when: false — and the difference is the whole guard.
+#
+# `failed_when: <expr>` does not "let the result through"; it ASSIGNS
+# result['failed'] = <expr>. With `false`, a wait_for that TIMED OUT still reports
+# `failed: False`, so the `is not failed` test below reads that assignment and the
+# assert becomes literally `assert: true`. This guard was therefore INERT for its
+# entire life on eq12_docker: wave 1 (#143) claimed to "assert the marker reached
+# the stream" and never once enforced it. Nothing was ever proven by it.
+#
+# Measured rather than reasoned, against a wait_for that cannot possibly succeed:
+#   failed_when: false  -> failed=False  is_not_failed=True   elapsed=3  (assert PASSES)
+#   ignore_errors: true -> failed=True   is_not_failed=False             (assert FIRES)
+#
+# ignore_errors preserves `failed: True` on the register while letting the play
+# continue to the assert, which is the only shape that makes the assert real.
+# ansible-lint's `ignore-errors` rule accepts `ignore_errors: true` on a task that
+# also carries `register:`, which this one does.
+#
+# CONSEQUENCE, and it is intended: from here on this guard CAN fail, on all four
+# hosts. It fails in the safe direction — the play stops BEFORE Vector is installed
+# and pointed at a stream that is not being written, rather than after. If it fires
+# on a hypervisor, that is a real finding about that host's rsyslog, not a reason to
+# weaken it back.
+- name: Wait for the probe marker to reach the structured stream
+  ansible.builtin.wait_for:
+    path: /var/log/structured.log
+    search_regex: "{{ vector_structured_probe }}"
+    timeout: 10
+  register: vector_structured_probe_result
+  ignore_errors: true
+  when: not ansible_check_mode
+
+# Separate assert rather than letting wait_for fail outright, so the failure message
+# can explain what to check. Deliberately NO no_log anywhere on this chain —
+# censoring it would blind exactly the diagnostic this guard exists to print (#88).
+- name: Assert the structured stream is being written right now
+  ansible.builtin.assert:
+    that:
+      - vector_structured_probe_result is not failed
+    fail_msg: >-
+      A marker written with `logger` did not reach /var/log/structured.log within
+      10s, so rsyslog is not currently routing to it and Vector — which tails ONLY
+      this file for host logs — is shipping nothing from this host. The file may
+      still exist and be non-empty; that proves only that it was written once.
+      Check `systemctl status rsyslog`, `journalctl -u rsyslog`, and that
+      /etc/rsyslog.d/40-vector-structured.conf is still present and that no drop-in
+      sorting before it ends the ruleset with `stop`.
+    quiet: true
+  when: not ansible_check_mode
+
+# --- Repair an already-created stream (#134) -----------------------------------
+# THE CONVERGENCE GAP, and it is real rather than theoretical: rsyslog's
+# fileOwner/fileGroup settings apply ONLY at create time. Fixing the drop-in does
+# nothing for a file that already exists, so a host that was deployed before the
+# fix keeps a stream Vector cannot read, forever, while every task reports ok.
+# That is exactly what happened on n5pro_docker: the file was created
+# `syslog:syslog` by an earlier run and stayed that way after the conf was
+# corrected.
+#
+# Ordered AFTER the freshness probe on purpose — by that point the file is proven
+# to exist and to be actively written, so there is no create-vs-repair race and no
+# risk of this task conjuring an empty root-owned file that rsyslog then cannot
+# use.
+#
+# `state: file` never creates; group only, so each host keeps its own owner (root
+# on Debian, syslog on Ubuntu). Idempotent: reports changed only when the group is
+# actually wrong. Rotated copies are deliberately not touched — Vector's file
+# source includes the live path only, with no glob.
+- name: Stat the structured stream before repairing its group
+  ansible.builtin.stat:
+    path: /var/log/structured.log
+  register: vector_structured_stat
+  when: not ansible_check_mode
+
+- name: Repair the group of an already-created structured stream
+  ansible.builtin.file:
+    path: /var/log/structured.log
+    group: adm
+    state: file
+  when:
+    - not ansible_check_mode
+    - vector_structured_stat.stat.exists
+
+# --- Host-log heartbeat (#134) ------------------------------------------------
+# THE PROBLEM THIS SOLVES, in one line: on this fleet "no host log lines in the
+# last N minutes" is not evidence of anything. Measured 2026-08-20, 66% of
+# eq12_docker's and 40% of eq12's 10-minute windows are legitimately EMPTY,
+# because host logs arrive in bursts. An alert built on that silence paged a
+# human every ~30 minutes for 21 hours while everything was healthy.
+#
+# A beat every {{ vector_heartbeat_interval }} turns absence into a fact. It is
+# deployed HERE, in the role that already owns host-log plumbing and already runs
+# on all four hosts, because the heartbeat and the stream it travels through must
+# never be deployed separately — an alert keyed on a marker the host does not emit
+# is worse than no alert.
+#
+# The beat travels the FULL path (rsyslog socket -> `*.*` selector -> omfile ->
+# structured.log -> Vector's file source -> the sink), so it exercises exactly what
+# it claims to monitor. See the caveat in README.md for what it does NOT cover.
+- name: Deploy the host-log heartbeat service
+  ansible.builtin.template:
+    src: homelab-heartbeat.service.j2
+    dest: /etc/systemd/system/homelab-heartbeat.service
+    mode: "0644"
+  register: vector_heartbeat_service
+  when: vector_heartbeat_enabled | bool
+
+- name: Deploy the host-log heartbeat timer
+  ansible.builtin.template:
+    src: homelab-heartbeat.timer.j2
+    dest: /etc/systemd/system/homelab-heartbeat.timer
+    mode: "0644"
+  register: vector_heartbeat_timer
+  when: vector_heartbeat_enabled | bool
+
+- name: Reload systemd for the heartbeat units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+    - vector_heartbeat_service.changed or vector_heartbeat_timer.changed
+
+# UNGATED, like the rsyslog task above and for the same reason: a timer that was
+# stopped from outside Ansible must be healed by an ordinary run. Gating this on
+# `changed` would mean a converged host with a dead heartbeat reports ok forever,
+# while the alert keyed on that heartbeat pages about a host that is fine.
+- name: Ensure the host-log heartbeat timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: homelab-heartbeat.timer
+    enabled: true
+    state: started
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+
+# Fire one beat NOW rather than waiting up to a full interval. On a first deploy
+# this is what stops the new alert rule from seeing an empty window and paging
+# about a host that has simply not beaten yet — the exact false positive this
+# whole redesign exists to remove, reintroduced at rollout.
+- name: Emit an immediate first heartbeat
+  ansible.builtin.systemd_service:
+    name: homelab-heartbeat.service
+    state: started
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+
+# PROVE THE CONTRACT, do not assume it. The alert filters on this exact marker
+# string; if the timer runs but the marker never reaches the stream, the rule is
+# keyed on something that does not exist and every host looks dead. This is the
+# same shape as the probe above, applied to the heartbeat's own text.
+- name: Wait for a heartbeat marker to reach the structured stream
+  ansible.builtin.wait_for:
+    path: /var/log/structured.log
+    search_regex: "{{ vector_heartbeat_marker }} {{ inventory_hostname }}"
+    timeout: 15
+  register: vector_heartbeat_probe
+  ignore_errors: true
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+
+# ignore_errors above, NOT failed_when: false — see the comment on the probe
+# earlier in this file. failed_when: false ASSIGNS failed=False and would make
+# this assert a tautology.
+- name: Assert the heartbeat reaches the stream the alert reads
+  ansible.builtin.assert:
+    that:
+      - vector_heartbeat_probe is not failed
+    fail_msg: >-
+      The heartbeat marker "{{ vector_heartbeat_marker }} {{ inventory_hostname }}"
+      did not reach /var/log/structured.log within 15s of the timer firing. The
+      per-host ingest alert keys on exactly that string, so it would report this
+      host as dead forever while the host is fine — the false positive this
+      redesign exists to remove. Check `systemctl status homelab-heartbeat.timer`
+      and `.service`, then `journalctl -u homelab-heartbeat.service -n 20`, then
+      that rsyslog is routing (the probe earlier in this role covers that path).
+    quiet: true
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode

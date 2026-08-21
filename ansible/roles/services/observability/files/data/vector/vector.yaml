@@ -29,10 +29,21 @@ sources:
   # is Debian's `*.*;auth,authpriv.none` (syslog) plus auth,authpriv (auth.log),
   # so tailing them as well would ingest every host event twice.
   #
-  # /var/log/kern.log is deliberately absent: there is no kernel ring buffer in an
-  # LXC, so imklog produces nothing and the file can never exist on this host.
-  # Kernel and OOM-kill events are visible only on the PVE host — closing that gap
-  # is #134 (vector on eq12/n5pro), not a change to this file.
+  # /var/log/kern.log is deliberately absent, and the reason is specific to THIS
+  # host rather than general: eq12_docker is an UNPRIVILEGED LXC, so imklog
+  # produces nothing and the file can never exist here.
+  #
+  # The old wording — "there is no kernel ring buffer in an LXC" — was too broad
+  # and #134 measured it wrong: the PRIVILEGED CT 201 (n5pro_docker) does get
+  # kernel messages, with live veth*/docker0 lines in its kern.log. It is
+  # privilege, not LXC-ness, that decides it.
+  #
+  # #134 is DONE, and it closed this gap everywhere it could: eq12, n5pro and
+  # n5pro_docker all ship kernel and OOM-kill events now, via roles/vector_agent.
+  # They get them through the `*.*` selector in the shared rsyslog drop-in, which
+  # carries the kern facility into structured.log — NOT through a kern.log source,
+  # which would double-ingest every kernel line. This host remains the one place
+  # the gap is structural. See roles/services/observability/README.md limitation 1.
   host_syslog:
     type: file
     include:

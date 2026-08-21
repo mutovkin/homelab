@@ -1,0 +1,32 @@
+# {{ ansible_managed }} — roles/rsyslog_structured (#134)
+# -> /etc/systemd/system/homelab-heartbeat.timer
+#
+# The contract the per-host ingest alert is built on: a marker line every
+# {{ vector_heartbeat_interval }}, on every host, forever. The alert window is 4x
+# this interval, so one missed beat cannot page anyone and four consecutive
+# misses are not a coincidence.
+
+[Unit]
+Description=Emit a homelab host-log heartbeat every {{ vector_heartbeat_interval }}
+
+[Timer]
+# First beat shortly after boot so a rebooted host re-establishes liveness
+# quickly, rather than looking dead for a full interval.
+OnBootSec=1min
+OnUnitActiveSec={{ vector_heartbeat_interval }}
+
+# systemd's default AccuracySec is 1min, which lets beats drift far enough to
+# matter when the alert window is only 4 intervals wide. Pin it tight so the
+# observed spacing matches the configured spacing — the firing demonstration
+# compares measured T0->Alerting against what this file predicts, and that
+# comparison is meaningless if the timer is allowed to wander.
+AccuracySec={{ vector_heartbeat_accuracy }}
+
+# Persistent=false, deliberately. A heartbeat is a LIVENESS signal, not an audit
+# record: catching up missed beats after downtime would write a burst of stale
+# markers that claim the host was alive when it demonstrably was not, papering
+# over the very outage the alert exists to surface.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

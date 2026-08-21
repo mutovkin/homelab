@@ -26,3 +26,18 @@ fresh_allocation_manifest: /var/lib/ansible-fresh-allocation
 # Watchtower schedule
 watchtower_schedule: "0 30 4 * * *" # Daily at 4:30 AM
 watchtower_timezone: "America/Los_Angeles"
+
+# VictoriaLogs endpoints, for the hosts that ship to it but do not run it (#134).
+#
+# Here rather than in roles/vector_agent/defaults precisely because they are a fact
+# about ANOTHER host: the port is the `9428:9428` publish in
+# ansible/roles/services/observability/files/compose.yaml, and the address is
+# eq12_docker's own inventory entry, so a re-IP of that CT moves both endpoints
+# with it and nothing has to be remembered in two places.
+#
+# /insert is the base the Vector `loki` sink appends /loki/api/v1/push to — the
+# same value the container's vector.yaml uses, only by LAN address instead of the
+# compose service name. Plain HTTP with basic auth, like every other internal hop
+# in this homelab; TLS on the ingest path is a tracked follow-up, not an oversight.
+victorialogs_ingest_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:9428/insert"
+victorialogs_query_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:9428/select/logsql/query"

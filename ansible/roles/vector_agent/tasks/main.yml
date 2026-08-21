@@ -1,0 +1,1137 @@
+---
+# Native Vector log shipper — eq12, n5pro, n5pro_docker (#134).
+#
+# eq12_docker is deliberately NOT in this role's group: it runs Vector as a
+# container inside the observability compose stack, and nothing here touches that.
+# See README.md for the shape and for the four systemd traps the drop-in fixes.
+
+# --- Credentials -------------------------------------------------------------
+# Same filter chain, and the same reasoning, as the credential assert at the top of
+# roles/services/observability/tasks/main.yml (#88). The loop item is the variable
+# NAME, never its value: quiet:true trims success output, and on failure the
+# assertion is reported as a literal expression while fail_msg names the variable —
+# so no value prints either way. It runs under --check, so a dry run against a host
+# that cannot see these vars reports the var BY NAME instead of a Jinja trace.
+#
+# Filter by filter: default('', true) because a defined-but-null `vault_x:` is None
+# and `None | length` crashes with a raw Jinja error; | string because an unquoted
+# integer crashes trim the same way; | trim because a whitespace-only value used to
+# pass.
+#
+# These two moved to group_vars/all/vault.yml in #134 (they were in
+# host_vars/eq12_docker/vault.yml, invisible to the three hosts that now need
+# them). Deliberately MOVED, not copied: a second copy of the same secret rots
+# independently, and its failure mode is "eq12_docker keeps working while the three
+# agents silently 401" — the #057 shape exactly.
+- name: Assert the VictoriaLogs credentials are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined, so this host cannot authenticate to
+      VictoriaLogs and Vector would come up, stay up, and silently drop every batch
+      on a 401 (docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md).
+      It lives in ansible/inventory/group_vars/all/vault.yml since #134 —
+      `task vault:edit -- inventory/group_vars/all/vault.yml`.
+    quiet: true
+  loop:
+    - vault_vl_auth_username
+    - vault_vl_auth_password
+
+# systemd's EnvironmentFile parser strips ONE surrounding pair of double quotes and
+# takes the contents literally. A value that itself contains a `"` would therefore
+# be truncated or would swallow the rest of the line, and an embedded newline would
+# be read as the start of a new assignment — either way the credential Vector holds
+# is not the credential in the vault, and the only symptom is a silent 401.
+#
+# This is the systemd-side twin of #117's compose-dotenv `$` truncation, and it is
+# asserted rather than assumed for the same reason.
+#
+# THE CHARACTER SET IS MEASURED, and the boundary is "what systemd's parser
+# actually transforms" — not a defensive guess. One probe value through systemd's
+# own EnvironmentFile parser, bytes read back with od -c:
+#
+#   on disk    P_BS="tab\there-nl\nend-lit\qX-dq\"Y-bs\\Z"
+#   systemd -> tab\there-nl\nend-lit\qX-dq"Y-bs\Z
+#
+# So: `\t`, `\n`, `\q` pass through UNTOUCHED — systemd does not do C-escape
+# expansion, which refutes the plausible-sounding worry that a rotated password
+# containing `\n` becomes a newline. But `\"` collapsed to `"` and `\\` collapsed
+# to `\`, so a BACKSLASH is consumed when it escapes a quote or another backslash.
+# Hence backslash is rejected here alongside `"`, CR and LF.
+#
+# `$` and backticks are deliberately NOT rejected. systemd does not interpolate
+# inside double quotes (measured: a value containing $HOME and a backtick came
+# back literal), and nothing but systemd parses this file — the pre-flight
+# validate runs through `systemd-run --property=EnvironmentFile=`, never a shell.
+# Rejecting them would constrain the operator's password choice to defend against
+# a parser this role does not use.
+#
+# NONE OF THIS IS THE REAL GUARANTEE. The character class only covers mangling
+# someone thought to look for; the /proc/<pid>/environ digest assert near the end
+# of this file compares what the running process holds against the vault value
+# byte for byte, and catches mangling from any cause. Do not weaken that one.
+#
+# Value never prints: quiet:true, and the failure names the variable.
+- name: Assert the VictoriaLogs credentials are representable in a systemd EnvironmentFile
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | string is not search('["\r\n\\\\]')
+    fail_msg: >-
+      {{ item }} contains a double quote, a newline or a backslash.
+      /etc/vector/vector.env is a systemd EnvironmentFile whose values are
+      double-quoted, and systemd's parser transforms all three: a `"` truncates or
+      swallows the rest of the line, a newline starts a new assignment, and a
+      backslash is consumed when it escapes a quote or another backslash. Vector
+      would then 401 against VictoriaLogs while staying up. Rotate the credential
+      to one without those characters — `$` and backticks ARE allowed.
+    quiet: true
+  loop:
+    - vault_vl_auth_username
+    - vault_vl_auth_password
+
+# Defined in group_vars/all/vars.yml, derived from eq12_docker's inventory address
+# and the :9428 publish in roles/services/observability/files/compose.yaml. Asserted
+# here so a rename fails by name rather than templating an empty endpoint into
+# vector.yaml — which Vector accepts at validate time and then fails on at runtime.
+- name: Assert the VictoriaLogs endpoints are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined. Both endpoints are defined in
+      ansible/inventory/group_vars/all/vars.yml.
+    quiet: true
+  loop:
+    - victorialogs_ingest_endpoint
+    - victorialogs_query_endpoint
+
+# --- The host-log stream Vector reads ----------------------------------------
+# FIRST, and that ordering is the point: Vector's only host-log input is
+# /var/log/structured.log, so the stream has to exist and be provably live before
+# anything points Vector at it. This role's freshness probe (a `logger` marker that
+# must reach the file within 10s) is that gate. Shared with the observability role
+# since #134 — one file, one schema, four hosts.
+- name: Deploy the RFC5424 structured host-log stream Vector tails
+  ansible.builtin.include_role:
+    name: rsyslog_structured
+
+# --- Check-mode reality gate -------------------------------------------------
+# Neither of these stats changes anything; both return real on-disk state even
+# under --check, which is exactly what is needed here. They run BEFORE the download
+# for the reason spelled out below.
+- name: Stat the cached Vector .deb
+  ansible.builtin.stat:
+    path: "{{ vector_agent_deb_path }}"
+  register: vector_agent_deb_stat
+
+- name: Stat the Vector configuration directory
+  ansible.builtin.stat:
+    path: /etc/vector
+  register: vector_agent_etc_stat
+
+# READ THIS BEFORE ASSUMING IT IS THE STAT GATE CLAUDE.md FORBIDS. That rule bans
+# gating the DOWNLOAD on the artefact already existing, because it makes the
+# checksum decorative — a corrupt cached .deb would satisfy the guard forever. This
+# flag is FALSE on every real run (`ansible_check_mode` is the first term), so the
+# download below is completely ungated when it matters and always re-verifies.
+#
+# What this flag is for is what `--check` can HONESTLY preview on a host where
+# Vector has never been installed. Measured, not assumed — the first dry run
+# against n5pro_docker failed on all three of these:
+#
+#   * `get_url` under --check still fetches the file to a temp path to compare it,
+#     and then fails with "Destination /var/cache/vector does not exist" because
+#     the directory task above it was, correctly, only previewed.
+#   * `apt: deb: <path>` OPENS the .deb to read its version, and nothing downloaded
+#     it.
+#   * `template:` into /etc/vector fails when the destination directory does not
+#     exist, and /etc/vector is created by the package.
+#
+# All three are artefacts of dry-running a first install, not defects in the play.
+#
+# So: on a converged host (deb cached, /etc/vector present) --check --diff previews
+# everything, including a real content diff of vector.yaml — the run that actually
+# matters, because that is when someone is reviewing a config change. On a virgin
+# host, or on the first --check after a version bump, it previews the plan in a
+# debug message instead of failing. A blanket `not ansible_check_mode` would have
+# thrown the diff away on converged hosts forever.
+- name: Decide whether check mode can preview the install
+  ansible.builtin.set_fact:
+    vector_agent_preview_only: >-
+      {{ ansible_check_mode
+         and not (vector_agent_etc_stat.stat.isdir | default(false)
+                  and vector_agent_deb_stat.stat.exists) }}
+
+# --- The pinned package ------------------------------------------------------
+- name: Create the Vector package cache directory
+  ansible.builtin.file:
+    path: "{{ vector_agent_deb_cache_dir }}"
+    state: directory
+    mode: "0755"
+  when: not vector_agent_preview_only
+
+# --- Getting the artefact onto the host: TWO LEGS, controller first ----------
+#
+# THE TARGET IS NOT ASSUMED TO REACH GITHUB. n5pro cannot: measured during its
+# first apply, github.com:443 is REFUSED in 2ms from that host while
+# deb.debian.org and enterprise.proxmox.com answer 200, and eq12 reaches GitHub
+# fine. An instant refusal on a host whose own repos work is selective upstream
+# policy, not a dead link, and it is the operator's network — n5pro carries only
+# `table inet nut_fw` and has no /etc/pve/nodes/n5pro/host.fw.
+#
+# So: the CONTROLLER fetches once (`run_once`) into its own cache and ships the
+# file to each host; a direct download on the target is the FALLBACK, used only
+# when the controller could not get it. This is a robustness gain rather than a
+# workaround for one quirk — the role now works on any restricted or air-gapped
+# host, and pulls the 36 MB artefact once per run instead of once per host.
+#
+# BOTH legs keep `checksum:` and NEITHER has a stat-exists gate (CLAUDE.md).
+# get_url hashes whatever is already on disk, skips the fetch on a match and
+# re-downloads on a mismatch, so a re-run is cheap AND a corrupted or tampered
+# cache is repaired rather than trusted. A `when: not <stat>.stat.exists` guard
+# would turn the checksum into decoration — see
+# docs/solutions/runtime-errors/ansible-get-url-truenas-iso-existence-guard.md.
+# The `vector_agent_preview_only` conditions are NOT that guard: they are false on
+# every real run (see the check-mode reality gate above).
+#
+# CONSIDERED AND REJECTED — Vector's APT repository. It is the more idiomatic
+# answer and it does not help HERE: apt.vector.dev needs exactly the HTTPS egress
+# to a non-Debian host that n5pro lacks, so the leg that is broken stays broken.
+# It would also float the version unless separately pinned, which fights the
+# single-place version+sha256 pin this role is built on. Recorded so the next
+# person does not re-derive it.
+- name: Create the controller-side package cache
+  ansible.builtin.file:
+    path: "{{ vector_agent_controller_cache }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  when: not ansible_check_mode
+
+# LEG 1. failed_when:false because a controller WITHOUT egress must fall through
+# to leg 2, not abort the play — the whole point is that either leg can carry it.
+# The loud failure lives in the assert below, which can name which leg failed.
+- name: Fetch the pinned Vector .deb on the controller
+  ansible.builtin.get_url:
+    url: "{{ vector_agent_deb_url }}"
+    dest: "{{ vector_agent_controller_cache }}/{{ vector_agent_deb_filename }}"
+    checksum: "sha256:{{ vector_agent_deb_sha256 }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: vector_agent_controller_fetch
+  failed_when: false
+  when: not ansible_check_mode
+
+# LEG 1b. `copy` compares checksums and transfers only on a difference, so this
+# is idempotent and costs nothing on a converged host.
+- name: Ship the controller-cached .deb to the target
+  ansible.builtin.copy:
+    src: "{{ vector_agent_controller_cache }}/{{ vector_agent_deb_filename }}"
+    dest: "{{ vector_agent_deb_path }}"
+    mode: "0644"
+  register: vector_agent_deb_shipped
+  when:
+    - not vector_agent_preview_only
+    - vector_agent_controller_fetch is not skipped
+    - not (vector_agent_controller_fetch.failed | default(true))
+
+# LEG 2, the fallback: the target fetches for itself, but ONLY if the controller
+# could not. On n5pro this leg would fail, and that is fine — leg 1 already
+# delivered the file. failed_when:false so the assert below owns the diagnosis.
+- name: Download the pinned Vector .deb on the target (fallback)
+  ansible.builtin.get_url:
+    url: "{{ vector_agent_deb_url }}"
+    dest: "{{ vector_agent_deb_path }}"
+    checksum: "sha256:{{ vector_agent_deb_sha256 }}"
+    mode: "0644"
+  register: vector_agent_deb_direct
+  failed_when: false
+  when:
+    - not vector_agent_preview_only
+    # `not ansible_check_mode` is NOT redundant with preview_only. The controller
+    # leg above is check-mode-gated, so under --check it is always "skipped",
+    # which would otherwise make this fallback the chosen leg on every CONVERGED
+    # host — and get_url fetches for real even in check mode (measured earlier in
+    # this batch). A dry run would then pull 36 MB per host, and on n5pro attempt
+    # a download that cannot succeed. Under --check neither leg runs and the
+    # arrival assert below still verifies the artefact already on disk, which is
+    # the honest thing for a dry run to check.
+    - not ansible_check_mode
+    - vector_agent_controller_fetch is skipped or (vector_agent_controller_fetch.failed | default(true))
+
+# VERIFY ON ARRIVAL. This is NOT the forbidden stat-exists gate: it gates
+# nothing, it is a POST-CONDITION. A transfer that reported success is not
+# evidence the bytes are right, and `apt` is about to install whatever sits at
+# this path — so the pinned sha256 is checked against the file that actually
+# landed, by whichever leg landed it.
+- name: Checksum the .deb that actually arrived on the target
+  ansible.builtin.stat:
+    path: "{{ vector_agent_deb_path }}"
+    checksum_algorithm: sha256
+  register: vector_agent_deb_arrived
+  when: not vector_agent_preview_only
+
+- name: Assert the pinned Vector package is on the target and intact
+  ansible.builtin.assert:
+    that:
+      - vector_agent_deb_arrived.stat.exists
+      - vector_agent_deb_arrived.stat.checksum == vector_agent_deb_sha256
+    fail_msg: >-
+      {{ vector_agent_deb_filename }} is missing or corrupt on
+      {{ inventory_hostname }}, so nothing may be installed from it.
+      Present: {{ vector_agent_deb_arrived.stat.exists | default(false) }}.
+      Expected sha256 {{ vector_agent_deb_sha256 }},
+      found {{ vector_agent_deb_arrived.stat.checksum | default('none') }}.
+      WHICH LEG FAILED --
+      controller fetch:
+      {{ 'skipped' if vector_agent_controller_fetch is skipped
+         else ('ok' if not (vector_agent_controller_fetch.failed | default(true))
+               else 'FAILED: ' ~ (vector_agent_controller_fetch.msg | default('?'))) }};
+      ship to target:
+      {{ 'not attempted' if vector_agent_deb_shipped is skipped else 'attempted' }};
+      direct download on target:
+      {{ 'not attempted' if vector_agent_deb_direct is skipped
+         else ('ok' if not (vector_agent_deb_direct.failed | default(true))
+               else 'FAILED: ' ~ (vector_agent_deb_direct.msg | default('?'))) }}.
+      If BOTH legs failed, neither this controller nor {{ inventory_hostname }}
+      can reach {{ vector_agent_deb_url }} -- note n5pro has no route to GitHub
+      by operator network policy, which is exactly why the controller leg exists.
+    quiet: true
+  when: not vector_agent_preview_only
+
+# Every version bump otherwise leaves another ~36 MB artefact in the cache
+# forever. Deleting the superseded ones is the role's job, not a line in a bump
+# procedure someone has to remember — but ONLY the superseded ones: the current
+# file is what makes a re-run cheap and what `apt` installs from, and removing it
+# would force a re-download on every single run.
+- name: Find superseded Vector packages in the cache
+  ansible.builtin.find:
+    paths: "{{ vector_agent_deb_cache_dir }}"
+    patterns: "vector_*_amd64.deb"
+    excludes: "{{ vector_agent_deb_filename }}"
+  register: vector_agent_stale_debs
+  when: not vector_agent_preview_only
+
+- name: Remove superseded Vector packages from the cache
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ vector_agent_stale_debs.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not vector_agent_preview_only
+
+- name: Report what a real run would do here (check mode, Vector not installed yet)
+  ansible.builtin.debug:
+    msg: >-
+      CHECK MODE, and Vector is not installed on {{ inventory_hostname }} yet
+      (/etc/vector present: {{ vector_agent_etc_stat.stat.isdir | default(false) }},
+      {{ vector_agent_deb_filename }} cached:
+      {{ vector_agent_deb_stat.stat.exists }}). A real run WILL: download and
+      install vector {{ vector_agent_version }} from the pinned .deb; write
+      /etc/vector/vector.yaml, /etc/vector/vector.env (0600) and
+      /etc/systemd/system/vector.service.d/10-homelab.conf; enable and start
+      vector.service; and then refuse to finish unless a `logger` marker written on
+      this host comes back out of VictoriaLogs labelled
+      hostname={{ inventory_hostname }}.
+  when: vector_agent_preview_only
+
+# --- Configuration, written BEFORE the package is installed ------------------
+# Ordering note, and it is load-bearing rather than tidy, with the .deb's actual
+# maintainer scripts read rather than assumed (0.57.0, inspected 2026-08-19):
+#
+#   * FIRST install: the postinst does NOT start the unit. `deb-systemd-invoke
+#     try-restart` is guarded by `[ -n "$2" ]`, and $2 is empty on a fresh
+#     install; `deb-systemd-helper enable` is guarded by `was-enabled`. So a
+#     virgin host is safe either way.
+#   * UPGRADE (every version bump from here on): $2 IS set, so dpkg `try-restart`s
+#     vector.service from inside the apt task. That restart runs whatever config
+#     is on disk at that moment, with whatever ExecStartPre is in force.
+#
+# Writing the config, the env file and the drop-in first is what makes that second
+# case correct: the bumped binary restarts onto the new config with
+# --skip-healthchecks already in effect, instead of racing the shipped
+# `vector validate` (which DOES run sink healthchecks — drop-in trap 1) and
+# burning the shipped StartLimitBurst against a sink that may be booting.
+# systemd reads drop-ins for units that do not exist yet, so
+# /etc/systemd/system/vector.service.d can be populated up front.
+#
+# /etc/vector/vector.yaml is NOT a dpkg conffile — the package's conffiles list is
+# /etc/default/vector plus /etc/vector/examples/* only — so templating it here
+# creates no modified-conffile situation on a future bump.
+- name: Create the Vector configuration directory
+  ansible.builtin.file:
+    path: /etc/vector
+    state: directory
+    mode: "0755"
+
+- name: Deploy the Vector agent configuration
+  ansible.builtin.template:
+    src: vector.yaml.j2
+    dest: /etc/vector/vector.yaml
+    mode: "0644"
+  register: vector_agent_config
+  when: not vector_agent_preview_only
+
+# diff:false because this file carries the VictoriaLogs credential; the task still
+# reports changed, its content just never renders into the transcript (#88, #117).
+# Deliberately NOT no_log: no_log also censors an undefined-variable failure, and
+# that loud failure is itself a control.
+#
+# 0600 root:root: systemd reads EnvironmentFile as the MANAGER, before it drops to
+# User=vector, so the vector user never needs to read it.
+- name: Deploy the Vector agent systemd environment file
+  ansible.builtin.template:
+    src: vector.env.j2
+    dest: /etc/vector/vector.env
+    owner: root
+    group: root
+    mode: "0600"
+  diff: false
+  register: vector_agent_env
+  when: not vector_agent_preview_only
+
+- name: Create the Vector systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/vector.service.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy the Vector systemd drop-in
+  ansible.builtin.template:
+    src: vector-systemd-dropin.conf.j2
+    dest: /etc/systemd/system/vector.service.d/10-homelab.conf
+    mode: "0644"
+  register: vector_agent_dropin
+  when: not vector_agent_preview_only
+
+# --- The package -------------------------------------------------------------
+# `deb:` rather than a repository: vectordotdev publish no apt repo we trust more
+# than a checksummed release artefact, and a pinned file is what makes this
+# reproducible. dpkg reports changed only when the installed version differs, so a
+# converged host reports ok and nothing restarts.
+- name: Install the pinned Vector package
+  ansible.builtin.apt:
+    deb: "{{ vector_agent_deb_path }}"
+  register: vector_agent_pkg
+  when: not vector_agent_preview_only
+
+# --- Can the vector user actually READ its one input? (#134) -------------------
+# THE FAILURE THIS REPLACES took two minutes to surface and pointed nowhere
+# useful. Vector was `active`, the unit was green, rsyslog was writing the file,
+# the network was fine — and the ingest assert at the end of this role timed out
+# with "no records arrived", which is true but says nothing about why.
+#
+# The cause was a permission mismatch that exists ONLY in the native deployment
+# shape: the container on eq12_docker reads the file as root through a bind
+# mount, while the agent runs as User=vector. On Ubuntu, rsyslog drops privileges
+# and could not satisfy the drop-in's old fileOwner="root", so the file landed
+# `syslog:syslog` and vector — which is in `adm`, not `syslog` — got EACCES.
+#
+# This check turns that into an instant, precise failure. It runs as the REAL
+# user with the REAL supplementary groups (systemd applies the group database
+# under User=, measured: vector gets gid 4/adm), and it READS A BYTE rather than
+# testing permission bits, so it cannot be fooled by anything `test -r` would
+# miss. Placed after the package install because the vector user is created by
+# the .deb's preinst, and after the rsyslog include because the file must exist.
+- name: Check that the vector user can read the structured stream
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-run
+      - --pipe
+      - --wait
+      - --collect
+      - --quiet
+      - --property=User=vector
+      - --property=Group=vector
+      - /bin/sh
+      - -c
+      - head -c 1 /var/log/structured.log >/dev/null
+  register: vector_agent_readable
+  changed_when: false
+  failed_when: false
+  when:
+    - not vector_agent_preview_only
+    - not ansible_check_mode
+
+- name: Assert the structured stream is readable by the vector user
+  ansible.builtin.assert:
+    that:
+      - vector_agent_readable.rc == 0
+    fail_msg: >-
+      The `vector` user cannot READ /var/log/structured.log on
+      {{ inventory_hostname }}, which is the only host-log input this agent has.
+      Vector would start, stay `active`, log `Permission denied (os error 13)`
+      every couple of seconds, and ship nothing — a green deploy over a dead
+      pipeline.
+      Check `stat -c '%U:%G %a' /var/log/structured.log` against `id vector`.
+      Expected: group `adm`, mode 0640, and vector in `adm`. The owner differs by
+      packaging and that is fine — root on Debian, syslog on Ubuntu.
+      If the group is wrong, the drop-in must not be asking for a fileOwner the
+      local rsyslog cannot set: on Ubuntu rsyslog drops privileges to `syslog`
+      and a chown to root fails, taking the requested group down with it. See
+      roles/rsyslog_structured/files/rsyslog-vector-structured.conf.
+      systemd-run said: {{ vector_agent_readable.stderr | default('') | trim }}
+    quiet: true
+  when:
+    - not vector_agent_preview_only
+    - not ansible_check_mode
+
+# --- Docker socket access (n5pro_docker only) --------------------------------
+# The `vector` user is created by the package's preinst, so this can only run after
+# the install above.
+#
+# SAY IT PLAINLY: membership of the `docker` group is root-equivalent on that host.
+# Anyone who can talk to the socket can start a privileged container. This is the
+# same posture as the vector CONTAINER's /var/run/docker.sock bind-mount on
+# eq12_docker, and the same posture telegraf already has here — it is not a new
+# grant in kind, only a new holder. It is granted only where
+# vector_agent_docker_logs is true.
+- name: Look up the docker group
+  ansible.builtin.command: getent group docker
+  register: vector_agent_docker_group_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: vector_agent_docker_logs | bool
+
+# Fail by NAME rather than letting the `user` module create the group implicitly —
+# a `docker` group this role invented would have the wrong gid and would not grant
+# socket access, which is a silent no-op, not an error.
+- name: Assert the docker group exists before granting Vector access to the socket
+  ansible.builtin.assert:
+    that:
+      - vector_agent_docker_group_lookup.rc == 0
+    fail_msg: >-
+      vector_agent_docker_logs is true for {{ inventory_hostname }} but there is no
+      `docker` group on it, so Vector could not read /var/run/docker.sock and the
+      docker_logs source would error on a loop while the unit stayed active. Either
+      Docker is not installed here or the host does not belong in the
+      vector_agents group with docker collection enabled.
+    quiet: true
+  when: vector_agent_docker_logs | bool
+
+- name: Add the vector user to the docker group
+  ansible.builtin.user:
+    name: vector
+    groups: docker
+    append: true
+  register: vector_agent_docker_group
+  when:
+    - vector_agent_docker_logs | bool
+    - not vector_agent_preview_only
+
+# --- systemd -----------------------------------------------------------------
+# Single source of truth for the restart decision (postgresql/observability
+# precedent). Deliberately NO default() on any of these registers: if one is
+# renamed this must fail loudly rather than silently decide no restart is needed,
+# which would leave Vector running the OLD config while the play reports converged
+# — the do-nothing failure #78/#139 are about. A task skipped by `when` still
+# registers `changed: false`, so the skip paths are covered without a default.
+- name: Determine whether Vector must be restarted
+  ansible.builtin.set_fact:
+    vector_agent_needs_restart: >-
+      {{ vector_agent_pkg.changed
+         or vector_agent_config.changed
+         or vector_agent_env.changed
+         or vector_agent_dropin.changed
+         or vector_agent_docker_group.changed }}
+
+- name: Preview the Vector restart (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      Config change WILL RESTART vector on a real apply — a brief gap in this
+      host's log shipping. Buffered events survive (disk buffer under
+      /var/lib/vector).
+  when:
+    - ansible_check_mode
+    - vector_agent_needs_restart | bool
+
+- name: Reload systemd units for the Vector drop-in
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - not ansible_check_mode
+    - vector_agent_dropin.changed or vector_agent_pkg.changed
+
+# Defensive, and cheap. Nothing in a first install is expected to leave the unit
+# `failed` (the postinst does not start it — see the ordering note above), but the
+# state this clears is reachable in normal operation: a VictoriaLogs outage at the
+# wrong moment, or a hand-edited config on the host, can consume the start limit
+# and latch `failed` — and `systemctl start` on such a unit answers "start request
+# repeated too quickly" rather than starting it. The drop-in above removes the
+# limit going forward; this clears state already latched under the old one, so the
+# healing run is not the one that cannot heal. Same shape as the nftables
+# RemainAfterExit trap in CLAUDE.md: `state: started` cannot see, and cannot
+# repair, a condition invalidated from outside.
+- name: Clear any latched failed state on vector.service
+  ansible.builtin.command: systemctl reset-failed vector.service
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+# Pre-flight, BEFORE a working shipper is restarted onto the new file: a renamed
+# or missing env var, or a broken config, is caught here rather than by a unit
+# that fails to come back. --skip-healthchecks for the same reason the drop-in
+# uses it — sink reachability is not a config error.
+#
+# RUN THROUGH systemd-run, NOT THROUGH A SHELL. This task used to be
+# `set -a; . /etc/vector/vector.env; vector validate …` under bash as root, and
+# that was wrong twice over. Both were measured on n5pro_docker, not argued:
+#
+#  1. WRONG USER. The play is `become: true` and ansible.cfg sets
+#     become_user=root, so the validate ran as root while the unit runs as
+#     User=vector.
+#
+#     HONEST CORRECTION, because the first version of this comment claimed more
+#     than was true: it predicted that a root validate would create the disk
+#     buffer ledger root-owned under data_dir=/var/lib/vector, and that the unit
+#     would then fail with EACCES. MEASURED on n5pro_docker, that does NOT happen
+#     — `vector validate --skip-healthchecks` leaves /var/lib/vector completely
+#     empty and still vector:vector, before and after. The predicted mechanism is
+#     refuted; do not repeat it as fact.
+#
+#     What stands is the principle, which is enough on its own: a pre-flight that
+#     runs as a different user than the unit is not validating what will run. Any
+#     permission-shaped difference — a config file mode, a data_dir, a socket —
+#     would be invisible to a root rehearsal and would surface only when the unit
+#     starts. Reason 2 below is the one that was measured, and it is the one that
+#     makes this non-negotiable.
+#
+#  2. WRONG PARSER, and this one is a root code-execution path. /etc/vector/vector.env
+#     is written for SYSTEMD's grammar, in which a double-quoted value is literal.
+#     Bash's `.` is a different grammar: it expands $VAR, $( ) and backticks inside
+#     double quotes. Measured, same file, same host:
+#         file:    PROBE_A="lit-dollar-$HOME-and-backtick-`id`"
+#         systemd: lit-dollar-$HOME-and-backtick-`id`        <- literal
+#         bash:    lit-dollar-/root-and-backtick-uid=0(root) gid=0(root) …
+#     The backtick EXECUTED, as root. Today's credential is 64 alphanumerics so
+#     nothing happened; that is luck, not correctness. The next rotation to a
+#     value containing a backtick would run it, and a value containing $X would
+#     make this pre-flight validate a DIFFERENT credential than the one Vector
+#     receives — the exact silent divergence this role exists to eliminate.
+#
+# systemd-run kills both: same User/Group as the unit, and the env file parsed by
+# systemd's own parser with no shell anywhere in the path. It is also a faithful
+# rehearsal of ExecStartPre rather than an approximation of it.
+#
+# --pipe --wait --collect --quiet verified on all three hosts (systemd 255 on
+# n5pro_docker, 257 on both hypervisors): stdout, stderr AND the exit code all
+# propagate (probe returned RC=7 with both streams intact), and --collect garbage
+# collects the transient unit. If a future host ever lacks systemd-run, the
+# fallback is `runuser -u vector -- /usr/bin/vector validate …` with the
+# environment exported by root first — it invokes no shell, so /sbin/nologin is
+# not in the way — but that fixes only (1), and (2) would then need the assert
+# above hardened to reject `$` and backticks as well.
+#
+# The credential is never on the command line; systemd reads it from the 0600 file.
+- name: Validate the deployed Vector configuration before restarting
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-run
+      - --pipe
+      - --wait
+      - --collect
+      - --quiet
+      - --property=User=vector
+      - --property=Group=vector
+      - --property=EnvironmentFile=/etc/vector/vector.env
+      - /usr/bin/vector
+      # `validate` takes the config path POSITIONALLY. There is no --config on
+      # this SUBCOMMAND, and passing one is a hard `error: unexpected argument
+      # '--config' found` — measured on n5pro_docker, where it failed the first
+      # real apply. `vector --config <path>` (the TOP-LEVEL command, as used by
+      # ExecStart) does exist, which is exactly what makes the mistake easy:
+      #   vector          --config <path>     valid   (-c)
+      #   vector validate --config <path>     INVALID (positional [PATHS]...)
+      # Read off the binary: `vector validate --help` -> `Usage: vector validate
+      # [OPTIONS] [PATHS]...`.
+      - validate
+      - --skip-healthchecks
+      - /etc/vector/vector.yaml
+  changed_when: false
+  # NOT PROVABLE BY --check, and that is structural rather than an oversight:
+  # this task validates a file that only exists after a real apply, so a dry run
+  # skips it entirely. It is therefore in the class of task whose first execution
+  # is its first test — which is precisely how the --config bug above reached a
+  # live host. When editing this invocation, verify it against the binary on a
+  # host, not against a dry run.
+  when: not ansible_check_mode
+
+# UNGATED on purpose — no `changed` condition, exactly like the "Ensure rsyslog is
+# running and enabled" task in roles/rsyslog_structured. The restart below only
+# fires when something in this run changed. If Vector is dead on an otherwise
+# converged host, nothing else here would start it and this host silently stops
+# shipping while every task reports ok.
+- name: Ensure Vector is enabled and running
+  ansible.builtin.systemd_service:
+    name: vector
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Restart Vector for changed package or configuration
+  ansible.builtin.systemd_service:
+    name: vector
+    state: restarted
+  when:
+    - not ansible_check_mode
+    - vector_agent_needs_restart | bool
+
+# The wait is the load-bearing part: Vector exits about a second after a malformed
+# config, so an is-active issued immediately after the restart lands inside the
+# crash window about as often as not, and `active` there means nothing.
+- name: Let a restarted Vector run long enough to crash on a bad config
+  ansible.builtin.wait_for:
+    timeout: "{{ vector_agent_settle_seconds }}"
+  when:
+    - not ansible_check_mode
+    - vector_agent_needs_restart | bool
+
+# --- Prove the unit is up AND that the drop-in actually took ------------------
+# `systemd_service` with a name and no state/enabled/daemon_reload does not act: it
+# reports changed:false and returns `status`, the parsed output of
+# `systemctl show <unit>` — i.e. the EFFECTIVE, MERGED unit. That is the only
+# honest answer to "did the override apply", and it is why this is one task rather
+# than a `systemctl` command (which ansible-lint rejects, correctly).
+- name: Read the effective Vector unit properties
+  ansible.builtin.systemd_service:
+    name: vector
+  register: vector_agent_unit
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert Vector is running
+  ansible.builtin.assert:
+    that:
+      - vector_agent_unit.status.ActiveState == 'active'
+    fail_msg: >-
+      vector.service on {{ inventory_hostname }} is
+      '{{ vector_agent_unit.status.ActiveState }}'
+      ({{ vector_agent_unit.status.SubState }}), not active.
+      Check `systemctl status vector` and `journalctl -u vector -n 50`. A failed
+      ExecStartPre means the config did not validate; anything else is in the
+      journal.
+    quiet: true
+  when: not ansible_check_mode
+
+# SCOPE OF THIS ASSERT, stated honestly because the drop-in comment used to claim
+# more than it delivers. Ansible's systemd_service parses `systemctl show` into a
+# DICT, so when a property appears on several lines only the LAST survives — and
+# with our drop-in the last ExecStartPre is ours either way. This assert therefore
+# proves OUR entry is present and last; it CANNOT prove the `ExecStartPre=` empty
+# reset removed the base unit's healthcheck-running entry. What covers that is
+# systemd's own documented reset semantics (an empty assignment clears the
+# inherited list, and drop-ins parse after the fragment) plus the DropInPaths
+# check below, which proves the file is loaded at all. If the reset ever silently
+# stopped working, the symptom would be the unit failing to start whenever
+# VictoriaLogs is unreachable — loud, and exactly what the drop-in exists to
+# prevent.
+#
+# PROPERTY NAMES ARE MEASURED, NOT GUESSED, and one of them is a trap:
+# the unit-file DIRECTIVE is `StartLimitIntervalSec` but the property `systemctl
+# show` reports is `StartLimitIntervalUSec`. `systemctl show -p
+# StartLimitIntervalSec` prints NOTHING AT ALL — an assert written against that
+# name would pass or fail for the wrong reason. Verified on the live fleet
+# 2026-08-19 against /usr/lib/systemd/system/modprobe@.service, which ships
+# `StartLimitIntervalSec=0` and reports `StartLimitIntervalUSec=0`.
+#
+# No default() on any of these lookups: a property that stops being reported must
+# raise, not quietly satisfy a comparison against an empty string.
+#
+# All FIVE of the drop-in's directives are covered: StartLimitIntervalSec (trap 3),
+# ExecStartPre (trap 1), EnvironmentFile (trap 2), Restart, and ExecStart. ExecStart
+# earns its line rather than padding the list — the base unit's is a bare
+# `/usr/bin/vector` with no --config, so without the assert the two Exec lines could
+# silently disagree about which file was validated and which one is running.
+- name: Assert the homelab systemd drop-in is in force
+  ansible.builtin.assert:
+    that:
+      - "'10-homelab.conf' in vector_agent_unit.status.DropInPaths"
+      - vector_agent_unit.status.StartLimitIntervalUSec == '0'
+      - "'--skip-healthchecks' in vector_agent_unit.status.ExecStartPre"
+      - "'--config /etc/vector/vector.yaml' in vector_agent_unit.status.ExecStart"
+      - "'/etc/vector/vector.env' in vector_agent_unit.status.EnvironmentFiles"
+      - vector_agent_unit.status.Restart == 'always'
+    fail_msg: >-
+      /etc/systemd/system/vector.service.d/10-homelab.conf is on disk but the
+      running unit does not reflect it.
+      StartLimitIntervalUSec={{ vector_agent_unit.status.StartLimitIntervalUSec }},
+      StartLimitBurst={{ vector_agent_unit.status.StartLimitBurst }},
+      Restart={{ vector_agent_unit.status.Restart }},
+      RestartUSec={{ vector_agent_unit.status.RestartUSec }},
+      EnvironmentFiles={{ vector_agent_unit.status.EnvironmentFiles }},
+      ExecStartPre={{ vector_agent_unit.status.ExecStartPre }},
+      ExecStart={{ vector_agent_unit.status.ExecStart }},
+      DropInPaths={{ vector_agent_unit.status.DropInPaths }}.
+      Without StartLimitIntervalUSec=0 systemd gives up on this shipper
+      permanently after five failed starts; without --skip-healthchecks a
+      VictoriaLogs outage IS five failed starts. Try `systemctl daemon-reload` and
+      re-run.
+    quiet: true
+  when: not ansible_check_mode
+
+# --- Prove the environment file parsed the way we claim it does ---------------
+# The label every alert and query in this change keys on. It must be the ANSIBLE
+# INVENTORY NAME, not the OS hostname — on eq12 those differ (`pve`), and a
+# hostname label that disagrees with the inventory needs a second hand-maintained
+# mapping, which is the thing #143 removed.
+- name: Read VECTOR_HOSTNAME out of the running Vector process
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      pid=$(systemctl show -p MainPID --value vector)
+      tr '\0' '\n' < "/proc/${pid}/environ" | sed -n 's/^VECTOR_HOSTNAME=//p'
+    executable: /bin/bash
+  register: vector_agent_env_hostname
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert Vector is labelling records with this host's inventory name
+  ansible.builtin.assert:
+    that:
+      - vector_agent_env_hostname.stdout | trim == inventory_hostname
+    fail_msg: >-
+      The running Vector process has
+      VECTOR_HOSTNAME='{{ vector_agent_env_hostname.stdout | default('') | trim }}'
+      but this host's inventory name is '{{ inventory_hostname }}'. Every record
+      this host ships would be labelled with the wrong hostname, and the per-host
+      recency alert keys on that label.
+    quiet: true
+  when: not ansible_check_mode
+
+# THE claim in vector.env.j2's header, tested rather than believed: systemd strips
+# the surrounding double quotes and takes the contents LITERALLY, `$` included. If
+# it did not — if it interpolated, or kept the quotes, or truncated at a `$` the
+# way compose's dotenv parser does (#117) — VictoriaLogs would answer 401 and
+# Vector would stay up dropping every batch, which is the failure this whole issue
+# family exists to stop being invisible.
+#
+# The comparison is between two sha256 digests, computed on the host and in Jinja.
+# Neither the credential nor a diff of it ever appears: the shell prints only a
+# digest, and `quiet: true` means a failed assert prints the literal expression
+# rather than the operands. Deliberately NOT no_log — that would censor the failure
+# output this exists to produce.
+- name: Digest the VictoriaLogs password the running Vector process actually holds
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      pid=$(systemctl show -p MainPID --value vector)
+      tr '\0' '\n' < "/proc/${pid}/environ" \
+        | sed -n 's/^VL_AUTH_PASSWORD=//p' \
+        | tr -d '\n' \
+        | sha256sum \
+        | cut -d' ' -f1
+    executable: /bin/bash
+  register: vector_agent_env_secret_digest
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the credential survived the systemd EnvironmentFile byte for byte
+  ansible.builtin.assert:
+    that:
+      - (vector_agent_env_secret_digest.stdout | trim) == (vault_vl_auth_password | string | hash('sha256'))
+    fail_msg: >-
+      The VL_AUTH_PASSWORD in Vector's process environment does not match the vault
+      value. systemd's EnvironmentFile parsing has mangled it — check
+      /etc/vector/vector.env for an unbalanced quote, and re-read the parser notes
+      at the top of roles/vector_agent/templates/vector.env.j2. Vector will 401
+      against VictoriaLogs and stay up while dropping every batch.
+    quiet: true
+  when: not ansible_check_mode
+
+# --- End-to-end ingest proof: THE bar for this role ---------------------------
+# Everything above proves a process is running with the right environment. That is
+# exactly the evidence that was green for the ~30 days the log pipeline was dead
+# (docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md),
+# whose Prevention section says it plainly: assert the data ARRIVED, not that the
+# process is running.
+#
+# One assertion proves the entire chain for this host: rsyslog is routing ->
+# structured.log is being written -> Vector is reading it -> the sink authenticated
+# -> VictoriaLogs stored it -> AND the record carries this host's inventory name,
+# because that is one of the filters.
+#
+# The query runs ON THE AGENT HOST, which reaches VictoriaLogs directly over the
+# LAN (measured: HTTP 401 in ~3 ms from all three before this change), so it also
+# proves the network path this host's Vector uses, not the coordinator's.
+- name: Generate a unique marker for the ingest probe
+  ansible.builtin.set_fact:
+    vector_agent_ingest_probe: "vector-agent-probe-{{ inventory_hostname }}-{{ ansible_date_time.iso8601_micro | regex_replace('[^0-9]', '') }}"
+  when: not ansible_check_mode
+
+# changed_when: false — one line into the log stream IS the probe, not a state
+# change. local0.notice for the same reason rsyslog_structured uses it: Debian
+# routes it to /var/log/syslog too, so a human debugging this can see the marker.
+- name: Emit the ingest probe marker
+  ansible.builtin.command: logger -p local0.notice "{{ vector_agent_ingest_probe }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Wait for the probe marker to come back out of VictoriaLogs
+  ansible.builtin.uri:
+    url: "{{ victorialogs_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: '_time:10m hostname:{{ inventory_hostname }} source:host "{{ vector_agent_ingest_probe }}" | stats count() as rows'
+    url_username: "{{ vault_vl_auth_username }}"
+    url_password: "{{ vault_vl_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: vector_agent_ingest
+  # /select/logsql/query returns JSONL. `stats count()` yields a single line, but
+  # sum the findall rather than assuming one — a shape change must read as "no
+  # rows" and retry, not raise a Jinja error inside `until`.
+  until: >-
+    vector_agent_ingest.status | default(0) == 200
+    and (vector_agent_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  # failed_when:false so RETRY EXHAUSTION lands on the assert below, which can say
+  # what to check. No no_log anywhere on this pair — censoring it would blind the
+  # one diagnostic it exists to print (#88).
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Assert this host's log records actually reached VictoriaLogs
+  ansible.builtin.assert:
+    that:
+      - vector_agent_ingest.status | default(0) == 200
+      - (vector_agent_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+    fail_msg: >-
+      A marker written on {{ inventory_hostname }} two minutes ago did not come
+      back out of VictoriaLogs labelled hostname={{ inventory_hostname }}. Vector
+      may still be `active` — that is the failure mode, not evidence against it.
+      Check, in order:
+      (1) `systemctl status vector` on {{ inventory_hostname }};
+      (2) `journalctl -u vector -n 100` for sink errors — a 401 here means the
+          credential or VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION is wrong,
+          and Vector will NOT exit;
+      (3) that /var/log/structured.log is GROWING, not merely present
+          (`wc -l` it twice) — if it is not, rsyslog is the problem, not Vector;
+      (4) that VictoriaLogs on eq12_docker is up and reachable from here.
+      If the disk buffer under /var/lib/vector is wedged, the runbook is
+      docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md — the
+      agent equivalent is `systemctl stop vector`, clear the buffer directory's
+      CONTENTS, `systemctl start vector`.
+      HTTP status was {{ vector_agent_ingest.status | default('none') }}.
+    quiet: true
+  when: not ansible_check_mode
+
+# --- docker_logs is a DECLARED CAPABILITY; prove it, do not assume it ----------
+# Everything above this point can pass with the docker_logs source completely
+# dead. Walk it: `getent group docker` passes (the group exists regardless), the
+# `user` task passes (it edits /etc/group, which says nothing about the running
+# process), `vector validate` passes (it does not connect to the socket under
+# --skip-healthchecks), ActiveState=active passes (Vector runs happily with one
+# broken source, logging about it on a loop), and the ingest proof above passes
+# because it filters `source:host` and its marker arrives via `logger`, never
+# touching Docker. The per-host alert filters `source:host` too. So every
+# container log on CT 201 could be missing indefinitely with the deploy green and
+# no alert firing — the #057 shape, one source over.
+#
+# Two assertions close it, and they answer different questions.
+
+# QUESTION 1: does the RUNNING PROCESS hold the group? /etc/group membership is
+# not the same thing — systemd resolves supplementary groups from the group
+# database at exec time, so a Vector that was already running when the group was
+# granted does not have it. /proc/<pid>/status is the kernel's view and the only
+# authority.
+- name: Read the docker gid and the effective groups of the running Vector process
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      pid=$(systemctl show -p MainPID --value vector)
+      gid=$(getent group docker | cut -d: -f3)
+      groups=$(sed -n 's/^Groups:[[:space:]]*//p' "/proc/${pid}/status")
+      echo "gid=${gid} groups=${groups}"
+    executable: /bin/bash
+  register: vector_agent_docker_groups
+  changed_when: false
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+
+- name: Assert the running Vector process can actually reach the docker socket
+  vars:
+    _gid: "{{ vector_agent_docker_groups.stdout | regex_replace('^gid=([0-9]+).*$', '\\1') | trim }}"
+    _groups: "{{ vector_agent_docker_groups.stdout | regex_replace('^.*groups=', '') | trim | split() }}"
+  ansible.builtin.assert:
+    that:
+      - _gid in _groups
+    fail_msg: >-
+      The running Vector process on {{ inventory_hostname }} does NOT hold the
+      docker group in its effective supplementary groups
+      ({{ vector_agent_docker_groups.stdout }}), so its docker_logs source cannot
+      read /var/run/docker.sock. Vector will stay `active` and keep shipping host
+      records while every container log is silently missing.
+      systemd resolves supplementary groups at exec time, so the usual cause is a
+      process that predates the group grant — a restart fixes that, and this role
+      restarts when group membership changes. If a restart does NOT fix it, add
+      `SupplementaryGroups=docker` to templates/vector-systemd-dropin.conf.j2
+      inside the vector_agent_docker_logs conditional. Do not weaken this assert.
+    quiet: true
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+
+# QUESTION 2: is Vector actually STORING container records?
+#
+# THIS ASSERT USED TO BE WRONG, in the same way the alert rule this batch
+# rebuilt was wrong, and the two mistakes are worth reading together.
+#
+# It required `source:docker` records in a 15-minute window, unconditionally.
+# That asserts CONTINUOUS CONTAINER TRAFFIC, which this host does not have.
+# Measured on n5pro_docker: lms, portainer and watchtower produced 0 log lines
+# between them over 20 minutes. lms serves music without logging, portainer is an
+# idle un-initialised UI (#149), and watchtower speaks once a day at 04:30. Zero
+# `source:docker` records is the CORRECT state here, not a defect — so the assert
+# failed a healthy deploy.
+#
+# That is exactly the category error behind obs-host-log-ingest-stalled: inferring
+# liveness from incidental traffic on a quiet subject. The same batch made it
+# twice, once in an alert rule and once here, and the second instance was only
+# found because the first had taught us to look. Note the old fail_msg even NAMED
+# this case — "if every container really has been silent this is a false alarm,
+# but VERIFY that rather than assuming it" — and then asserted anyway. Documenting
+# a failure mode is not the same as handling it.
+#
+# THE FIX IS TO MEASURE THE PREMISE, not to delete the check. The docker path
+# genuinely needs proving, and the Groups assert above only proves CAPABILITY (the
+# process holds the gid) rather than DELIVERY. So: ask Docker whether anything
+# actually logged, and require records only if something did.
+#
+# WINDOW ASYMMETRY IS DELIBERATE: Docker is queried over 10m, VictoriaLogs over
+# 15m. The larger store-side window strictly contains the smaller source-side one,
+# so a line that Docker reports cannot fall outside the window we search — which
+# would otherwise be a race that fails a healthy deploy at the boundary. Never
+# make these equal.
+#
+# TWO ALTERNATIVES CONSIDERED AND REJECTED, both on measurement rather than taste:
+#
+#   * "Assert the docker_logs source is connected/healthy instead of that events
+#     arrived." There is no positive signal to assert on. Vector's journal on this
+#     host contains ZERO docker_logs lines — not at startup, not while watching
+#     three containers. Only absence-of-error is available, which is rung 2 on the
+#     evidence ladder in
+#     docs/solutions/conventions/prove-notification-delivery-not-just-config-validity.md
+#     and must not be written up as delivery. (Vector's internal metrics WOULD give
+#     rung 3 — component_received_events_total for the source — but that needs the
+#     internal API enabled, which is its own change. Filed as a follow-up.)
+#
+#   * "Emit a synthetic line into a container, like the heartbeat." Measured and
+#     impossible in its cheap form: `docker exec <c> echo MARKER` output does NOT
+#     reach the container's log stream — only PID 1's stdout/stderr is captured, so
+#     `docker logs` showed 0 matches for the probe string. Doing it properly means
+#     RUNNING A THROWAWAY CONTAINER on a production docker host on every deploy,
+#     which buys a phantom container_name in the log store and a hard dependency on
+#     some image staying present. Too much machinery for a deploy gate.
+- name: Measure whether any container on this host has logged recently
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      total=0
+      for c in $(docker ps -q); do
+        # 2>&1 is REQUIRED, not sloppiness: `docker logs` interleaves the
+        # container's stdout AND stderr, plenty of containers log only to
+        # stderr, and Vector's docker_logs captures both. Counting stdout
+        # alone would under-report and skip the assert on a host that is
+        # genuinely talking.
+        #
+        # But a FAILED `docker logs` also writes to stderr, and counting its
+        # error text as container traffic would flip this gate the wrong way —
+        # demanding records on a host that produced none. So the exit status is
+        # checked and a failure counts as zero, which errs toward the loud skip
+        # rather than toward a false failure.
+        if out=$(docker logs --since 10m "$c" 2>&1); then
+          if [ -n "$out" ]; then
+            n=$(printf '%s\n' "$out" | wc -l)
+          else
+            n=0
+          fi
+        else
+          n=0
+        fi
+        total=$((total + n))
+      done
+      echo "$total"
+    executable: /bin/bash
+  register: vector_agent_docker_output
+  changed_when: false
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+
+- name: Wait for container log records from this host to reach VictoriaLogs
+  ansible.builtin.uri:
+    url: "{{ victorialogs_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: '_time:15m hostname:{{ inventory_hostname }} source:docker | stats count() as rows'
+    url_username: "{{ vault_vl_auth_username }}"
+    url_password: "{{ vault_vl_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: vector_agent_docker_ingest
+  until: >-
+    vector_agent_docker_ingest.status | default(0) == 200
+    and (vector_agent_docker_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+    - vector_agent_docker_output.stdout | int > 0
+
+- name: Assert container log records from this host actually reached VictoriaLogs
+  ansible.builtin.assert:
+    that:
+      - vector_agent_docker_ingest.status | default(0) == 200
+      - (vector_agent_docker_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+    fail_msg: >-
+      Docker reports {{ vector_agent_docker_output.stdout | default('?') }} container
+      log lines on {{ inventory_hostname }} in the last 10 minutes, but VictoriaLogs
+      holds ZERO `source:docker` records for it in the last 15. So there IS traffic
+      and it is not arriving — this is not the quiet-host false alarm, it is a real
+      break in the docker path. Host records from the same Vector are arriving (the
+      assert above passed), so the process, the credential and the sink are all fine.
+      Check, in order:
+      (1) `journalctl -u vector -n 100` for permission-denied or connection errors
+          against /var/run/docker.sock;
+      (2) `ls -l /var/run/docker.sock` and compare its group to the effective
+          groups asserted above.
+      HTTP status was {{ vector_agent_docker_ingest.status | default('none') }}.
+    quiet: true
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+    - vector_agent_docker_output.stdout | int > 0
+
+# LOUD, not silent. A skipped check that reads as a pass is how an unproven path
+# gets mistaken for a verified one — so when the premise is absent, SAY the docker
+# path was not exercised rather than letting a green run imply it was.
+- name: Report that the docker log path was NOT exercised this run
+  ansible.builtin.debug:
+    msg: >-
+      DOCKER PATH NOT PROVEN THIS RUN. Every container on {{ inventory_hostname }}
+      was silent for the last 10 minutes (0 log lines across `docker ps`), so there
+      was nothing for Vector to ship and the delivery assert was skipped rather than
+      failed. What IS still proven: the vector process holds the docker gid in its
+      effective groups (asserted above). What is NOT proven: that events actually
+      traverse the socket to VictoriaLogs. If you need that proven on demand, the
+      cheapest honest way is to make a container talk — e.g. restart one and re-run.
+  when:
+    - vector_agent_docker_logs | bool
+    - not ansible_check_mode
+    - vector_agent_docker_output.stdout | int == 0

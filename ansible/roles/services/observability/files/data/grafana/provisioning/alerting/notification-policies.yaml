@@ -31,10 +31,23 @@ policies:
     # `server` is in group_by on purpose: the probe rules (#139) carry one
     # instance per probed URL, and without it two different services failing
     # would be merged into ONE notification whose subject names only the first.
+    #
+    # `hostname` is here for exactly the same reason, added by #134:
+    # obs-host-log-ingest-stalled-per-host carries one instance per HOST, and its
+    # entire purpose is to say WHICH host stopped shipping. Without this key, two
+    # dead shippers collapse into a single `[FIRING:2]` notification whose subject
+    # names neither, which would make the rule no better than the fleet-wide one
+    # it exists to supplement.
+    #
+    # Adding a label that most rules do not carry is safe and is already the
+    # established pattern here: `server` is absent from both log-ingest rules and
+    # they group fine. Alertmanager simply treats the missing label as empty for
+    # grouping purposes.
     group_by:
       - grafana_folder
       - alertname
       - server
+      - hostname
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s

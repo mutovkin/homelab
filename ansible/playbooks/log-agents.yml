@@ -1,0 +1,23 @@
+---
+# Native Vector log shippers for the hosts with no observability stack of their own
+# (#134): eq12, n5pro, n5pro_docker. eq12_docker is deliberately not in this group —
+# it runs Vector as a container inside roles/services/observability.
+#
+# Run: ansible-playbook playbooks/log-agents.yml
+# One host: ansible-playbook playbooks/log-agents.yml --limit n5pro
+# Dry run:  ansible-playbook playbooks/log-agents.yml --check --diff --limit n5pro
+# Or:       task deploy:logagents / task deploy:logagents:check
+#
+# ORDER MATTERS, which is why site.yml imports this LAST. The role's final
+# assertion writes a marker on the agent host and then polls VictoriaLogs — which
+# runs on eq12_docker, deployed by deploy-services.yml. Judge an agent before its
+# sink exists and every first-ever run fails on a condition that is not the agent's
+# fault.
+#
+# Facts are gathered (the default): the role builds its probe marker from
+# ansible_date_time.
+- name: Deploy fleet log shippers
+  hosts: vector_agents
+  become: true
+  roles:
+    - vector_agent

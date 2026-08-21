@@ -1,0 +1,43 @@
+---
+# Host-log heartbeat (#134).
+#
+# WHY THIS EXISTS AT ALL. The alerting this fleet had asked "did any host log
+# line arrive in the last N minutes", and treated silence as failure. Measured
+# 2026-08-20, that question has no stable answer here: host logs arrive in
+# BURSTS separated by long silences, so 66% of eq12_docker's 10-minute windows
+# and 40% of eq12's are legitimately EMPTY in perfect health. The rule built on
+# it paged a human every ~30 minutes for 21 hours.
+#
+# Widening the window does not fix it. The max gap on both offending hosts was
+# EXACTLY 3600.0s — a single incidental hourly event holding the window open,
+# not headroom. Any window that survives today survives on log noise nobody
+# controls (on eq12_docker: recurring dockerd image-signature ERRORS).
+#
+# A heartbeat replaces "absence of incidental traffic" (ambiguous) with "absence
+# of a signal that is contractually always there" (unambiguous). It needs no
+# per-host tuning and behaves identically on a busy container host and an idle
+# hypervisor — which matters, because burstiness does NOT track volume: the
+# BUSIEST host in this fleet was the worst offender at 66%, while n5pro never had
+# a single empty 10m window.
+vector_heartbeat_enabled: true
+
+# Every 5 minutes. The alert window is 4x this, so a single missed beat — a
+# reboot, a slow timer, a logrotate — cannot page anyone.
+vector_heartbeat_interval: 5min
+
+# Tight accuracy so beat spacing is predictable. systemd's default AccuracySec is
+# 1min, which lets the timer drift enough to matter against a 20m window.
+vector_heartbeat_accuracy: 10s
+
+# The literal string the alert rule filters on. Changing it here means changing
+# the LogsQL in
+# roles/services/observability/files/data/grafana/provisioning/alerting/per-host-ingest-health.yaml
+# in the same commit — they are ONE CONTRACT IN TWO FILES, and nothing but the
+# end-to-end probe would notice them disagreeing.
+vector_heartbeat_marker: homelab-heartbeat
+
+# daemon.info: an ordinary facility carried by the drop-in's `*.*` selector, so a
+# beat travels the EXACT path a real host log line travels — rsyslog socket,
+# selector, omfile, structured.log, Vector's file source, the sink. A dedicated
+# facility would be a shorter path and would prove less.
+vector_heartbeat_priority: daemon.info

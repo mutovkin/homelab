@@ -67,3 +67,21 @@ nft_fw_drop_ipv6: false
 # Ordering only, never a dependency (fail-open): publish the rules before docker
 # starts exposing ports.
 nft_fw_before_docker: "{{ nft_fw_hook == 'prerouting' }}"
+
+# Attach a `counter` to the terminal drop rules, so `nft list table` shows how
+# many packets each governed port has actually rejected.
+#
+# OPT-IN, and default false ON PURPOSE. This is a shared role with five consumers
+# (postgres, portainer, vaultwarden, nut, observability); flipping it globally
+# would rewrite every consumer's .nft file and reload every scoped-firewall unit
+# on their next deploy — a fleet-wide side effect for one batch's diagnostic need,
+# and four batches are landing concurrently.
+#
+# READ THIS BEFORE USING A COUNTER AS EVIDENCE (#134). A counter is OBSERVABILITY,
+# not verification: it proves a packet MATCHED the drop rule, not that a blocked
+# source exists to generate one. A rule sitting at counter 0 is indistinguishable
+# from a rule nothing has ever tried to traverse — which is precisely the reading
+# that makes a narrowing look verified when it is not. Prove a drop from a
+# genuinely BLOCKED SOURCE; use this only to confirm the rule keeps firing after
+# later reloads.
+nft_fw_count_drops: false
