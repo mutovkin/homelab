@@ -1,0 +1,26 @@
+# {{ ansible_managed }} — roles/rsyslog_structured (#134)
+# -> /etc/systemd/system/homelab-heartbeat.service
+#
+# One line into the host log stream, every {{ vector_heartbeat_interval }}, so that
+# ABSENCE of host logs becomes an unambiguous signal instead of being
+# indistinguishable from a host that simply had nothing to say.
+#
+# Triggered by homelab-heartbeat.timer; this unit is not enabled on its own.
+
+[Unit]
+Description=Homelab host-log heartbeat (one marker line for ingest liveness)
+Documentation=file:///etc/rsyslog.d/40-vector-structured.conf
+# Ordering only, never a dependency. If rsyslog is down the beat is LOST, and
+# that is precisely the outcome the alert must see — a Requires= here would make
+# the heartbeat fail to run and produce the same silence for a different reason,
+# which is strictly less informative.
+After=rsyslog.service
+
+[Service]
+Type=oneshot
+# `logger` writes to /dev/log, the same socket every other daemon on this host
+# uses. The marker carries the ANSIBLE INVENTORY NAME so a human grepping
+# /var/log/syslog sees which host it came from — the `hostname` LABEL in
+# VictoriaLogs comes from Vector's VECTOR_HOSTNAME, not from this text, so the
+# two agree by construction rather than by convention.
+ExecStart=/usr/bin/logger -p {{ vector_heartbeat_priority }} -t homelab-heartbeat "{{ vector_heartbeat_marker }} {{ inventory_hostname }}"

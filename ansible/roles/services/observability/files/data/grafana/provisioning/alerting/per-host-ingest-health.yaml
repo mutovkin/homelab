@@ -24,15 +24,15 @@ apiVersion: 1
 # would fire for at most one evaluation and then declare the dead host healthy.
 #
 # The form below is the fix. The OUTER window is 24h, so a host that shipped at
-# any point in the last day is still returned; the `if (_time:15m)` clause counts
+# any point in the last day is still returned; the `if (_time:20m)` clause counts
 # only what arrived recently. A dead shipper therefore returns a row with
 # recent = 0, which a `< 1` threshold CAN fire on.
 #
-# EVIDENCE, measured 2026-08-19 against the live VictoriaLogs, running EXACTLY the
-# expression deployed below and then the naive form as a control. The pair is the
-# proof — neither line means much alone:
+# EVIDENCE that the outer window is load-bearing, measured against the live
+# VictoriaLogs: the deployed shape versus the naive one, as a control. The pair is
+# the proof — neither line means much alone:
 #
-#   Q1, the deployed expression:
+#   Q1, the deployed shape:
 #     _time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
 #       {"hostname":"d7d7d4e8c59e","recent":"0"}      <- stopped, and STILL RETURNED
 #       {"hostname":"eq12_docker","recent":"116"}     <- alive
@@ -44,6 +44,47 @@ apiVersion: 1
 # Q1 emits the zero-count group; Q3 drops the series entirely. That difference is
 # the entire reason the 24h outer window is load-bearing, and it is why this file
 # must not be "simplified" to the shorter query.
+#
+# ============ WHAT IT COUNTS: THE HEARTBEAT, NOT INCIDENTAL TRAFFIC ============
+# The deployed expression additionally filters `"homelab-heartbeat"`, and that is
+# the difference between this rule working and this rule paging all night.
+#
+# An earlier draft of this file counted ANY `source:host` record in a 15-minute
+# window. Measured 2026-08-20, that is a coin flip on half the fleet:
+#
+#   host          empty 10m windows     empty 15m     max gap
+#   eq12_docker   66.2% (VL: 68.1%)     57.5%         3600.0s
+#   eq12          39.7%                 33.8%         3600.0s
+#   n5pro          0.0%                  0.0%           448s
+#   n5pro_docker   0.0%                  0.0%           396s
+#
+# Host logs arrive in BURSTS with long silences between them — one 10m bucket held
+# 1288 records, another held 1 — so "no records" is the NORMAL state of a healthy
+# host here, not a stall. The sibling rule built on that assumption paged a human
+# every ~30 minutes for 21 hours. This rule would have been WORSE: its 15m clause
+# maps to 33.8% empty on eq12, a third of its life firing on a healthy hypervisor.
+#
+# TWO THINGS THAT LOOK LIKE FIXES AND ARE NOT:
+#   * Widening the window. The max gap on both offending hosts is EXACTLY 3600.0s
+#     — not headroom, but a single incidental hourly event holding the window open
+#     (on eq12_docker: recurring dockerd image-signature ERRORS). A 60m window is
+#     one bugfix away from flapping, at ~70 min detection latency.
+#   * Per-host tuning. Burstiness does not track volume: the BUSIEST host is the
+#     worst offender at 66%, while n5pro never had a single empty 10m window. There
+#     is no per-host number to tune toward.
+#
+# So the rule no longer asks "did anything arrive". It asks "did the beat arrive" —
+# roles/rsyslog_structured emits `homelab-heartbeat <inventory_hostname>` every
+# 5 minutes on every host, through the same `*.*` selector and the same
+# structured.log every real host log line travels. 20m = four consecutive missed
+# beats. Absence is now a FACT rather than an ambiguity, and it needs no per-host
+# tuning because the signal is identical on a busy container host and an idle
+# hypervisor.
+#
+# ONE CONTRACT IN TWO FILES: the marker string here and
+# `vector_heartbeat_marker` in roles/rsyslog_structured/defaults/main.yml must
+# match. Nothing but the role's own end-to-end probe would notice them drifting
+# apart — and if they drift, every host reads as dead.
 #
 # The plugin returns this as a MULTI-SERIES frame — one frame per hostname, with
 # `hostname` carried as a field label — so Grafana produces one alert instance per
@@ -86,15 +127,22 @@ groups:
   - orgId: 1
     name: per-host-ingest-health
     folder: Observability
-    # 5m evaluation against a 15m recency clause: two consecutive stalled
-    # evaluations (`for: 10m`) before it fires, so a Vector restart, a deploy, or a
-    # single slow batch does not alert. Worst-case detection latency ~25 min.
+    # 5m evaluation against a 20m recency clause — i.e. four consecutive missed
+    # beats before the window is even empty, plus one confirming evaluation
+    # (`for: 5m`). A Vector restart, a deploy, a logrotate or one slow timer
+    # cannot alert. Predicted worst-case detection latency ~25 min from the last
+    # beat, which the firing demonstration measures against the clock.
     interval: 5m
     rules:
       - uid: obs-host-log-ingest-stalled-per-host
         title: A host stopped shipping logs to VictoriaLogs
         condition: C
-        for: 10m
+        # 5m, not 10m. The 20-minute window ALREADY requires four consecutive
+        # missed beats, which is not a transient; `for:` here only adds one
+        # confirming evaluation against a single bad scrape. Predicted worst-case
+        # detection: 20m (window empties) + 5m (confirm) = ~25m from the last beat.
+        # The firing demonstration measures actual T0->Alerting against that number.
+        for: 5m
         # OK, NOT Alerting — and this is the one thing that must not be "fixed" by
         # copying the sibling rule. Absence is owned by exactly ONE rule, and TOTAL
         # absence is already owned by obs-log-ingest-stalled (noDataState:
@@ -107,18 +155,41 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          # $labels.hostname is the whole point of the multi-series frame: the
-          # email has to name WHICH host, or it is no better than the fleet-wide
-          # rule it exists to supplement.
+          # $labels.hostname is the whole point of the multi-series frame, and it
+          # is NOT decoration. The rule this replaces carried exactly four labels —
+          # alertname, component, grafana_folder, severity — so its emails could not
+          # name the affected machine at all. With one host shipping that was merely
+          # unhelpful; with four it is useless, which is the failure this rule exists
+          # to prevent.
+          #
+          # `hostname` reaches the instance from the QUERY (`stats by (hostname)`
+          # returns a multi-series frame, one frame per host), not from the `labels:`
+          # block below — so never "simplify" the query to a single aggregate, and
+          # never add a hostname matcher. The root notification policy carries
+          # `hostname` in its group_by for the same reason (#134): without it two
+          # dead hosts collapse into one [FIRING:2] email naming neither.
+          # VERIFY THIS ON A REAL FIRE by reading the rendered subject and label set,
+          # not by reading this file.
           summary: >-
-            {{ $labels.hostname }} has shipped no host log lines to VictoriaLogs in
-            the last 15 minutes.
+            {{ $labels.hostname }} has missed every log heartbeat for 20 minutes.
           description: >-
-            `_time:24h source:host | stats by (hostname) count() if (_time:15m)` is
-            0 for {{ $labels.hostname }} while other hosts are still reporting, so
-            this is ONE dead shipper rather than a dead log store — the fleet-wide
-            rules (obs-log-ingest-stalled, obs-host-log-ingest-stalled) cannot see
-            this and will stay Normal.
+            {{ $labels.hostname }} has not emitted a `homelab-heartbeat` marker in
+            20 minutes — four consecutive missed beats, at one beat every 5 minutes
+            from homelab-heartbeat.timer. Other hosts are still beating, so this is
+            ONE dead shipper rather than a dead log store; the fleet-wide rules
+            (obs-log-ingest-stalled, obs-host-log-ingest-stalled) cannot see this
+            and will stay Normal.
+            THIS IS NOT "the host went quiet". That is the whole reason the rule
+            counts a heartbeat rather than incidental traffic: host logs here
+            arrive in bursts, and 66% of eq12_docker's and 40% of eq12's 10-minute
+            windows are legitimately empty in perfect health. A missed beat is a
+            broken path, not a slow night.
+            The beat is emitted by homelab-heartbeat.timer (roles/rsyslog_structured)
+            and travels logger -> /dev/log -> rsyslog's `*.*` selector -> omfile ->
+            /var/log/structured.log -> Vector -> VictoriaLogs. Any link in that
+            chain breaking produces this alert, so check them in that order:
+            `systemctl status homelab-heartbeat.timer` first (is the beat even being
+            emitted?), then rsyslog, then Vector.
             On eq12, n5pro or n5pro_docker the shipper is a native systemd unit:
             check `systemctl status vector` and `journalctl -u vector -n 100` on
             that host. A 401 in the journal means the VictoriaLogs credential or
@@ -134,6 +205,12 @@ groups:
             agents, `--tags observability --limit eq12_docker` for the container.
             If the disk buffer is wedged, the runbook is
             docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+            EXPECTED LATENCY, so a slow page is not mistaken for a broken rule:
+            ~20m for the window to empty (4 missed beats) + `for: 5m` + the root
+            policy's 30s group_wait = about 25m30s from the last beat to the email
+            landing. The old rule's own resolved notice reported "Observed 10m30s
+            before this notification was delivered", which is exactly its `for: 10m`
+            plus that same 30s — so this arithmetic is measured, not assumed.
             NOTE, both directions of the 24h window: a hostname that was
             DELIBERATELY retired keeps producing a recent=0 row, and therefore keeps
             alerting, for up to 24h — the documented cost, not a bug. And in the
@@ -161,7 +238,7 @@ groups:
                 type: victoriametrics-logs-datasource
                 uid: PD775F2863313E6C7
               queryType: stats
-              expr: "_time:24h source:host | stats by (hostname) count() if (_time:15m) as recent"
+              expr: "_time:24h source:host \"homelab-heartbeat\" | stats by (hostname) count() if (_time:20m) as recent"
           # B: collapse each series to one number so the threshold has something to
           # compare, per hostname. dropNN, not replaceNN: a null must not silently
           # become a 0 and fire, nor become a number and mask a stall — with no

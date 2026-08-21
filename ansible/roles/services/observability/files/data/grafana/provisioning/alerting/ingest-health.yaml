@@ -113,11 +113,19 @@ groups:
       # on this host, so host ingestion can go to exactly zero and that rule stays
       # Normal forever. This is the per-source twin, and it is also precisely the
       # per-host recency rule #134 needs — one host at a time.
-      # ============================ PAUSED, DELIBERATELY ============================
-      # STOPGAP (#134). This rule flapped for ~21 hours and paged a human roughly
-      # every 30 minutes. It is paused, not deleted and not widened, until the
-      # heartbeat lands — at which point it is unpaused in the SAME change, so the
-      # fleet never sits in a state where the rule exists but means nothing.
+      # ===================== UNPAUSED: THE HEARTBEAT REPAIRED IT ====================
+      # This rule flapped for ~21 hours and was PAUSED as a stopgap (#134). The
+      # heartbeat now landing in roles/rsyslog_structured is what makes it
+      # meaningful again, so it is unpaused in the same change — the fleet never
+      # sits in a state where the rule exists but means nothing.
+      #
+      # WHAT CHANGED: every host now emits a marker every 5 minutes, so a healthy
+      # host has a guaranteed FLOOR of ~2 host records per 10m window. `count() < 1`
+      # therefore means "not one line, not even the beat" — a real stall — instead
+      # of "this host happened to be quiet", which was true two-thirds of the time.
+      # The query is unchanged; the DATA underneath it changed. Do not re-pause or
+      # widen this without also removing the heartbeat, or you will be tuning
+      # against a problem that no longer exists.
       #
       # WHY IT FLAPS, measured 2026-08-20 rather than guessed:
       #   host          empty 10m windows      max gap
@@ -155,7 +163,7 @@ groups:
         # absence, "no data" IS the failure, not the healthy case.
         noDataState: Alerting
         execErrState: Alerting
-        isPaused: true
+        isPaused: false
         annotations:
           summary: No host syslog lines reached VictoriaLogs in the last 10 minutes.
           description: >-

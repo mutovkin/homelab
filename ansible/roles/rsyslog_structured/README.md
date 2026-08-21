@@ -73,6 +73,90 @@ hosts at once**.
 
 Everything from step 2 onward is skipped under `--check`.
 
+## The host-log heartbeat (#134)
+
+Every host emits one marker line every **5 minutes**:
+
+```
+homelab-heartbeat <inventory_hostname>      # logger -p daemon.info
+```
+
+driven by `homelab-heartbeat.timer` → `homelab-heartbeat.service`, both templated
+by this role. `obs-host-log-ingest-stalled-per-host` alerts when a host misses
+**four consecutive beats** (a 20-minute window).
+
+### Why a heartbeat instead of just watching the logs
+
+Because on this fleet, "no host log lines arrived" is not evidence of anything.
+Measured 2026-08-20:
+
+| Host | empty 10m windows | empty 15m | max gap |
+| ---- | ----------------- | --------- | ------- |
+| eq12_docker | **66.2%** (VictoriaLogs: 68.1%) | 57.5% | 3600.0s |
+| eq12 | **39.7%** | 33.8% | 3600.0s |
+| n5pro | 0.0% | 0.0% | 448s |
+| n5pro_docker | 0.0% | 0.0% | 396s |
+
+Host logs arrive in **bursts** with long silences between them — one 10-minute
+bucket held 1288 records, another held 1. An alert built on that silence paged a
+human roughly every 30 minutes for 21 hours while the fleet was perfectly healthy.
+
+Two things that look like fixes and are not:
+
+- **Widening the window.** The max gap on both offending hosts is *exactly*
+  3600.0s. That is not headroom — it is a single incidental hourly event holding
+  the window open (on eq12_docker, recurring `dockerd` image-signature **errors**).
+  A 60-minute window would be one bugfix away from flapping, and would cost ~70
+  minutes of detection latency.
+- **Per-host tuning.** Burstiness does not track volume: the *busiest* host is the
+  worst offender at 66%, while n5pro never had a single empty 10-minute window.
+  There is no per-host number to tune toward.
+
+A heartbeat replaces an ambiguous signal (absence of incidental traffic) with an
+unambiguous one (absence of something contractually always present), and behaves
+identically on a busy container host and an idle hypervisor.
+
+### What it does and does not prove
+
+The beat travels the **full** path — `logger` → `/dev/log` → rsyslog's `*.*`
+selector → `omfile` → `/var/log/structured.log` → Vector's file source → the sink
+→ VictoriaLogs. So it exercises the same machinery a real host log line does, and
+`daemon.info` is deliberately an ordinary facility rather than a dedicated one: a
+private facility would be a shorter path and would prove less.
+
+**The caveat, stated rather than left implicit:** it monitors the *heartbeat*
+path, not the *application-log* path. An rsyslog rule that dropped `daemon.info`
+while still routing other facilities would keep this alert quiet. That failure
+mode is narrow, and it is already covered from the other side — the per-deploy
+freshness probe above writes its marker at `local0.notice` through the same `*.*`
+selector, so the two together cover both a broken selector and a
+facility-specific rule.
+
+### The contract, and where it can silently break
+
+The marker string exists in **two files** and nothing but the role's own probe
+would notice them drifting apart:
+
+| Where | What |
+| ----- | ---- |
+| `defaults/main.yml` | `vector_heartbeat_marker` |
+| `roles/services/observability/.../alerting/per-host-ingest-health.yaml` | the `"homelab-heartbeat"` filter in the LogsQL |
+
+Change one, change both, in the same commit. If they drift, **every host reads as
+dead**. The role asserts, on every run, that a beat actually reaches
+`structured.log` — that assert is what turns a silent contract break into a failed
+deploy.
+
+Two deliberate details in the units:
+
+- **`Persistent=false`** on the timer. A heartbeat is a liveness signal, not an
+  audit record; catching up missed beats after downtime would write stale markers
+  claiming the host was alive when it demonstrably was not.
+- **`After=rsyslog.service`, never `Requires=`.** If rsyslog is down the beat
+  should be *lost* — that is exactly what the alert must see. A hard dependency
+  would stop the beat from running and produce the same silence for a different
+  reason, which is strictly less informative.
+
 ## Interface
 
 No variables. It is deliberately parameterless — a second structured stream with
@@ -83,6 +167,16 @@ It exports one fact the caller may read after the include:
 | Fact | Meaning |
 | ---- | ------- |
 | `vector_structured_probe` | the unique marker string this run wrote through `logger`. Undefined in check mode. |
+
+Variables (all with defaults, see `defaults/main.yml`):
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `vector_heartbeat_enabled` | `true` | deploy the heartbeat timer at all |
+| `vector_heartbeat_interval` | `5min` | beat spacing; the alert window is 4x this |
+| `vector_heartbeat_accuracy` | `10s` | `AccuracySec` — systemd's 1min default drifts too far against a 20m window |
+| `vector_heartbeat_marker` | `homelab-heartbeat` | the string the alert filters on |
+| `vector_heartbeat_priority` | `daemon.info` | ordinary facility on purpose |
 
 The register `vector_rsyslog_conf` (the drop-in copy) also survives the include,
 and is what the internal restart is gated on. Callers should not gate on it —

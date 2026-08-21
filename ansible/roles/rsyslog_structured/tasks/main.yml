@@ -175,3 +175,103 @@
       sorting before it ends the ruleset with `stop`.
     quiet: true
   when: not ansible_check_mode
+
+# --- Host-log heartbeat (#134) ------------------------------------------------
+# THE PROBLEM THIS SOLVES, in one line: on this fleet "no host log lines in the
+# last N minutes" is not evidence of anything. Measured 2026-08-20, 66% of
+# eq12_docker's and 40% of eq12's 10-minute windows are legitimately EMPTY,
+# because host logs arrive in bursts. An alert built on that silence paged a
+# human every ~30 minutes for 21 hours while everything was healthy.
+#
+# A beat every {{ vector_heartbeat_interval }} turns absence into a fact. It is
+# deployed HERE, in the role that already owns host-log plumbing and already runs
+# on all four hosts, because the heartbeat and the stream it travels through must
+# never be deployed separately — an alert keyed on a marker the host does not emit
+# is worse than no alert.
+#
+# The beat travels the FULL path (rsyslog socket -> `*.*` selector -> omfile ->
+# structured.log -> Vector's file source -> the sink), so it exercises exactly what
+# it claims to monitor. See the caveat in README.md for what it does NOT cover.
+- name: Deploy the host-log heartbeat service
+  ansible.builtin.template:
+    src: homelab-heartbeat.service.j2
+    dest: /etc/systemd/system/homelab-heartbeat.service
+    mode: "0644"
+  register: vector_heartbeat_service
+  when: vector_heartbeat_enabled | bool
+
+- name: Deploy the host-log heartbeat timer
+  ansible.builtin.template:
+    src: homelab-heartbeat.timer.j2
+    dest: /etc/systemd/system/homelab-heartbeat.timer
+    mode: "0644"
+  register: vector_heartbeat_timer
+  when: vector_heartbeat_enabled | bool
+
+- name: Reload systemd for the heartbeat units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+    - vector_heartbeat_service.changed or vector_heartbeat_timer.changed
+
+# UNGATED, like the rsyslog task above and for the same reason: a timer that was
+# stopped from outside Ansible must be healed by an ordinary run. Gating this on
+# `changed` would mean a converged host with a dead heartbeat reports ok forever,
+# while the alert keyed on that heartbeat pages about a host that is fine.
+- name: Ensure the host-log heartbeat timer is enabled and running
+  ansible.builtin.systemd_service:
+    name: homelab-heartbeat.timer
+    enabled: true
+    state: started
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+
+# Fire one beat NOW rather than waiting up to a full interval. On a first deploy
+# this is what stops the new alert rule from seeing an empty window and paging
+# about a host that has simply not beaten yet — the exact false positive this
+# whole redesign exists to remove, reintroduced at rollout.
+- name: Emit an immediate first heartbeat
+  ansible.builtin.systemd_service:
+    name: homelab-heartbeat.service
+    state: started
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+
+# PROVE THE CONTRACT, do not assume it. The alert filters on this exact marker
+# string; if the timer runs but the marker never reaches the stream, the rule is
+# keyed on something that does not exist and every host looks dead. This is the
+# same shape as the probe above, applied to the heartbeat's own text.
+- name: Wait for a heartbeat marker to reach the structured stream
+  ansible.builtin.wait_for:
+    path: /var/log/structured.log
+    search_regex: "{{ vector_heartbeat_marker }} {{ inventory_hostname }}"
+    timeout: 15
+  register: vector_heartbeat_probe
+  ignore_errors: true
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
+
+# ignore_errors above, NOT failed_when: false — see the comment on the probe
+# earlier in this file. failed_when: false ASSIGNS failed=False and would make
+# this assert a tautology.
+- name: Assert the heartbeat reaches the stream the alert reads
+  ansible.builtin.assert:
+    that:
+      - vector_heartbeat_probe is not failed
+    fail_msg: >-
+      The heartbeat marker "{{ vector_heartbeat_marker }} {{ inventory_hostname }}"
+      did not reach /var/log/structured.log within 15s of the timer firing. The
+      per-host ingest alert keys on exactly that string, so it would report this
+      host as dead forever while the host is fine — the false positive this
+      redesign exists to remove. Check `systemctl status homelab-heartbeat.timer`
+      and `.service`, then `journalctl -u homelab-heartbeat.service -n 20`, then
+      that rsyslog is routing (the probe earlier in this role covers that path).
+    quiet: true
+  when:
+    - vector_heartbeat_enabled | bool
+    - not ansible_check_mode
