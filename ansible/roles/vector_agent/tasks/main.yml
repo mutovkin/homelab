@@ -171,24 +171,138 @@
     mode: "0755"
   when: not vector_agent_preview_only
 
-# NO `when: not <stat>.stat.exists` GUARD, deliberately (CLAUDE.md). get_url hashes
-# the file already on disk, skips the fetch when the checksum matches, and
-# re-downloads when it does not — so a re-run is cheap AND a corrupted or tampered
-# cached .deb is repaired rather than trusted. A stat gate would turn the checksum
-# into decoration: the corrupt file would satisfy the guard forever.
+# --- Getting the artefact onto the host: TWO LEGS, controller first ----------
 #
-# The `when` below is NOT that guard: it is false on every real run (see the
-# check-mode reality gate above), so nothing about the verification changes.
+# THE TARGET IS NOT ASSUMED TO REACH GITHUB. n5pro cannot: measured during its
+# first apply, github.com:443 is REFUSED in 2ms from that host while
+# deb.debian.org and enterprise.proxmox.com answer 200, and eq12 reaches GitHub
+# fine. An instant refusal on a host whose own repos work is selective upstream
+# policy, not a dead link, and it is the operator's network — n5pro carries only
+# `table inet nut_fw` and has no /etc/pve/nodes/n5pro/host.fw.
 #
-# Version and checksum are pinned together in defaults/main.yml; bumping means
-# changing both.
-- name: Download the pinned Vector .deb
+# So: the CONTROLLER fetches once (`run_once`) into its own cache and ships the
+# file to each host; a direct download on the target is the FALLBACK, used only
+# when the controller could not get it. This is a robustness gain rather than a
+# workaround for one quirk — the role now works on any restricted or air-gapped
+# host, and pulls the 36 MB artefact once per run instead of once per host.
+#
+# BOTH legs keep `checksum:` and NEITHER has a stat-exists gate (CLAUDE.md).
+# get_url hashes whatever is already on disk, skips the fetch on a match and
+# re-downloads on a mismatch, so a re-run is cheap AND a corrupted or tampered
+# cache is repaired rather than trusted. A `when: not <stat>.stat.exists` guard
+# would turn the checksum into decoration — see
+# docs/solutions/runtime-errors/ansible-get-url-truenas-iso-existence-guard.md.
+# The `vector_agent_preview_only` conditions are NOT that guard: they are false on
+# every real run (see the check-mode reality gate above).
+#
+# CONSIDERED AND REJECTED — Vector's APT repository. It is the more idiomatic
+# answer and it does not help HERE: apt.vector.dev needs exactly the HTTPS egress
+# to a non-Debian host that n5pro lacks, so the leg that is broken stays broken.
+# It would also float the version unless separately pinned, which fights the
+# single-place version+sha256 pin this role is built on. Recorded so the next
+# person does not re-derive it.
+- name: Create the controller-side package cache
+  ansible.builtin.file:
+    path: "{{ vector_agent_controller_cache }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  when: not ansible_check_mode
+
+# LEG 1. failed_when:false because a controller WITHOUT egress must fall through
+# to leg 2, not abort the play — the whole point is that either leg can carry it.
+# The loud failure lives in the assert below, which can name which leg failed.
+- name: Fetch the pinned Vector .deb on the controller
+  ansible.builtin.get_url:
+    url: "{{ vector_agent_deb_url }}"
+    dest: "{{ vector_agent_controller_cache }}/{{ vector_agent_deb_filename }}"
+    checksum: "sha256:{{ vector_agent_deb_sha256 }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: vector_agent_controller_fetch
+  failed_when: false
+  when: not ansible_check_mode
+
+# LEG 1b. `copy` compares checksums and transfers only on a difference, so this
+# is idempotent and costs nothing on a converged host.
+- name: Ship the controller-cached .deb to the target
+  ansible.builtin.copy:
+    src: "{{ vector_agent_controller_cache }}/{{ vector_agent_deb_filename }}"
+    dest: "{{ vector_agent_deb_path }}"
+    mode: "0644"
+  register: vector_agent_deb_shipped
+  when:
+    - not vector_agent_preview_only
+    - vector_agent_controller_fetch is not skipped
+    - not (vector_agent_controller_fetch.failed | default(true))
+
+# LEG 2, the fallback: the target fetches for itself, but ONLY if the controller
+# could not. On n5pro this leg would fail, and that is fine — leg 1 already
+# delivered the file. failed_when:false so the assert below owns the diagnosis.
+- name: Download the pinned Vector .deb on the target (fallback)
   ansible.builtin.get_url:
     url: "{{ vector_agent_deb_url }}"
     dest: "{{ vector_agent_deb_path }}"
     checksum: "sha256:{{ vector_agent_deb_sha256 }}"
     mode: "0644"
-  register: vector_agent_deb
+  register: vector_agent_deb_direct
+  failed_when: false
+  when:
+    - not vector_agent_preview_only
+    # `not ansible_check_mode` is NOT redundant with preview_only. The controller
+    # leg above is check-mode-gated, so under --check it is always "skipped",
+    # which would otherwise make this fallback the chosen leg on every CONVERGED
+    # host — and get_url fetches for real even in check mode (measured earlier in
+    # this batch). A dry run would then pull 36 MB per host, and on n5pro attempt
+    # a download that cannot succeed. Under --check neither leg runs and the
+    # arrival assert below still verifies the artefact already on disk, which is
+    # the honest thing for a dry run to check.
+    - not ansible_check_mode
+    - vector_agent_controller_fetch is skipped or (vector_agent_controller_fetch.failed | default(true))
+
+# VERIFY ON ARRIVAL. This is NOT the forbidden stat-exists gate: it gates
+# nothing, it is a POST-CONDITION. A transfer that reported success is not
+# evidence the bytes are right, and `apt` is about to install whatever sits at
+# this path — so the pinned sha256 is checked against the file that actually
+# landed, by whichever leg landed it.
+- name: Checksum the .deb that actually arrived on the target
+  ansible.builtin.stat:
+    path: "{{ vector_agent_deb_path }}"
+    checksum_algorithm: sha256
+  register: vector_agent_deb_arrived
+  when: not vector_agent_preview_only
+
+- name: Assert the pinned Vector package is on the target and intact
+  ansible.builtin.assert:
+    that:
+      - vector_agent_deb_arrived.stat.exists
+      - vector_agent_deb_arrived.stat.checksum == vector_agent_deb_sha256
+    fail_msg: >-
+      {{ vector_agent_deb_filename }} is missing or corrupt on
+      {{ inventory_hostname }}, so nothing may be installed from it.
+      Present: {{ vector_agent_deb_arrived.stat.exists | default(false) }}.
+      Expected sha256 {{ vector_agent_deb_sha256 }},
+      found {{ vector_agent_deb_arrived.stat.checksum | default('none') }}.
+      WHICH LEG FAILED --
+      controller fetch:
+      {{ 'skipped' if vector_agent_controller_fetch is skipped
+         else ('ok' if not (vector_agent_controller_fetch.failed | default(true))
+               else 'FAILED: ' ~ (vector_agent_controller_fetch.msg | default('?'))) }};
+      ship to target:
+      {{ 'not attempted' if vector_agent_deb_shipped is skipped else 'attempted' }};
+      direct download on target:
+      {{ 'not attempted' if vector_agent_deb_direct is skipped
+         else ('ok' if not (vector_agent_deb_direct.failed | default(true))
+               else 'FAILED: ' ~ (vector_agent_deb_direct.msg | default('?'))) }}.
+      If BOTH legs failed, neither this controller nor {{ inventory_hostname }}
+      can reach {{ vector_agent_deb_url }} -- note n5pro has no route to GitHub
+      by operator network policy, which is exactly why the controller leg exists.
+    quiet: true
   when: not vector_agent_preview_only
 
 # Every version bump otherwise leaves another ~36 MB artefact in the cache

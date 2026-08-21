@@ -44,3 +44,20 @@ vector_agent_docker_logs: false
 # second after a malformed config, so an immediate check lands inside the crash
 # window as often as not.
 vector_agent_settle_seconds: 15
+
+# Controller-side cache for the pinned .deb (#134).
+#
+# WHY THIS EXISTS: n5pro has NO ROUTE TO GITHUB. Characterised read-only during
+# the first hypervisor apply — github.com:443 refused in 2ms from n5pro while
+# deb.debian.org and enterprise.proxmox.com both answered 200, and eq12 reached
+# GitHub fine. An immediate refusal rather than a timeout, on a host whose own
+# package repos work, means selective upstream policy keyed to source or segment.
+# It is the operator's network, not ours: n5pro carries only `table inet nut_fw`
+# and has no /etc/pve/nodes/n5pro/host.fw.
+#
+# So the role no longer requires the TARGET to reach GitHub. The controller
+# fetches once and ships the artefact to each host, falling back to a direct
+# download only when the controller cannot. That makes vector_agent work on any
+# restricted or air-gapped host, which is worth more than the one quirk that
+# forced it.
+vector_agent_controller_cache: "{{ lookup('env', 'HOME') }}/.cache/homelab/vector_agent"
