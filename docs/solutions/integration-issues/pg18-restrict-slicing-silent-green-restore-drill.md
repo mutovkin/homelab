@@ -1,6 +1,7 @@
 ---
 title: "The restore drill that restored nothing: PG18 restrict-nesting broke the slice, and psql exits 0 on a half-restore"
 date: 2026-08-19
+last_updated: 2026-08-21
 category: integration-issues
 module: services/joplin
 problem_type: integration_issue
