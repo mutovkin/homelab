@@ -60,32 +60,72 @@ postgres_firewall:
 #                                       Grafana's contact point wants the text
 observability_alert_telegram: true
 
+# Liveness-only scrape of Home Assistant (#133). PUSH carries the data (HA's
+# `influxdb:` integration -> this host's :8428/write); this scrape stores NOTHING
+# and exists solely so that silence from HA becomes a fact instead of an
+# ambiguity — a stopped integration, a wrong password, a dropped firewall rule and
+# a genuinely idle HA are otherwise indistinguishable. Requires
+# vault_ha_long_lived_token, asserted BY NAME in the role so blanking it fails the
+# deploy loudly rather than 401-ing forever.
+observability_ha_scrape: true
+observability_ha_scrape_target: 192.168.25.10:8123  # VM 100 (ha) — HA's HTTP API
+
 # Scoped fail-open nftables allowlists for the observability stack (#122, extended
 # by #134). Sources NOT listed are dropped FOR THAT PORT ONLY; loopback and the
 # docker bridges (172.16.0.0/12, accepted only when they do NOT arrive on
 # lan_iface) are always allowed, and every ungoverned port exits on the table's
 # first terminal rule.
 #
-# :8089 (#122) is an UNAUTHENTICATED write endpoint on tcp AND udp —
-# --httpAuth.username/password guard :8428 only, never the --influxListenAddr
-# listener. Its one intended client is the Home Assistant VM.
+# :8428 (#161) is the VictoriaMetrics HTTP API — authenticated by --httpAuth, and
+# also the stack's PRIMARY WRITE endpoint (/api/v1/write, /write). Until #161 it
+# was the ONLY observability write surface with no allowlist at all while the two
+# narrower endpoints were scoped: protection inverted relative to risk, on a flat
+# 192.168.0.0/18 with no segmentation.
 #
 # :9428 (#134) is authenticated, and is governed for a different reason: it became
 # a fleet ingest endpoint. See the block on that port below for the measured
 # source list.
 #
-# :8428 (VM) and :3000 (Grafana) remain UNGOVERNED, and that is now a live
-# asymmetry rather than a blanket "read ports are open" rule — this comment used
-# to lump :9428 in with them. They are authenticated read surfaces whose client
-# set has not been established the way :9428's just was; narrowing them needs the
-# same NPM-table check and its own from-a-blocked-source verification, and is
-# tracked separately. Do not extend the 9428 list to them by analogy.
+# :3000 (Grafana) remains UNGOVERNED, and that is a live asymmetry rather than a
+# blanket "read ports are open" rule — this comment used to lump :9428 and :8428
+# in with it. It is an authenticated read surface whose client set has not been
+# established the way theirs have; narrowing it needs the same NPM-table check and
+# its own from-a-blocked-source verification, and is tracked separately. Do not
+# extend these lists to it by analogy.
+#
+# :8089 is GONE, not merely ungoverned: #133 retired --influxListenAddr entirely
+# (measured — it speaks raw line protocol and answers no HTTP at all, so HA's
+# HTTP-speaking integration could never have used it), and its #122 allowlist went
+# with it.
 observability_firewall:
   lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
   ports:
-    # InfluxDB line protocol, tcp AND udp (nft_fw_protocols: [tcp, udp] in the role).
-    8089:
-      - 192.168.25.10/32  # Home Assistant VM (VM 100, MAC 02:ab:9f:1f:cd:8c)
+    # VictoriaMetrics HTTP API — governed since #161. Like :9428 below, THE LIST IS
+    # BUILT FROM CONFIGURATION, NOT FROM OBSERVED TRAFFIC. Each entry is a config
+    # fact, each verified:
+    #
+    #  * NPM was VERIFIED against CT 104's own proxy_host table rather than
+    #    inherited (#140's lesson): id 10, vm.moutovkin.com -> deb-docker.lan:8428,
+    #    enabled=1, is_deleted=0, read read-only 2026-08-22. Deleting that proxy
+    #    host is what would make this grant stale.
+    #  * Home Assistant pushes its metrics here since #133; this grant replaces the
+    #    :8089 one it used to hold for a listener it could never actually speak to.
+    #  * operators reach vmui at :8428/vmui directly by IP.
+    #
+    # NOT granted, each for a config reason:
+    #  * grafana, telegraf and the local vector reach VM as
+    #    `http://victoriametrics:8428` over the observability compose network
+    #    (172.20.0.0/24) — confirmed in the provisioned datasource, telegraf.conf
+    #    and vector.yaml — so they never traverse eth0 and a grant would do nothing.
+    #  * the three native vector agents (eq12, n5pro, n5pro_docker) write LOGS to
+    #    :9428 only: roles/vector_agent has no internal_metrics source and no
+    #    prometheus_remote_write sink (#151). #160 WOULD CHANGE THAT — whoever
+    #    implements it must add those three IPs HERE, or the new metrics are dropped
+    #    at this firewall with no application-level error.
+    8428:
+      - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vm.moutovkin.com -> deb-docker.lan:8428 (verified 2026-08-22)
+      - 192.168.25.10/32  # Home Assistant VM (VM 100) — influxdb push (#133)
+      - 192.168.48.0/24   # operator workstation subnet — vmui
     # VictoriaLogs HTTP API — governed since #134, which turned it from a port only
     # this host's own container wrote to into a FLEET INGEST ENDPOINT. The LAN is one
     # flat 192.168.0.0/18 with no segmentation, so nftables is the only thing
@@ -112,12 +152,16 @@ observability_firewall:
     #    datasource, so it never traverses eth0 and no grant would help it anyway.
     #  * the local vector/telegraf containers — same compose-network path, and the
     #    role's own ingest assert uses localhost (covered by `iif lo` in the table).
-    #  * Home Assistant (192.168.25.10) — approved for 8089 only; nothing indicates it
-    #    reads logs, and the per-port shape means its 8089 grant gives it nothing here.
+    #  * Home Assistant (192.168.25.10) — approved for :8428 only (#133); nothing
+    #    indicates it reads logs, and the per-port shape means that grant gives it
+    #    nothing here.
     #
-    # This port is governed over tcp AND udp because nft_fw_protocols is table-wide
-    # (8089 needs udp). VictoriaLogs listens on tcp only, so the udp rules are inert
-    # defence in depth, not a functional requirement.
+    # This port is governed over tcp AND udp because nft_fw_protocols is table-wide.
+    # That setting existed for :8089's udp half; with :8089 retired (#133) both
+    # remaining ports are TCP-only listeners, so the udp rules are now inert defence
+    # in depth everywhere in this table rather than a functional requirement for any
+    # port. Kept deliberately: dropping udp coverage would silently unprotect any
+    # future udp bind on a governed port.
     9428:
       - 192.168.25.5/32   # eq12 hypervisor — native vector agent (#134)
       - 192.168.30.5/32   # n5pro hypervisor — native vector agent (#134)
