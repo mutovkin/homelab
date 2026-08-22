@@ -129,13 +129,19 @@
     # tidying after it. Nothing else can be mid-write here (Ansible runs the role
     # serially per host), and this run's own partial does not exist yet.
     #
-    # The retention prune below globs `joplin-pgdump-*.sql`, which does NOT fnmatch
-    # `joplin-pgdump-<ts>.sql.partial`, so without this sweep aborted attempts
-    # accumulate multi-GB files that nothing ever lists or deletes.
+    # The retention prune below globs `joplin-pgdump-*.sql` and `*.sql.gz`, and
+    # fnmatch is a FULL match: neither pattern matches a `.partial`, so without
+    # this sweep aborted attempts accumulate multi-GB files that nothing ever lists
+    # or deletes. Since #147 a killed run can strand TWO shapes — the plain
+    # intermediate `joplin-pgdump-<ts>.sql.partial` and the compressed
+    # `joplin-pgdump-<ts>.sql.gz.partial` — so the sweep needs both patterns for the
+    # same reason: `*.sql.partial` does NOT fnmatch `x.sql.gz.partial`.
     - name: Find orphaned partial Joplin dumps
       ansible.builtin.find:
         paths: "{{ data_mount }}/backups"
-        patterns: "joplin-pgdump-*.sql.partial"
+        patterns:
+          - "joplin-pgdump-*.sql.partial"
+          - "joplin-pgdump-*.sql.gz.partial"
       register: joplin_partial_dumps
       when: not ansible_check_mode
 
@@ -164,8 +170,10 @@
       ansible.builtin.debug:
         msg: >-
           A real apply WILL write the postgres cluster globals plus a
-          `pg_dump --create {{ joplin_database_name }}` to
-          {{ data_mount }}/backups/joplin-pgdump-<timestamp>.sql before deploying.
+          `pg_dump --create {{ joplin_database_name }}`, verify both completion
+          markers on the plain intermediate, then leave a `gzip -1` compressed dump
+          at {{ data_mount }}/backups/joplin-pgdump-<timestamp>.sql.gz before
+          deploying.
       when: ansible_check_mode
 
     # `-u postgres`, not root: the cluster's local connections are `peer`
@@ -197,10 +205,27 @@
     #     file restores with one `psql -d postgres -f <file>` and lands in the right
     #     database. Without it the same command creates joplin's tables inside the
     #     `postgres` database — a silent, plausible-looking WRONG restore.
-    #   - ONE file, keeping the `joplin-pgdump-<ts>.sql` name so the retention
-    #     prune's glob below is unchanged. A paired `joplin-globals-<ts>.sql` would
-    #     need its own retention slice; one `[retention:]` slice over a mixed list
-    #     keeps 3.5 pairs.
+    #   - ONE file, `joplin-pgdump-<ts>.sql.gz` since #147 (`.sql` before it), so
+    #     the retention prune below needs exactly one slice — it globs both
+    #     generations. A paired `joplin-globals-<ts>.sql` would need its own
+    #     retention slice; one `[retention:]` slice over a mixed list keeps
+    #     3.5 pairs.
+    #
+    # COMPRESSION (#147): narrowing was size-neutral because the cluster IS joplin
+    # (~99.7%), so compression, not scope, is the size lever. Measured 2026-08-19 in
+    # the same window: 633,231,225 B plain vs 309,412,797 B after `gzip -1` (~2.05x,
+    # ~13 s of CPU on a ~9 s dump), taking retention 7 from ~4.4 GB to ~2.2 GB. Only
+    # ~2x because the payload is high-entropy note content — do not raise the level.
+    # ORDER IS THE POINT: both markers are checked on the PLAIN intermediate BEFORE
+    # gzip runs, so the five herestring lines below stay byte-identical and
+    # pipeline-free; `gzip -t` then extends that verification to the shipped
+    # artifact, because gzip stores a CRC32 + length of the uncompressed stream, so
+    # a passing `gzip -t` proves the `.gz` decompresses to exactly the bytes the
+    # markers verified. Rejected alternatives: `-Fc` custom format (needs
+    # `pg_restore`, destroys the textual marker asserts and every README recipe) and
+    # `pg_dump --compress=gzip:1` (compresses only the pg_dump half, leaving a mixed
+    # plain+gzip file no single tool decompresses).
+    #
     # `set -euo pipefail` aborts the whole script (firing the ERR trap) if the
     # globals half fails, so a truncated globals section can never be followed by a
     # successful pg_dump.
@@ -247,16 +272,20 @@
         cmd: |
           set -euo pipefail
           umask 077
-          dest="{{ data_mount }}/backups/joplin-pgdump-{{ ansible_date_time.iso8601_basic_short }}.sql"
-          trap 'rm -f "${dest}.partial"' ERR EXIT HUP INT TERM
+          dest="{{ data_mount }}/backups/joplin-pgdump-{{ ansible_date_time.iso8601_basic_short }}.sql.gz"
+          plain="{{ data_mount }}/backups/joplin-pgdump-{{ ansible_date_time.iso8601_basic_short }}.sql.partial"
+          trap 'rm -f "$plain" "${dest}.partial"' ERR EXIT HUP INT TERM
           {
             docker exec -u postgres postgres pg_dumpall --globals-only
             docker exec -u postgres postgres pg_dump --create '{{ joplin_database_name }}'
-          } > "${dest}.partial"
-          head_region="$(head -c 65536 "${dest}.partial")"
+          } > "$plain"
+          head_region="$(head -c 65536 "$plain")"
           grep -q 'PostgreSQL database cluster dump complete' <<<"$head_region"
-          tail_region="$(tail -n 20 "${dest}.partial")"
+          tail_region="$(tail -n 20 "$plain")"
           grep -q 'PostgreSQL database dump complete' <<<"$tail_region"
+          gzip -1 -c "$plain" > "${dest}.partial"
+          gzip -t "${dest}.partial"
+          rm -f "$plain"
           mv "${dest}.partial" "$dest"
           trap - ERR EXIT HUP INT TERM
           echo "$dest"
@@ -270,10 +299,19 @@
         msg: "Joplin pre-deploy dump: {{ joplin_pg_dump.stdout | trim }}"
       when: not ansible_check_mode
 
+    # Both generations share ONE mtime-sorted retention slice: fnmatch is a full
+    # match, so `*.sql` does NOT match `x.sql.gz` and both patterns are required.
+    # That is deliberate — the pre-#147 plain ~632 MB dumps age out naturally as
+    # compressed ones accumulate. Do NOT delete them by hand. The
+    # `joplin-pgdump-` prefix is what keeps this prune off the ad-hoc operator
+    # dumps (`pre-*.sql`, `pg_dumpall-post-*.sql`) and vaultwarden's archives that
+    # share this directory: keep the prefix untouched.
     - name: Find existing Joplin dumps
       ansible.builtin.find:
         paths: "{{ data_mount }}/backups"
-        patterns: "joplin-pgdump-*.sql"
+        patterns:
+          - "joplin-pgdump-*.sql"
+          - "joplin-pgdump-*.sql.gz"
       register: joplin_backups
       when: not ansible_check_mode
 
