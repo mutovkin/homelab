@@ -460,6 +460,49 @@ host-log heartbeat, one layer up: absence of incidental traffic proves nothing, 
 make the signal deliberate. Do not "fix" it by making it resolve, and do not silence
 it — silencing removes the only control that does not depend on the channel it tests.
 
+#### Drilling the delivery chain (done once, 2026-08-22 — repeat after changing routing)
+
+Config that validates is not delivery that works, so the whole chain was exercised
+once against a real failure: **broken send → Grafana counter → telegraf scrape →
+VictoriaMetrics → rule fires → route → message on the *other* channel.**
+
+The recipe, and the two dead ends that are worth knowing before you repeat it:
+
+1. Deploy with `-e vault_watchtower_email_server=smtp.invalid`, scoped
+   `--tags observability` so only Grafana's `.env` moves (watchtower's own config
+   is not in that play).
+2. **A restart alone does not produce a notification.** Grafana persists alert
+   state across restarts, and `repeat_interval` (24h on the heartbeat route)
+   suppresses a re-send for an instance that has already notified. Eight minutes of
+   polling after the broken deploy showed nothing at all.
+3. **Grafana's per-receiver test endpoint does not move the counters.** It reports
+   the send accurately — `status: failure` in 50 ms against `smtp.invalid`,
+   `status: success` in 1.2 s against the real relay — but it bypasses the
+   notification pipeline, so `grafana_alerting_notifications_*` never changes. It
+   is a good SMTP check and a useless delivery-monitoring check, which is a second
+   reason not to build anything on it (the first is in
+   [grafana-alerting-provisioned-but-undeliverable](../../../../docs/solutions/integration-issues/grafana-alerting-provisioned-but-undeliverable.md)).
+   Note the endpoint name is the **unpadded** base64 of the receiver title —
+   `homelab-email` → `aG9tZWxhYi1lbWFpbA`, no `==`, or it 404s.
+4. What works: force a **new alert instance**, by adding a temporary label to the
+   heartbeat rule (its labels are its identity, so a new label is a new instance
+   with no notification history). Apply, then watch.
+
+Measured result, with email broken and Telegram live throughout:
+
+```
+06:32  grafana  notifications_failed_total{email}=1  notifications_total{telegram}=1
+06:34  VM       failed_total{email}=1                      (scrape + remote write)
+06:37  rule     obs-alert-delivery-failing = firing        (VM -> rule)
+06:37  grafana  notifications_total{telegram}=1 -> 3       (routed to the OTHER channel)
+```
+
+Restore by re-deploying without the override; prove it, do not assume it — a test
+send returned `success` in 1.2 s (a real Gmail round trip) and the next heartbeat
+notification incremented `{email}` again with no new `failed_total`. The
+delivery-failing rule keeps firing for up to 15 minutes afterwards, because that is
+its `increase()` window, and then resolves itself.
+
 Telegraf scrapes Grafana's `/metrics` for the delivery counters (nothing did
 before). Two measured facts live in `telegraf.conf` because both are traps:
 `metric_version` 1 and 2 produce the *reverse* of the obvious shapes, and the
