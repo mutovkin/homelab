@@ -192,10 +192,27 @@ construction until these metrics existed.
 `vector.yaml` now carries an `internal_metrics` source (60s — these land in a
 5y-retention TSDB, per-second scrapes of hundreds of series buy nothing) and a
 `prometheus_remote_write` sink to the same VictoriaMetrics endpoint telegraf
-already writes to. `vector_component_errors_total` is the counter that fires on
-**sink auth failures** — the exact signature of the ~30-day silent 401
-([vector-057](../../../../docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)),
-which nothing in the stack could see at the time.
+already writes to.
+
+**Which counter covers what is not the obvious split, and it was measured on
+0.57.0 rather than assumed** (both counters are absent in health, so they were
+forced on a throwaway container):
+
+| counter | covers |
+| ------- | ------ |
+| `vector_component_errors_total` | sink errors including **auth failures** — the exact signature of the ~30-day silent 401 ([vector-057](../../../../docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)) — **and VRL remap aborts** (`error_type=conversion_failed`, `stage=processing`) |
+| `vector_component_discarded_events_total` | the #153 throttle engaging (`component_id=throttle_vector_own`, `intentional=true`), a full buffer, a sink dropping a batch |
+
+The surprise is in the first row: **a remap abort does NOT increment the
+discarded-events counter.** An aborted remap drops the event with no dead-letter
+(`drop_on_abort` defaults true, nothing is rerouted), and `component_errors_total`
+is the only counter that sees it — so `obs-vector-component-errors`, not
+`obs-vector-discarding-events`, is what covers the silent-abort hazard #143 left
+behind. Do not read a quiet discard counter as proof nothing is being dropped.
+
+The discard series also carries an `intentional` tag — true for a throttle, false
+for real loss — which answers "is this the flood bound or is this data loss?"
+faster than any log.
 
 Two couplings that nothing enforces, so both ends say so:
 

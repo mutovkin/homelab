@@ -14,11 +14,23 @@ apiVersion: 1
 # Vector now exports internal_metrics to VictoriaMetrics
 # (files/data/vector/vector.yaml, sink vector_metrics_out). The `vector_` prefix
 # below is Vector's default namespace for the prometheus_remote_write sink.
-# VERIFIED against the live 0.57.0 binary via
-#   /api/v1/label/__name__/values | grep vector_
-# after the first apply — not taken from the issue. #151 warns that Vector has
-# renamed internal metrics across releases, so a version bump means re-checking
-# these four names, not assuming them.
+#
+# ALL FOUR NAMES VERIFIED against the live 0.57.0 binary, not taken from the
+# issue (#151 warns Vector has renamed internal metrics across releases, so a
+# version bump means re-checking them):
+#   vector_uptime_seconds, vector_buffer_byte_size — present in VictoriaMetrics
+#     immediately after the first apply.
+#   vector_component_errors_total, vector_component_discarded_events_total —
+#     absent in health (see the NoData note below), so they were forced on a
+#     throwaway container instead: a throttle at threshold 5 emitted
+#     component_discarded_events_total{component_id, component_type="throttle",
+#     intentional="true"} and a remap abort emitted
+#     component_errors_total{error_type="conversion_failed", stage="processing"},
+#     both under namespace "vector".
+# That probe also produced a correction worth keeping: a remap ABORT does NOT
+# increment the discarded-events counter on 0.57.0, only component_errors_total.
+# The abort-drop hazard #143 left behind is therefore covered by
+# obs-vector-component-errors, NOT by obs-vector-discarding-events.
 #
 # NoData policy, deliberate per rule rather than uniform: absence is owned EXACTLY
 # ONCE, by obs-vector-metrics-absent. The three others are OK on NoData because
@@ -55,16 +67,24 @@ groups:
           summary: Vector discarded events in the last 15 minutes — log data was lost.
           description: >-
             component_discarded_events_total increased for
-            {{ $labels.component_id }}. Discards come from a remap abort (a VRL
-            fallible-coercion failure drops the event with no dead-letter —
-            drop_on_abort defaults true), a full disk buffer, a sink rejecting the
-            batch, or the #153 self-ingestion throttle engaging on a flood. WHICH
-            of those it is is in component_id: `throttle_vector_own` means Vector
+            {{ $labels.component_id }}. Discards come from the #153
+            self-ingestion throttle engaging on a flood, a full disk buffer, or a
+            sink dropping a batch. The series also carries an `intentional` tag
+            (true for a throttle, false for real loss) — read it first, it answers
+            the question faster than any log.
+            component_id=`throttle_vector_own` with intentional=true means Vector
             is flooding its own stderr and the throttle is bounding the
-            amplification loop — the throttle firing IS the flood alarm, so treat
-            it as "find the flood", not as "raise the threshold". Any other
-            component_id is real pipeline loss. Check `docker logs vector` on
-            eq12_docker. If the disk buffer is the cause, the runbook is
+            amplification loop: the throttle firing IS the flood alarm, so the job
+            is "find the flood", never "raise the threshold". Anything else is
+            real pipeline loss.
+            NOTE, measured on 0.57.0 rather than assumed: a VRL remap ABORT does
+            NOT land here — it increments component_errors_total instead
+            (error_type=conversion_failed, stage=processing), so
+            obs-vector-component-errors is the rule that covers #143's
+            silent-abort-drop hazard. Do not read a quiet discard counter as proof
+            no events are being dropped by a remap.
+            Check `docker logs vector` on eq12_docker. If the disk buffer is the
+            cause, the runbook is
             docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
         labels:
           severity: critical
@@ -134,16 +154,25 @@ groups:
         annotations:
           summary: A Vector component reported errors in the last 15 minutes.
           description: >-
-            component_errors_total increased for {{ $labels.component_id }}. THIS
-            IS THE COUNTER THAT FIRES ON SINK AUTH FAILURES — the exact signature
-            of the ~30-day silent 401 in
+            component_errors_total increased for {{ $labels.component_id }},
+            error_type={{ $labels.error_type }}. THIS IS THE COUNTER THAT FIRES ON
+            SINK AUTH FAILURES — the exact signature of the ~30-day silent 401 in
             docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md,
             where Vector kept running, kept reporting healthy, and every batch was
-            rejected. It also covers connection failures, encoding errors and
-            source-side read errors. Check `docker logs vector` on eq12_docker for
-            the error text, then confirm the destination actually has the data:
-            `_time:10m | count()` in VictoriaLogs, and
-            vector_component_sent_events_total in VictoriaMetrics.
+            rejected.
+            IT IS ALSO THE COUNTER FOR A VRL REMAP ABORT, which matters more than
+            it looks: an aborted remap DROPS the event (drop_on_abort defaults
+            true, nothing is rerouted, there is no dead-letter), and measured on
+            0.57.0 that drop does NOT appear in component_discarded_events_total.
+            So a transform component_id here with
+            error_type=conversion_failed is silent data loss, and this rule is the
+            only thing that sees it — which is exactly the blindness #143 left
+            behind when it swapped the fallible `!` coercions for defaulted forms.
+            Also covers connection failures, encoding errors and source-side read
+            errors. Check `docker logs vector` on eq12_docker for the error text,
+            then confirm the destination actually has the data: `_time:10m |
+            count()` in VictoriaLogs, and vector_component_sent_events_total in
+            VictoriaMetrics.
         labels:
           severity: critical
           component: log-pipeline

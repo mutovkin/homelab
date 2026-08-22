@@ -85,13 +85,22 @@ sources:
     read_from: beginning
 
   # Vector's own health counters (#151). These are the metrics that would have
-  # shown the ~30-day silent 401 outage (vector-057) on day one:
-  # component_errors_total counts sink errors including auth failures, and
-  # component_discarded_events_total counts events dropped by a remap abort, a
-  # full buffer, a rejecting sink — or the #153 throttle above engaging on a
-  # self-ingestion flood. Nothing else in the stack can see PARTIAL loss: the
-  # ingest-stalled rules and the deploy-time assert both detect only total
-  # absence.
+  # shown the ~30-day silent 401 outage (vector-057) on day one. Nothing else in
+  # the stack can see PARTIAL loss: the ingest-stalled rules and the deploy-time
+  # assert both detect only total absence.
+  #
+  # Which counter covers what, MEASURED on 0.57.0 against a throwaway container
+  # rather than assumed — the split is not the obvious one:
+  #   component_errors_total          sink errors incl. auth failures, AND a VRL
+  #                                   remap ABORT (error_type=conversion_failed,
+  #                                   stage=processing). An aborted remap drops
+  #                                   the event silently, and this is the ONLY
+  #                                   counter that sees it.
+  #   component_discarded_events_total  the throttle above engaging on a flood
+  #                                   (component_id=throttle_vector_own,
+  #                                   intentional=true), a full buffer, a sink
+  #                                   dropping a batch. NOT remap aborts.
+  # So do not read a quiet discard counter as proof no events are being dropped.
   # 60s, not the 1s default: these go to a 5y-retention TSDB and per-second
   # scrapes of ~hundreds of internal series buy nothing.
   vector_metrics:
