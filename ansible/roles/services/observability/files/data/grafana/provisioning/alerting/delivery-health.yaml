@@ -322,11 +322,19 @@ groups:
             Check, in order: `docker logs telegraf` on eq12_docker; that
             http://grafana:3000/metrics still answers 200 from inside
             observability_network; and that telegraf's `[[inputs.prometheus]]`
-            fieldpass still matches — it is `grafana_alerting_notifications*`, and
-            a Grafana metric RENAME would silently empty it, which is exactly the
-            failure this rule exists to catch (the *pass filters match the
-            measurement name, and under metric_version = 2 that trap has already
-            bitten once — see the comment in telegraf.conf).
+            fieldpass still matches.
+            READ THAT FILTER CAREFULLY BEFORE EDITING IT — it has TWO entries and
+            they are not interchangeable:
+            `grafana_alerting_notifications*` is the glob feeding
+            obs-alert-delivery-failing, and `grafana_alerting_alertmanager_receivers`
+            is an EXACT name, no glob, and it is THIS RULE'S OWN FEED. The glob does
+            not cover it. Removing that second entry — or "tidying" the two into one
+            pattern — silently blinds the absence owner itself, which is precisely
+            the failure this rule exists to catch and the one thing it cannot report
+            about itself. It must never leave the fieldpass while this rule exists.
+            A Grafana metric RENAME empties either entry just as quietly (the *pass
+            filters match the measurement name, and under metric_version = 2 that
+            trap has already bitten once — see the comment in telegraf.conf).
             Do NOT switch this rule to grafana_alerting_notifications_total,
             however natural that looks: Grafana exports that counter only while
             notifications are being sent, so it is absent on a healthy idle system
