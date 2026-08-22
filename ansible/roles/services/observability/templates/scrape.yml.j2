@@ -1,0 +1,76 @@
+# VictoriaMetrics promscrape config — templated by Ansible (#133).
+#
+# SECRET-BEARING: renders vault_ha_long_lived_token. Its deploy task sets
+# `diff: false` and mode 0600 (#88) — the file reports changed, its content never
+# renders into the log.
+#
+# WHY A SCRAPE JOB AT ALL, when Home Assistant PUSHES its metrics?
+# Push (HA's `influxdb:` integration -> this VM's :8428/write) is the efficient
+# transport and carries all the data. Its one weakness is that silence is
+# ambiguous: a stopped integration, a wrong password, a dropped firewall rule and
+# a genuinely idle HA all look identical — zero series arriving. That ambiguity is
+# the whole reason #133 took three attempts to diagnose, and it is the same
+# category error as the log-burst gap analysis (see the "absence of incidental
+# traffic" gotcha in CLAUDE.md): absence is only evidence when something was
+# supposed to be there.
+#
+# So this job exists ONLY to make absence a fact. Every sample HA returns is
+# dropped below; what remains is the scraper's OWN synthesised series, which are
+# generated rather than parsed out of the response body and are therefore exempt
+# from metric_relabel_configs. Measured on the live instance 2026-08-22, this job
+# stores exactly SEVEN series and no more — `up` plus `scrape_duration_seconds`,
+# `scrape_response_size_bytes`, `scrape_samples_scraped`,
+# `scrape_samples_post_metric_relabeling`, `scrape_series_added` and
+# `scrape_timeout_seconds`. That count is FIXED: it does not grow with the 1200+
+# entities HA exposes, which is the whole point.
+#
+# VERIFYING THE DROP once HA's prometheus: integration is enabled — the check
+# below is currently vacuous because HA returns 404, so scrape_samples_scraped is
+# 0 and dropping nothing trivially stores nothing:
+#     scrape_samples_scraped{job="homeassistant"}                 must go ABOVE 0
+#     scrape_samples_post_metric_relabeling{job="homeassistant"}  must STAY at 0
+# Both non-zero would mean samples are being stored twice (push AND scrape) —
+# see the metric_relabel_configs comment below for why that is worse than either
+# transport alone.
+#
+# 60s and not 15s: the only output is a single `up` series, so a faster cadence
+# buys nothing and multiplies HA's template-render cost. One minute bounds
+# detection latency far tighter than any realistic response time.
+global:
+  # Applies to this file only; it does not affect vmagent-less ingestion or the
+  # push path.
+  scrape_interval: 60s
+  scrape_timeout: 15s
+
+scrape_configs:
+{% if observability_ha_scrape | default(false) | bool %}
+  - job_name: homeassistant
+    scrape_interval: 60s
+    metrics_path: /api/prometheus
+    scheme: http
+    # HA's /api/prometheus has no anonymous access. A long-lived access token is
+    # HA's mechanism for non-interactive clients; ordinary session tokens expire.
+    # NOTE: HA has no per-token scopes, so this grants the same API access as the
+    # user who minted it — which is why it lives in ansible-vault and this file is
+    # 0600.
+    authorization:
+      type: Bearer
+      credentials: {{ vault_ha_long_lived_token }}
+    static_configs:
+      - targets:
+          - "{{ observability_ha_scrape_target }}"
+    # Drop EVERY scraped sample. This is not a filter to be tuned later — storing
+    # HA's metrics twice (once via push, once via scrape) would double the series
+    # count and produce two subtly different copies of the same measurement, which
+    # is worse than either alone. If you want more HA data, widen the PUSH filter
+    # in HA's own config; do not start keeping samples here.
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: ".*"
+        action: drop
+{% else %}
+  # observability_ha_scrape is false — no jobs. The file still exists because
+  # --promscrape.config is unconditional in compose.yaml, and VictoriaMetrics
+  # refuses to start if the path it names is missing.
+  []
+{% endif %}
