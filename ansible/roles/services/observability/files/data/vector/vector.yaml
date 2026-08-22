@@ -23,21 +23,26 @@ data_dir: "/var/lib/vector"
 # VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION is set for this container (it has
 # to be, for the sink credentials).
 #
-# NOTE, and it bit the agent twin: that interpolation is a textual pre-pass over
-# the WHOLE file and does not skip comments, so a dollar-brace reference written
-# in prose is still resolved. It is harmless here because TZ exists; in
-# roles/vector_agent's template it does not, and the identical sentence failed the
-# config load with `Missing environment variable in config. name = "TZ"`. Prefer
-# naming variables in prose without the dollar-brace form.
 # Both directions measured against the binary before relying on either:
 #   TZ=America/Los_Angeles + the flag  -> parses "2026-08-16 06:19:24" to 13:19:24Z
 #   TZ set, flag ABSENT                -> "Configuration error. error=No such time
 #                                         zone" and Vector EXITS
 # The second one is why this is safe: a broken interpolation cannot silently
 # degrade to UTC, which is the failure a hardcoded value was protecting against.
-# The one residual: compose writes `TZ: ${TIMEZONE:-UTC}`, so if TIMEZONE were ever
-# unset the zone would become UTC quietly. It cannot be today — env.j2 renders
-# TIMEZONE from `timezone` with no default, so an undefined var fails the template.
+#
+# EVERY VARIABLE NAMED IN PROSE BELOW IS WRITTEN WITHOUT THE DOLLAR-BRACE FORM, ON
+# PURPOSE. This interpolation is a textual pre-pass over the WHOLE file and does not
+# skip comments, so a reference written in prose is resolved like any other: one that
+# resolves is silently rewritten to its value at load time, and one that does not
+# fails the entire config load. The agent twin was broken exactly that way — an
+# identical sentence there produced `Missing environment variable in config.
+# name = "TZ"` on all three hosts. See
+# docs/solutions/integration-issues/vector-interpolates-env-vars-inside-comments.md
+#
+# The one residual risk: compose sets TZ from TIMEZONE with a UTC default, so if
+# TIMEZONE were ever unset the zone would become UTC quietly. It cannot be today —
+# env.j2 renders TIMEZONE from `timezone` with no default, so an undefined var fails
+# the template.
 # Only zone-less parse_timestamp calls read this: parse_host's RFC5424 timestamps
 # carry their own offset and are untouched.
 timezone: "${TZ}"

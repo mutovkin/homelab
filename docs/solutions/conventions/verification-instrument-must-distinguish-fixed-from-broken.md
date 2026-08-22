@@ -222,6 +222,12 @@ have looked like.
   directory instead of the change.
 - Any time an inherited number ("needs two passes", "always reports changed") is about to
   become an acceptance criterion.
+- Any claim that a time series or log stream is *live*, where the query used to check it
+  carries a default lookback or window. A VictoriaMetrics instant query answers from a
+  ~5-minute lookback and stamps the result with the *query* time, so a dead series and a
+  live one return byte-identical output — the same failure as the two above, in a query
+  engine. See
+  [instant-query-cannot-prove-a-series-is-live](instant-query-cannot-prove-a-series-is-live.md).
 
 ## Examples
 

@@ -434,9 +434,13 @@ a rule that cannot fire, reporting Normal.
 > this repo has already shipped twice.
 >
 > A trap inside the trap: an instant query issued *within five minutes* of the
-> last sample still returns it, because that is VictoriaMetrics' default lookback.
-> A vanished series looks alive for five more minutes, which is exactly long
-> enough to "confirm" it during a deploy and be wrong.
+> last sample still returns it, because that is VictoriaMetrics' default lookback,
+> and the result is stamped with the *query* time rather than the sample's. A
+> vanished series looks alive for five more minutes — long enough to "confirm" it
+> during a deploy and be wrong. The general rule and its measurements live in
+> [docs/solutions/conventions/instant-query-cannot-prove-a-series-is-live.md](../../../../docs/solutions/conventions/instant-query-cannot-prove-a-series-is-live.md);
+> choosing a series that can carry an absence rule at all is
+> [absence-alerts-need-a-continuously-exported-sentinel.md](../../../../docs/solutions/conventions/absence-alerts-need-a-continuously-exported-sentinel.md).
 
 So the rule watches `grafana_alerting_alertmanager_receivers`, which Grafana
 exports for its whole process lifetime and which travels the identical path
