@@ -6,7 +6,7 @@
 
 | Port     | Protocol | Purpose                               | Used By                                         |
 | -------- | -------- | ------------------------------------- | ----------------------------------------------- |
-| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`), incl. the **InfluxDB v1 HTTP API** | Grafana queries, Telegraf writes, Manual queries; the only working path for an InfluxDB HTTP client |
+| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`), incl. the **InfluxDB v1 HTTP API** | Grafana queries, Telegraf writes, **Vector's `internal_metrics` remote-write (#151)**, Manual queries; the only working path for an InfluxDB HTTP client |
 | **8089** | TCP/UDP  | **InfluxDB line protocol, raw socket** — enabled, **unauthenticated**, and **no client has ever written to it** (#133) | nothing, today |
 | **2003** | TCP/UDP  | Graphite protocol — **not enabled in this deployment** | — |
 | **4242** | TCP      | OpenTSDB protocol — **not enabled in this deployment** | — |
@@ -22,6 +22,10 @@
 - **Health Check**: http://localhost:8428/health
 - **Metrics Query**: http://localhost:8428/api/v1/query
 - **Prometheus Remote Write**: http://localhost:8428/api/v1/write
+  - Writers on the compose network: `telegraf` (system/docker/probe metrics, plus
+    Grafana's `/metrics` delivery counters since #152) and `vector`
+    (`internal_metrics` — its own drop/error/buffer counters, #151). Both use
+    basic auth with `VM_AUTH_*`.
 - **Series Query**: http://localhost:8428/api/v1/series
 
 #### Port 8089 - InfluxDB line protocol (raw socket) — **not for Home Assistant**
