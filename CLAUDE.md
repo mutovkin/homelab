@@ -335,6 +335,19 @@ Hard-won lessons — check here before debugging from scratch.
   archive proves nothing about the dump inside. See
   [docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md](docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md).
 
+- **A provisioned Grafana datasource is FROZEN unless its `version:` INCREASES — so a
+  rotated credential never reaches it.** Grafana re-applies a provisioned datasource only
+  when the file's `version` exceeds the stored one; pinned, `secureJsonData` is never
+  rewritten. Measured: rotating `vault_vm_auth_password` left Grafana querying
+  VictoriaMetrics with the OLD secret while the container env, the `.env` file and an
+  in-container `curl -u "$VM_AUTH_USERNAME:$VM_AUTH_PASSWORD"` ALL showed the NEW one —
+  every process-level check passed, every VM-backed rule 401'd, and the alerting stack
+  could not report its own outage because the reporter was the thing that was out. Bump
+  `version` in the same change as any credential. `/api/health` proves only that the
+  PROCESS is up; the real check is `/api/datasources/uid/<uid>/health` (returns
+  `status=ERROR, got response code 401`), which `services/observability` now asserts for
+  every uid read out of the provisioning file itself.
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.

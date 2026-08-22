@@ -532,6 +532,80 @@
     quiet: true
   when: not ansible_check_mode
 
+# THE SAME CLASS OF CHECK, FOR THE OTHER HALF OF THE STACK.
+#
+# Grafana's /api/health returning 200 proves the PROCESS is up and that
+# provisioning parsed. It does NOT prove a provisioned datasource can actually
+# reach its backend — and a datasource that 401s makes every alert rule querying
+# it fail, INCLUDING the rules that exist to report failures. The alerting stack
+# goes blind and says nothing, because the thing that would report the outage is
+# the thing that is out.
+#
+# Measured, not theorised: rotating vault_vm_auth_password left Grafana querying
+# VictoriaMetrics with the OLD secret while the container env, the .env file and
+# an in-container `curl -u "$VM_AUTH_USERNAME:$VM_AUTH_PASSWORD"` ALL showed the
+# NEW one — every process-level check passed and every VM-backed rule 401'd for
+# ~15 minutes, paging continuously. The cause was `version:` pinned in
+# datasources.yaml: Grafana only re-applies a provisioned datasource when that
+# number INCREASES, so secureJsonData was never rewritten. A credential rotation
+# is therefore invisible to every check except this one.
+#
+# The uids are read FROM the provisioning file rather than listed here, so a
+# datasource added to version control cannot be silently left unchecked.
+#
+# Host header, not a redirect follow: GF_SERVER_DOMAIN/ROOT_URL make Grafana 301
+# any request whose Host does not match, and a followed redirect would leave the
+# host and test NPM's public path instead of this container.
+- name: Check every provisioned Grafana datasource can actually reach its backend
+  vars:
+    _declared: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/datasources/datasources.yaml')
+          | from_yaml).datasources }}
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:3000/api/datasources/uid/{{ item.uid }}/health"
+    user: "{{ vault_grafana_user }}"
+    password: "{{ vault_grafana_password }}"
+    force_basic_auth: true
+    headers:
+      Host: "{{ vault_grafana_domain }}"
+    return_content: true
+  register: grafana_datasource_health
+  # The datasource plugins finish loading slightly after /api/health goes 200.
+  until: grafana_datasource_health.json.status | default('') == 'OK'
+  retries: 6
+  delay: 5
+  # ignore_errors, NOT failed_when: false — the assert below must be able to read
+  # `failed`, and `failed_when: false` ASSIGNS failed=False, which would make the
+  # assert vacuously true. See the "a guard you have not seen fail is not a
+  # guard" gotcha in CLAUDE.md.
+  ignore_errors: true
+  loop: "{{ _declared }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.uid }})"
+  when: not ansible_check_mode
+
+- name: Assert every provisioned Grafana datasource is healthy
+  ansible.builtin.assert:
+    that:
+      - item is not failed
+      - item.json.status | default('') == 'OK'
+    fail_msg: >-
+      Grafana datasource {{ item.item.name }} ({{ item.item.uid }}) is NOT
+      healthy: {{ item.json.message | default(item.msg | default('no response')) }}.
+      Grafana is running and provisioning parsed, so nothing else in this play
+      will notice — but every alert rule querying this datasource is now failing,
+      which means the alerting stack cannot report its own outage. If this
+      followed a credential rotation, the cause is almost certainly the `version:`
+      field in
+      files/data/grafana/provisioning/datasources/datasources.yaml: Grafana
+      re-applies a provisioned datasource only when that number INCREASES, so the
+      new secret was never written. Bump it and redeploy.
+    quiet: true
+  loop: "{{ grafana_datasource_health.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: not ansible_check_mode
+
 # --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------
 # `never` keeps these tasks out of every ordinary run; they execute ONLY when the
 # operator asks for them by tag. Included (not inlined) so the tag lives on one
