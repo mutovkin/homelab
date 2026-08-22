@@ -73,11 +73,54 @@ sources:
 
 # Transforms - Process and enrich logs
 transforms:
+  # Bound the self-ingestion feedback loop (#153) WITHOUT deleting Vector's own
+  # records from the store. docker_logs does not self-exclude here, and Vector's
+  # stderr IS ingested. That is wanted: these lines are the first thing anyone
+  # greps when the pipeline breaks, and the ONLY copy that survives a container
+  # recreate (`docker logs` does not). exclude_containers would kill exactly that
+  # signal, which is why #153 rejects it.
+  #
+  # MEASURED 2026-08-21, and it corrects #153's own premise — self-ingestion did
+  # NOT begin with #143. `_time:90d container_name:vector | stats by (hostname)`
+  # returns 16864 records under `751be39a3615` (the vector container's own id,
+  # which is what get_hostname!() wrote as `hostname` before #143 relabelled
+  # every record to the inventory name) spanning 2026-06-04 to 2026-06-20T21:05,
+  # at ~1000/day. It then stopped — 25 days BEFORE the 0.57 upgrade, with vector
+  # 0.56.0 running on both sides of the 2026-06-20T21:04 restart — and stayed at
+  # exactly zero through the healthy weeks, the 30-day silent-401 outage and its
+  # repair, until the #143 deploy at 2026-08-20T03:39:19Z. #153's "zero in the
+  # preceding 7 days" is therefore a true measurement of a two-month-old absence,
+  # not of a behaviour that had never happened. Post-#143 volume is ~26/day, ~40x
+  # BELOW the rate this store already absorbed for 16 days in June.
+  # What toggled it off and back on is UNDETERMINED. Do not write a mechanism
+  # here that has not been measured; the throttle bounds it either way.
+  #
+  # What must not be possible is AMPLIFICATION: Vector flooding its own stderr,
+  # re-ingesting the flood, and logging about the re-ingestion. This throttle
+  # breaks the geometric loop by capping the vector-container branch at
+  # 30 events/60s — ~80x the current daily volume, so it never engages in health,
+  # and generous enough that a crash loop's startup burst (~15 lines/attempt)
+  # stays greppable. Every event it drops increments
+  # component_discarded_events_total (component_id=throttle_vector_own), which
+  # obs-vector-discarding-events (#151) pages on — so the throttle engaging IS
+  # the flood alarm, not a silent loss.
+  #
+  # `exclude` (not `filter`): events matching the exclude condition BYPASS
+  # throttling entirely — every non-vector container is passed through untouched.
+  throttle_vector_own:
+    type: throttle
+    inputs:
+      - docker_logs
+    threshold: 30
+    window_secs: 60
+    exclude: '.container_name != "vector"'
+
   # Parse Docker logs and add metadata
   parse_docker:
     type: remap
     inputs:
-      - docker_logs
+      # via the #153 self-ingestion throttle, not docker_logs directly
+      - throttle_vector_own
     source: |
       # Add standard fields for filtering/grouping
       .source = "docker"
@@ -212,8 +255,12 @@ transforms:
       # Zero of those warnings ever reached VictoriaLogs (7 days, and control
       # phrases from vector's own stderr DO return hits, so the zero is real).
       # The reason is NOT that docker_logs self-excludes — it does not, and vector's
-      # own stderr IS ingested now; why that started with this change is
-      # undetermined. Do not write a mechanism here that has not been measured.
+      # own stderr IS ingested now. #153's follow-up measured the rest: it was also
+      # ingested at ~1000/day for 16 days in June under the old container-id
+      # `hostname` label, so this change did not START it either. What toggled it
+      # off in June and back on here is undetermined; the throttle_vector_own
+      # transform above bounds it regardless. Do not write a mechanism here that
+      # has not been measured.
       # See the role README's limitations and the docs/solutions entry.
       # Do NOT invent a synthetic container_name for host events: that puts a fake
       # value in a real field.
