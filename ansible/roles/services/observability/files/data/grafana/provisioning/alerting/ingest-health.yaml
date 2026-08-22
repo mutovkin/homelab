@@ -244,8 +244,10 @@ groups:
                       - 1
 
       # ---------------------------------------------------------------------
-      # The mirror #154 names. #139 gave us the ALL-sources rule and #143's
-      # follow-up the source:host one, because host ingestion can go to zero while
+      # The mirror #154 names. #108 gave us the ALL-sources rule (this file's own
+      # header says so; an earlier version of this comment credited #139, which
+      # only added the contact point that made it deliver) and #143's follow-up
+      # the source:host one, because host ingestion can go to zero while
       # docker volume keeps the all-sources rule Normal. The reverse gap stayed
       # open: docker collection can stop — a wedged docker_logs source, a socket
       # permission change, the group id under `user:` drifting — while host

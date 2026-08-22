@@ -267,6 +267,50 @@ showed.
   mean a future flood WOULD amplify, which is the scenario item 3 was worried about.
   Recorded in the role README's limitations.
 
+  > **SUPERSEDED BY #153/#154 (2026-08-21) — the paragraph above is left as written
+  > because the mistake in it is the lesson.** Everything it *measured* is true;
+  > what it *inferred* is not. "Self-ingestion began with this change" does not
+  > follow from "zero in the preceding 7 days", and querying the full retention
+  > window instead of a 7-day one shows why:
+  >
+  > ```
+  > _time:90d container_name:vector | stats by (hostname) count()
+  >   751be39a3615 -> 16864     2026-06-04 .. 2026-06-20T21:05, ~1000/day
+  >   eq12_docker  ->   153     since the 2026-08-20T03:39:19Z deploy, ~26/day
+  > _time:[2026-08-13T00:00:00Z, 2026-08-20T03:00:00Z] container_name:vector -> 0
+  > ```
+  >
+  > Self-ingestion had been happening at ~1000/day for 16 days in June, under the
+  > container-ID `hostname` label this very change replaced — which is precisely why
+  > a query written against the *new* label schema, over a 7-day window, could not
+  > see it. It stopped on 2026-06-20T21:05 and stayed at exactly zero for two months,
+  > through the healthy weeks, the 30-day silent-401 outage and its repair, until
+  > this deploy. Not a version boundary either: vector **0.56.0 on both sides** of
+  > the 2026-06-20T21:04 restart, with the 0.57 upgrade 25 days later.
+  >
+  > So: this change did not *introduce* the behaviour, and today's ~26/day is ~38x
+  > **below** the rate the store already absorbed without incident. What toggled it
+  > off in June and back on here remains **undetermined** — that part of the
+  > paragraph above still stands, and no mechanism has been invented since.
+  >
+  > Two other lines to read with the same caution: **"77 records"** was the count at
+  > the moment of writing (it reached 153 across 7 days), and the claim elsewhere in
+  > this doc that package-audit records carry **ingestion time by design** was true
+  > when written and was fixed by #154 — `parse_pkg` now parses those lines' own
+  > timestamps, and `timestamp_source` can finally report `"ingest"` for the ones
+  > that genuinely have none.
+  >
+  > The hazard the paragraph identified is real and is now *bounded* rather than
+  > merely watched: #153 added a `throttle` capping the vector-container branch at
+  > 30 events/60s, and every event it drops increments
+  > `component_discarded_events_total`, which #151's `obs-vector-discarding-events`
+  > pages on. See `roles/services/observability/README.md` limitation 3.
+  >
+  > **The transferable lesson:** an absence measured through a label schema that the
+  > change itself introduced cannot distinguish "this never happened" from "this
+  > happened under the old labels". Check the widest window the store retains, and
+  > check it under the labels that were in force at the time.
+
 ## Verification
 
 End state proven from the destination's own output, never from container state:

@@ -9,16 +9,30 @@ data_dir: "/var/lib/vector"
 
 # Global VRL timezone. The package-audit timestamps (#154) carry no zone marker
 # and parse through this. MEASURED, not assumed: this image is distroless-static
-# and ships no OS tzdata, so the default `local` silently resolves to UTC —
+# and ships no OS tzdata, so Vector's default `local` silently resolves to UTC —
 #   vector vrl -z local 'parse_timestamp!("2026-08-16 06:19:24", ...)' -> 06:19:24Z
 #   vector vrl -z America/Los_Angeles (same input)                    -> 13:19:24Z
 # i.e. every pkg record's _time would be 7-8 hours early, wrong in the one field
 # #154 exists to make right, with nothing to report it. Vector bundles chrono-tz,
-# so a named zone needs no tzdata on disk. Matches group_vars/all's `timezone`
-# and the CT's own /etc/timezone — change all of them together.
+# so a named zone needs no tzdata on disk.
+#
+# ${TZ}, not a hardcoded zone: TZ is already in this container's environment,
+# set by compose from TIMEZONE, which templates/env.j2 renders from group_vars/all's
+# `timezone`. One source of truth, so this file cannot drift from the fleet's zone.
+# Env interpolation reaches this key because VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION
+# is set for this container (it has to be, for the sink credentials).
+# Both directions measured against the binary before relying on either:
+#   TZ=America/Los_Angeles + the flag  -> parses "2026-08-16 06:19:24" to 13:19:24Z
+#   TZ set, flag ABSENT                -> "Configuration error. error=No such time
+#                                         zone" and Vector EXITS
+# The second one is why this is safe: a broken interpolation cannot silently
+# degrade to UTC, which is the failure a hardcoded value was protecting against.
+# The one residual: compose writes `TZ: ${TIMEZONE:-UTC}`, so if TIMEZONE were ever
+# unset the zone would become UTC quietly. It cannot be today — env.j2 renders
+# TIMEZONE from `timezone` with no default, so an undefined var fails the template.
 # Only zone-less parse_timestamp calls read this: parse_host's RFC5424 timestamps
 # carry their own offset and are untouched.
-timezone: "America/Los_Angeles"
+timezone: "${TZ}"
 
 # Sources - Where logs come from
 sources:
@@ -73,8 +87,13 @@ sources:
 
   # Package-change audit trail (#143 item 7). Not syslog-shaped and not written
   # through rsyslog, so these files reach VictoriaLogs only by being tailed
-  # directly. ~400 lines total on this host, so `beginning` backfills the whole
-  # history once and then tails.
+  # directly. ~400 lines on disk at first deploy, so `beginning` backfills the
+  # whole history once and then tails. (The record count in VictoriaLogs runs well
+  # above the on-disk line count — 1672 over one 7-day window — because a disk-buffer
+  # reset wipes checkpoints and these files are re-read from the start. Since #154
+  # the re-read lines keep their own timestamps instead of being re-dated, so the
+  # duplicates no longer corrupt the audit trail's chronology; see the role
+  # README's limitation 4 and the buffer-reset runbook.)
   host_pkg_logs:
     type: file
     include:
@@ -98,9 +117,27 @@ sources:
   #                                   counter that sees it.
   #   component_discarded_events_total  the throttle above engaging on a flood
   #                                   (component_id=throttle_vector_own,
-  #                                   intentional=true), a full buffer, a sink
-  #                                   dropping a batch. NOT remap aborts.
+  #                                   intentional=true) or a sink dropping a
+  #                                   batch. NOT remap aborts, and NOT a full
+  #                                   buffer either: this sink sets
+  #                                   `when_full: block`, so a full buffer applies
+  #                                   back-pressure and stalls the sources instead
+  #                                   of discarding. Only `drop_newest` discards.
   # So do not read a quiet discard counter as proof no events are being dropped.
+  #
+  # The `host` TAG on every series here is eq12_docker, NOT the container id, and
+  # that is load-bearing enough to record: internal_metrics tags by Vector's
+  # detected hostname, and Vector honours VECTOR_HOSTNAME over the OS hostname.
+  # Measured on 0.57.0 with a throwaway container:
+  #   no VECTOR_HOSTNAME -> host="ac99da101338"  (the container id)
+  #   VECTOR_HOSTNAME=probe-name -> host="probe-name"
+  # Live confirmation: /api/v1/series?match[]=vector_uptime_seconds returns exactly
+  # ONE series, host="eq12_docker", while the container's Config.Hostname is a
+  # 12-char id. So there is no per-recreate series churn — but there WOULD be if
+  # VECTOR_HOSTNAME were ever dropped from compose.yaml, and it would silently
+  # accumulate a dead series per recreate in a 5y-retention TSDB. The env var is
+  # already `:?`-guarded there for the log labels; this is a second reason it
+  # cannot become optional.
   # 60s, not the 1s default: these go to a 5y-retention TSDB and per-second
   # scrapes of ~hundreds of internal series buy nothing.
   vector_metrics:
@@ -126,17 +163,21 @@ transforms:
   # exactly zero through the healthy weeks, the 30-day silent-401 outage and its
   # repair, until the #143 deploy at 2026-08-20T03:39:19Z. #153's "zero in the
   # preceding 7 days" is therefore a true measurement of a two-month-old absence,
-  # not of a behaviour that had never happened. Post-#143 volume is ~26/day, ~40x
-  # BELOW the rate this store already absorbed for 16 days in June.
+  # not of a behaviour that had never happened. Post-#143 volume is ~26/day
+  # (153 records across the 7 days to 2026-08-21), ~38x BELOW the ~1000/day this
+  # store already absorbed for 16 days in June.
   # What toggled it off and back on is UNDETERMINED. Do not write a mechanism
   # here that has not been measured; the throttle bounds it either way.
   #
   # What must not be possible is AMPLIFICATION: Vector flooding its own stderr,
   # re-ingesting the flood, and logging about the re-ingestion. This throttle
   # breaks the geometric loop by capping the vector-container branch at
-  # 30 events/60s — ~80x the current daily volume, so it never engages in health,
-  # and generous enough that a crash loop's startup burst (~15 lines/attempt)
-  # stays greppable. Every event it drops increments
+  # 30 events/60s. Put in proportion: current volume is ~26 records per DAY, so a
+  # single 60-second allowance already exceeds a full day's traffic, and the
+  # sustained ceiling is 43,200/day — roughly 1,600x what this branch produces.
+  # It therefore cannot engage in health, and it stays generous enough that a
+  # crash loop's startup burst (~15-25 lines/attempt) remains greppable rather
+  # than being clipped exactly when it is most wanted. Every event it drops increments
   # component_discarded_events_total (component_id=throttle_vector_own), which
   # obs-vector-discarding-events (#151) pages on — so the throttle engaging IS
   # the flood alarm, not a silent loss.
@@ -292,7 +333,9 @@ transforms:
         # DELETE IT, do not just leave it. Vector's `file` source has ALREADY set
         # .timestamp to the READ time, so finalize's `!is_timestamp` fallback can
         # never fire on this branch and every pkg record was stamped
-        # timestamp_source:"event" while carrying ingest time — measured 2026-08-22,
+        # timestamp_source:"event" while carrying ingest time — measured 2026-08-22 UTC
+        # (all dates in these configs are UTC; the work ran on the evening of the
+        # 21st local, America/Los_Angeles),
         # 1672 of them, all lying, for the whole life of the field. That made the one
         # field designed to tell line-time from ingest-time useless for the one
         # source where the distinction is real. Deleting the key lets finalize stamp

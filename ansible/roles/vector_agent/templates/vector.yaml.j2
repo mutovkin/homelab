@@ -7,14 +7,26 @@
 # documented in ONE place — roles/services/observability/README.md, section
 # "Log record schema". CHANGE ONE, CHANGE BOTH, and change the README with them.
 #
-# Only three things differ from the container's copy, and they are the only three
-# that may differ:
+# FIVE things differ from the container's copy, and they are the only five that
+# may differ. This list IS the drift guard — if you add a sixth difference, add it
+# here in the same change, or the guard silently stops guarding:
 #   1. the sink endpoint is the LAN address of VictoriaLogs, not a compose service
 #      name (there is no docker network here);
 #   2. the docker_logs source and its parse_docker transform exist only where
 #      vector_agent_docker_logs is true;
 #   3. this file is templated, so `{{ '{{' }} ... {{ '}}' }}` sink templates have to
-#      be escaped from Jinja.
+#      be escaped from Jinja, and `timezone` comes from a Jinja var rather than
+#      the container's ${TZ};
+#   4. NO internal_metrics source and NO prometheus_remote_write sink (#151).
+#      Vector's self-telemetry is container-only, so the four obs-vector-* alert
+#      rules do not cover these hosts. Deliberate scope, tracked in #160 — not an
+#      omission to "fix" by copying the block across without the LAN endpoint and
+#      the VM credentials it needs;
+#   5. NO throttle_vector_own transform (#153). That bounds the container's
+#      self-ingestion feedback loop; a native agent is not reading its own stderr
+#      back through docker_logs, so there is no loop here to bound. On
+#      n5pro_docker, which DOES collect docker logs, `vector` is not a container
+#      at all — it is a systemd unit — so its own output never enters that source.
 # Everything else — every VRL line, every comment explaining WHY a coercion is
 # defaulted rather than fallible — was copied across verbatim rather than
 # "improved", because a difference between the two files is a difference in the

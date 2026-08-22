@@ -10,15 +10,26 @@ apiVersion: 1
 # obs-host-log-ingest-stalled, whose entire job is reporting that the log pipeline
 # is dead. Primary signal and watchdog silent at once.
 #
-# TWO rules because one cannot do it. A failure alert is a monitor with a
-# dependency on the thing it monitors, so it needs a channel the failure cannot
-# take out (obs-alert-delivery-failing, routed telegram-only). And a channel can
-# fail in ways Grafana never counts — accepted by the API and dropped, a chat the
-# bot was removed from — which no counter shows, so the second control is a
-# dead-man's switch that must be seen ARRIVING (obs-alert-delivery-heartbeat).
+# THREE rules, because each covers a failure the other two cannot see:
 #
-# Both need telegraf's Grafana /metrics scrape (files/data/telegraf/telegraf.conf);
-# the heartbeat does not, but lives here because it is the same control.
+#   obs-alert-delivery-failing            Grafana TRIED and the send failed.
+#     A monitor with a dependency on the thing it monitors, so it is routed away
+#     from the integration that failed (see the routing table in
+#     templates/grafana-notification-policies.yaml.j2).
+#   obs-alert-delivery-heartbeat          Grafana believes it delivered, and it
+#     did not. No counter can show that — a message accepted by the Telegram API
+#     and dropped, a chat the bot was removed from — so this one must be seen
+#     ARRIVING. It is a dead-man's switch, and its absence is the signal.
+#   obs-alert-delivery-telemetry-absent   The TELEMETRY died, so neither of the
+#     above can fire. Without it, a dead telegraf or a broken /metrics scrape
+#     leaves obs-alert-delivery-failing permanently NoData -> OK: a rule that
+#     cannot fire, reporting healthy. That is the exact silent-failure shape this
+#     whole file exists to remove, and it would have been reintroduced by the file
+#     itself.
+#
+# The first and third read metrics scraped by telegraf from Grafana's /metrics
+# (files/data/telegraf/telegraf.conf). The heartbeat deliberately does NOT: it
+# evaluates a constant, so nothing in the metrics path can silence it.
 groups:
   - orgId: 1
     name: delivery-health
@@ -136,7 +147,8 @@ groups:
         for: 0s
         # OK, and this is the ONE place in this repo where NoData is genuinely the
         # healthy state rather than a concession. MEASURED on the live Grafana
-        # 2026-08-21: /metrics exposes
+        # 2026-08-21 (local, America/Los_Angeles; UTC dates elsewhere in this batch
+        # read 2026-08-22 — same evening): /metrics exposes
         #   grafana_alerting_notifications_total{integration="email",org="1"}
         # and NO _failed_total series at all. A Prometheus counter is not exported
         # until something increments it, so "no data" here means "nothing has ever
@@ -156,22 +168,36 @@ groups:
             did not go out. If integration="email", suspect the shared Gmail app
             password (revoked or rotated — it is the same credential watchtower
             uses, see templates/env.j2), a Google sender block, or egress to
-            smtp.gmail.com:587. THIS ALERT DELIBERATELY DID NOT COME BY EMAIL: it
-            carries channel=telegram-only and routes to the Telegram receiver,
-            because a rule that emails you to say email is broken is not a
-            control (#152). If integration="telegram", the bot token or chat id is
-            wrong or the bot was removed from the chat — the transport itself was
-            operator-confirmed working, so suspect Grafana's contact-point
+            smtp.gmail.com:587. If integration="telegram", the bot token or chat
+            id is wrong or the bot was removed from the chat — the transport itself
+            was operator-confirmed working, so suspect Grafana's contact-point
             settings before the credential. `docker logs grafana` carries the
             underlying SMTP/API error either way.
+            HOW THIS ALERT REACHED YOU, because it is the point of the rule (#152:
+            a rule that reports a channel's failure THROUGH that channel is not a
+            control). While observability_alert_telegram is true it is routed AWAY
+            from the integration that failed: integration=email pages by Telegram,
+            integration=telegram pages by email. While the flag is false there is
+            only one channel, so it is caught by the severity=critical route and
+            arrives by email — including when email is what failed. That is the
+            unavoidable single-channel gap, and it is the reason the flag is not
+            meant to stay false.
         labels:
           severity: critical
           component: alerting
-          # Matched by the telegram-only route, which sits FIRST in the routing
-          # tree so it wins over the generic severity=critical route. While
-          # observability_alert_telegram is false that route is not rendered and
-          # this alert falls through to the root policy — i.e. by email, the thing
-          # it may be reporting on. That is transitional and is exactly why the
+          # Matched by the channel=telegram-only routes, which sit FIRST in the
+          # routing tree so they win over the generic severity=critical route.
+          # There are TWO of them and order decides: the pair
+          # (channel=telegram-only AND integration=telegram) -> homelab-email comes
+          # first, so a TELEGRAM failure is reported by EMAIL; everything else
+          # matching channel=telegram-only falls to the next route and goes by
+          # Telegram. The label name is historical — read it as "route me off the
+          # failing channel", not as "always Telegram".
+          # While observability_alert_telegram is false NEITHER route is rendered,
+          # and this alert is caught by the unconditional severity=critical route
+          # -> homelab-critical, which in that state is email-only. It does NOT
+          # fall through to the root policy (an earlier version of this comment
+          # said so and was wrong). Same destination, different mechanism, and the
           # flag is not meant to stay false.
           channel: telegram-only
         data:
@@ -224,3 +250,115 @@ groups:
                     type: gt
                     params:
                       - 0
+
+      # ---------------------------------------------------------------------
+      # THE ABSENCE OWNER for the delivery telemetry, and the reason
+      # obs-alert-delivery-failing above can safely be noDataState: OK.
+      #
+      # The hole this closes: obs-alert-delivery-failing queries a counter that
+      # does not exist until the first failure, so its healthy state and its
+      # BLIND state are the same state — NoData -> OK. If telegraf dies, if the
+      # Grafana /metrics scrape breaks (a fieldpass that stops matching after a
+      # Grafana metric rename is the realistic one), or if the remote-write path
+      # to VictoriaMetrics fails, that rule goes quiet and reports healthy
+      # forever. A rule that cannot fire, reporting Normal, is the precise defect
+      # #152 was filed about — reintroduced by #152's own fix if this rule does
+      # not exist.
+      #
+      # Why lag() on the SUCCESS counter and not on the failed one: telegraf
+      # writes grafana_alerting_notifications_total every 60s whether or not it
+      # increments, so lag > 600s means the SCRAPE stopped, not that nothing was
+      # sent. The failed counter cannot be used this way — it legitimately does
+      # not exist.
+      #
+      # And the series is guaranteed to exist, which is what makes
+      # noDataState: Alerting free of false alarms here: the heartbeat above
+      # forces at least one notification per channel per 24h, so
+      # grafana_alerting_notifications_total can never be absent on a healthy
+      # system. The two rules hold each other up — do not delete the heartbeat
+      # without revisiting this one's NoData choice.
+      #
+      # Mirrors obs-vector-metrics-absent exactly, including the [24h] lookbehind
+      # and the reason for it (a series with no sample inside the lookbehind is
+      # not returned AT ALL, so a shorter window makes a long-dead exporter vanish
+      # from the query, Grafana marks the instance stale, and the alert RESOLVES
+      # itself back into invisibility). relativeTimeRange must stay >= it.
+      - uid: obs-alert-delivery-telemetry-absent
+        title: Alert delivery telemetry stopped
+        condition: C
+        for: 5m
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: The delivery-path metrics have stopped arriving — delivery is now unmonitored.
+          description: >-
+            No grafana_alerting_notifications_total sample in over 10 minutes,
+            while telegraf scrapes Grafana's /metrics every 60s. Nothing is
+            necessarily wrong with DELIVERY — what is broken is the ability to see
+            delivery failures at all, so obs-alert-delivery-failing is now blind
+            and will report Normal no matter what happens.
+            Check, in order: `docker logs telegraf` on eq12_docker; that
+            http://grafana:3000/metrics still answers 200 from inside
+            observability_network; and that telegraf's `[[inputs.prometheus]]`
+            fieldpass still matches — it is `grafana_alerting_notifications*`, and
+            a Grafana metric RENAME would silently empty it, which is exactly the
+            failure this rule exists to catch (the *pass filters match the
+            measurement name, and under metric_version = 2 that trap has already
+            bitten once — see the comment in telegraf.conf).
+            If the heartbeat rule was paused or deleted, that alone can empty this
+            series on an otherwise healthy system; unpause it rather than
+            weakening this rule.
+        labels:
+          severity: critical
+          component: alerting
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "min(lag(grafana_alerting_notifications_total[24h]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 600s = ten missed 60s scrapes. Loose enough that a telegraf restart or
+          # one slow remote-write cannot trip it.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600

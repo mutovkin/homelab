@@ -68,15 +68,28 @@ groups:
           description: >-
             component_discarded_events_total increased for
             {{ $labels.component_id }}. Discards come from the #153
-            self-ingestion throttle engaging on a flood, a full disk buffer, or a
-            sink dropping a batch. The series also carries an `intentional` tag
-            (true for a throttle, false for real loss) — read it first, it answers
-            the question faster than any log.
+            self-ingestion throttle engaging on a flood, or a sink dropping a
+            batch. NOT from a full disk buffer: this config sets
+            `when_full: block`, so a full buffer applies BACK-PRESSURE and stalls
+            the sources rather than discarding — that surfaces as
+            obs-vector-buffer-filling and then as an ingest stall, never here. Only
+            `when_full: drop_newest` discards, and nothing in this stack uses it.
+            The series carries an `intentional` tag ({{ $labels.intentional }} on
+            this instance): true for a throttle, false for real loss — read it
+            first, it answers the question faster than any log.
             component_id=`throttle_vector_own` with intentional=true means Vector
             is flooding its own stderr and the throttle is bounding the
             amplification loop: the throttle firing IS the flood alarm, so the job
             is "find the flood", never "raise the threshold". Anything else is
             real pipeline loss.
+            ONE MORE READING, and it is the likeliest false lead: a Vector CRASH
+            LOOP trips the same throttle with no stderr flood at all. Each start
+            emits ~15-25 lines and docker's restart backoff fits several attempts
+            into a minute, which clears 30/60s on its own. Disambiguate with the
+            OTHER rules, not this one — if obs-log-ingest-stalled or
+            obs-vector-metrics-absent is firing at the same time, the condition is
+            a crash loop and this alert is a symptom of it; if both are Normal,
+            Vector is up and genuinely flooding.
             NOTE, measured on 0.57.0 rather than assumed: a VRL remap ABORT does
             NOT land here — it increments component_errors_total instead
             (error_type=conversion_failed, stage=processing), so
@@ -100,7 +113,11 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              expr: "sum by (component_id) (increase(vector_component_discarded_events_total[15m]))"
+              # `intentional` is IN the by-clause on purpose: the annotation tells the
+              # operator to read that tag to tell a throttle bound from real loss,
+              # and a label aggregated away renders EMPTY rather than failing.
+              # Same reason error_type is kept on the rule below.
+              expr: "sum by (component_id, intentional) (increase(vector_component_discarded_events_total[15m]))"
               instant: true
               range: false
               intervalMs: 60000
@@ -187,7 +204,11 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              expr: "sum by (component_id) (increase(vector_component_errors_total[15m]))"
+              # error_type MUST be in the by-clause: the annotation renders
+              # {{ $labels.error_type }}, and a label aggregated away renders
+              # EMPTY rather than failing — a notification that silently drops
+              # the one field separating a sink auth failure from a remap abort.
+              expr: "sum by (component_id, error_type) (increase(vector_component_errors_total[15m]))"
               instant: true
               range: false
               intervalMs: 60000

@@ -136,8 +136,8 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-**Thirteen** provisioned rules, all in the **Observability** folder. #151, #152 and
-#154 added seven of them (four Vector-health, one docker-ingest twin, two
+**Fourteen** provisioned rules, all in the **Observability** folder. #151, #152 and
+#154 added eight of them (four Vector-health, one docker-ingest twin, three
 delivery-path). Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
 
@@ -156,8 +156,9 @@ delivery-path). Routing is no longer "all by email" — see
 | `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
 | `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
+| `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_notifications_total[24h]))` > 600, `for: 5m` | **Alerting** |
 
-`execErrState: Alerting` on all thirteen — a datasource that cannot be reached is
+`execErrState: Alerting` on all fourteen — a datasource that cannot be reached is
 not evidence of health.
 
 ### Why so many of the new rules are `noDataState: OK` (#151, #152)
@@ -184,7 +185,7 @@ perfect health, from the moment the file lands. That is the same false-alarm sha
 Everything else in this stack detects only **total** absence. The ingest-stalled
 rules count rows; the role's deploy-time assert waits for one marker to come back
 out of VictoriaLogs. All of them are satisfied by a pipeline that is dropping half
-its events — a remap abort, a full buffer, a sink rejecting a subset. #143 replaced
+its events — a remap abort, a stalled sink, a sink rejecting a subset. #143 replaced
 Vector's fallible `!` coercions with defaulted forms precisely because an abort
 drops the event with no dead-letter and no counter; that mitigation was blind by
 construction until these metrics existed.
@@ -201,7 +202,7 @@ forced on a throwaway container):
 | counter | covers |
 | ------- | ------ |
 | `vector_component_errors_total` | sink errors including **auth failures** — the exact signature of the ~30-day silent 401 ([vector-057](../../../../docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)) — **and VRL remap aborts** (`error_type=conversion_failed`, `stage=processing`) |
-| `vector_component_discarded_events_total` | the #153 throttle engaging (`component_id=throttle_vector_own`, `intentional=true`), a full buffer, a sink dropping a batch |
+| `vector_component_discarded_events_total` | the #153 throttle engaging (`component_id=throttle_vector_own`, `intentional=true`), or a sink dropping a batch. **Not** a full buffer — this sink is `when_full: block`, so a full buffer back-pressures and stalls the sources instead of discarding; only `drop_newest` discards, and nothing here uses it |
 
 The surprise is in the first row: **a remap abort does NOT increment the
 discarded-events counter.** An aborted remap drops the event with no dead-letter
@@ -220,8 +221,12 @@ Two couplings that nothing enforces, so both ends say so:
   renamed internal metrics across releases (#151 says so), so a version bump means
   **re-checking** the four names in `vector-health.yaml` against
   `/api/v1/label/__name__/values`, not assuming them.
-- `obs-vector-buffer-filling`'s threshold `134217728` is 50% of `vector.yaml`'s
-  `buffer.max_size` `268435488`. Change both together.
+- `obs-vector-buffer-filling`'s threshold `134217728` is exactly **128 MiB**,
+  i.e. half of a true 256 MiB, against `vector.yaml`'s `buffer.max_size` of
+  `268435488` — which is *not* 256 MiB but 16 bytes over it, so the threshold is
+  ~49.99999%, not 50%. Nothing turns on the rounding and the live `max_size` is
+  deliberately left alone (changing it would resize the on-disk buffer), but the
+  two numbers are coupled by hand: change both together.
 
 ### The two-rule split for log ingest, and why the per-host query looks odd (#134)
 
@@ -368,27 +373,59 @@ The obvious fix cannot stand alone: **a rule that emails you to say email is bro
 is not a control.** So the load-bearing half is a second, independent channel.
 
 `observability_alert_telegram` (role default `false`, **`true` on eq12_docker**)
-gates everything Telegram-shaped. False, routing is exactly what #139 shipped, so
-this role still deploys on a host whose vault has no Telegram keys. True, it
+gates everything Telegram-shaped. False, delivery is email-only — the same
+*channel coverage* #139 shipped, though not the same routing tree, since the
+flag-false render still carries #152's heartbeat and severity routes. So this role
+still deploys on a host whose vault has no Telegram keys. True, it
 requires `vault_grafana_telegram_bot_token` and `vault_grafana_telegram_chat_id`,
 both asserted BY NAME at the top of the play — a blank key fails the deploy loudly
 rather than provisioning a contact point that can never send. (The chat id is
 stored as a **quoted string** on purpose: unquoted it parses as an integer and
 Grafana's contact point wants the textual form.)
 
-Three receivers and a three-route tree, order-sensitive (first match wins):
+Three receivers and a four-route tree, order-sensitive (first match wins, no
+`continue` anywhere):
 
 | route matcher | receiver | channels | why |
 | ------------- | -------- | -------- | --- |
-| `channel = telegram-only` | `homelab-telegram` | Telegram | the delivery-failure alert must not travel by the channel it is reporting on — this route is FIRST so it wins over `severity=critical` |
+| `channel = telegram-only` **and** `integration = telegram` | `homelab-email` | email | a **Telegram** delivery failure must not be reported by Telegram. More specific, so it goes FIRST |
+| `channel = telegram-only` | `homelab-telegram` | Telegram | everything else carrying that label (in practice `integration = email`). Second of the pair, and must stay second — promoted, it would swallow the Telegram case |
 | `heartbeat = true` | `homelab-critical` | email + Telegram, `repeat_interval: 24h` | the dead-man's switch, below |
 | `severity = critical` | `homelab-critical` | email + Telegram | critical rules page on both |
 | *(root, no matcher)* | `homelab-email` | email | everything else, unchanged from #139 |
 
+The `channel = telegram-only` label reads as **"route me off the failing
+channel"**, not "always Telegram" — the name is historical, from before the
+mirrored pair existed. The principle is symmetric: an alert reporting that a
+channel failed must not travel by that channel, in *either* direction. Without the
+first row, a "Telegram is broken" page would have gone out over Telegram —
+reintroducing, for the Telegram half, exactly the defect #152 removed for the
+email half.
+
 `homelab-critical` **degrades to email-only** when the flag is false, which is why
-the last two routes render unconditionally: a route pointing at a receiver that does
-not exist is a **fatal** Grafana provisioning error, and this shape means the routes
-can never dangle as the flag flips.
+the heartbeat and severity routes render unconditionally: a route pointing at a
+receiver that does not exist is a **fatal** Grafana provisioning error, and this
+shape means they can never dangle as the flag flips. The two `telegram-only` rows
+are not rendered at all in that state, so `obs-alert-delivery-failing` is caught by
+the `severity = critical` route and arrives by email — including when email is what
+failed. That is the irreducible single-channel gap, and it is the reason the flag is
+not meant to stay false. (`homelab-email` is unconditional, so the first row is safe
+to render whenever the block is rendered at all.)
+
+**Three rules, because each covers a failure the other two cannot see.**
+`obs-alert-delivery-failing` catches "Grafana tried and the send failed".
+`obs-alert-delivery-telemetry-absent` catches "the telemetry died, so the first
+rule is blind" — without it, a dead telegraf or a `fieldpass` that stops matching
+after a Grafana metric rename leaves the failure rule permanently NoData → **OK**:
+a rule that cannot fire, reporting Normal. It uses `lag()` on the **success**
+counter, not the failed one, because telegraf writes that series every 60s whether
+or not it increments, so `lag > 600` means the *scrape* stopped rather than that
+nothing was sent — and the failed counter cannot be used this way, since it
+legitimately does not exist. Its `noDataState: Alerting` is free of false alarms
+only because the heartbeat guarantees at least one notification per channel per
+day, so the success series can never be legitimately absent. **The two hold each
+other up: do not pause or delete the heartbeat without revisiting that NoData
+choice.**
 
 **`obs-alert-delivery-heartbeat` is supposed to fire forever.** It is not broken. It
 is a dead-man's switch: one notification per channel per 24 hours, so a channel
@@ -554,7 +591,9 @@ makes queryable, so `level:err` works without paying for stream cardinality.
 > daemon's log timestamp (legitimate, that IS the event time) and the `file`
 > source from the **read** time (not an event time at all). So the
 > `!is_timestamp` branch never fired for host or pkg records and every single one
-> was labelled `event`. Measured 2026-08-22: 1672 pkg records claiming `event`
+> was labelled `event`. Measured 2026-08-22 UTC — dates in this README are UTC,
+> which is why late-evening local (America/Los_Angeles) measurements carry the
+> next day's date; the pkg examples below deliberately show both. 1672 pkg records claiming `event`
 > while carrying ingest time, 0 claiming `ingest`, ever. The one field built to
 > make that distinction queryable was the one field that could not express it —
 > and because the value it reported was a plausible one, nothing looked wrong.
@@ -633,13 +672,13 @@ duplicated.
    | ------ | ------- | -------------- |
    | 2026-06-04 → 2026-06-20T21:05 | **16,864** (~1000/day) | `751be39a3615` — the vector container's own id, what `get_hostname!()` wrote before #143 relabelled every record |
    | 2026-06-20T21:05 → 2026-08-20T03:39 | **0** | — |
-   | since 2026-08-20T03:39 (the #143 deploy) | 153 in 24h, ~26/day | `eq12_docker` |
+   | since 2026-08-20T03:39 (the #143 deploy) | **153** across the 7 days to 2026-08-21 (~26/day) | `eq12_docker` |
 
    So self-ingestion had merely been **off for two months**, and the 7-day query
    measured a real but old absence. It is not a version boundary either: Vector
    0.56.0 was running on both sides of the 2026-06-20T21:04 restart, and the 0.57
-   upgrade came 25 days later. Today's rate is ~40x **below** the June rate this
-   same store absorbed for 16 days without incident. **What toggled it off and back
+   upgrade came 25 days later. Today's ~26/day is ~38x **below** the ~1000/day
+   this same store absorbed for 16 days without incident. **What toggled it off and back
    on is undetermined, and no guess is recorded here.**
 
    `docker_logs` does not self-exclude, and `exclude_containers: ["vector"]` is
@@ -651,9 +690,15 @@ duplicated.
    What #153 does instead is bound the **amplification**, which is the actual
    hazard: a `throttle` transform between `docker_logs` and `parse_docker` caps the
    vector-container branch at **30 events/60s** (`exclude: '.container_name !=
-   "vector"'`, so every other container bypasses it untouched). That is ~80x
-   current daily volume, so it never engages in health, and generous enough that a
-   crash loop's startup burst stays greppable. Every event it drops increments
+   "vector"'`, so every other container bypasses it untouched). Put in
+   proportion: current volume is ~26 records per **day**, so one 60-second
+   allowance already exceeds a full day's traffic and the sustained ceiling is
+   43,200/day — roughly 1,600x what this branch produces. It cannot engage in
+   health, and stays generous enough that a crash loop's startup burst
+   (~15-25 lines/attempt) remains greppable rather than being clipped exactly when
+   it is most wanted. That last case is also a documented false lead: a crash loop
+   trips the throttle with no flood at all, so `obs-vector-discarding-events` says
+   to disambiguate with the ingest-stalled and metrics-absent rules. Every event it drops increments
    `component_discarded_events_total{component_id="throttle_vector_own"}`, which
    `obs-vector-discarding-events` (#151) pages on — **the throttle engaging IS the
    flood alarm**, not a silent loss. #151 and #153 compose: one bounds the loop, the

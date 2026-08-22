@@ -56,12 +56,21 @@ policies:
     # `component_id` joins them for #151: the vector-health rules carry one
     # instance per Vector component, and without it two different components
     # discarding events would collapse into one notification naming neither.
+    #
+    # `integration` joins them for #152, on identical grounds:
+    # obs-alert-delivery-failing carries one instance per integration, and its
+    # whole subject line is WHICH channel failed. Without this key an email
+    # failure and a telegram failure — the case where you most need to know which
+    # is which — merge into one `[FIRING:2]` naming neither. It is also what makes
+    # the A5 routing split below observable: the two instances take different
+    # routes and must not be grouped back together first.
     group_by:
       - grafana_folder
       - alertname
       - server
       - hostname
       - component_id
+      - integration
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s
@@ -70,10 +79,26 @@ policies:
     repeat_interval: 12h
     routes:
 {% if observability_alert_telegram | bool %}
-      # ORDER MATTERS: first match wins, and there is no `continue` on these. The
-      # delivery-failure alert must reach Telegram ONLY (#152: email cannot page
-      # about email being broken), so its matcher sits BEFORE the generic
-      # severity route it would otherwise be caught by.
+      # ORDER MATTERS TWICE OVER: first match wins, there is no `continue` on any
+      # of these, and the two routes below are a MATCHED PAIR that must stay in
+      # this order.
+      #
+      # The principle (#152): an alert reporting that a channel failed must not
+      # travel BY that channel. `channel=telegram-only` on the delivery-failure
+      # rule means "route me off the failing channel" — the label name is
+      # historical and predates this pair.
+      #
+      # So the more specific matcher goes first: a TELEGRAM delivery failure is
+      # reported by EMAIL. Without it, the single route below would have sent a
+      # "telegram is broken" page through telegram — reintroducing, for the
+      # telegram half, exactly the defect #152 removed for the email half.
+      - receiver: homelab-email
+        object_matchers:
+          - ["channel", "=", "telegram-only"]
+          - ["integration", "=", "telegram"]
+      # Everything else carrying that label — in practice integration=email —
+      # goes by Telegram. This is the original #152 route and must stay SECOND;
+      # promoted above the pair it would swallow the telegram case.
       - receiver: homelab-telegram
         object_matchers:
           - ["channel", "=", "telegram-only"]

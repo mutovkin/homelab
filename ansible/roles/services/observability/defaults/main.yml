@@ -18,8 +18,10 @@ victorialogs_web_port: 9428
 # and the ingest-health alert's job.
 observability_settle_seconds: 15
 
-# #152's Telegram second channel, gated. false = email-only routing exactly as
-# #139 built it, which is what a host without the vault keys must get; true
+# #152's Telegram second channel, gated. false = email-only delivery, the same
+# CHANNEL COVERAGE #139 shipped — not the same routing tree: the flag-false render
+# still contains #152's heartbeat and severity routes, which #139 never had. That
+# is what a host without the vault keys must get; true
 # REQUIRES vault_grafana_telegram_bot_token + vault_grafana_telegram_chat_id in
 # host_vars/<host>/vault.yml — asserted BY NAME at the top of the play, so a
 # missing key fails loudly instead of provisioning a Telegram contact point that
