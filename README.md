@@ -115,6 +115,16 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 | [Portainer](ansible/roles/services/portainer/)   | 9000 (allowlisted) | Container management UI                            |
 | [Watchtower](ansible/roles/services/watchtower/) | —                | Scheduled container updates (per-service policy: auto vs monitor-only) |
 
+### Host-level services (not compose)
+
+| Role                                             | Hosts                          | Description                                          |
+| ------------------------------------------------ | ------------------------------ | ---------------------------------------------------- |
+| [vector_agent](ansible/roles/vector_agent/)      | eq12, n5pro, n5pro_docker      | Native systemd Vector log shipper → VictoriaLogs on eq12_docker (#134). No listening port. |
+| [rsyslog_structured](ansible/roles/rsyslog_structured/) | all four                | The RFC5424 `/var/log/structured.log` side-stream every Vector reads |
+
+`task deploy:logagents` deploys the agents; `site.yml` runs them last, after the
+compose stacks, because their final assertion queries VictoriaLogs.
+
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — Network topology, orchestration flow, port map

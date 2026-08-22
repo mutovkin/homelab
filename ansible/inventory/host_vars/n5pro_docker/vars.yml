@@ -20,6 +20,19 @@ nfs_enabled: true
 # and masks AppArmor inside the container so Docker doesn't attempt to use it.
 docker_lxc: true
 
+# Collect local container logs as well as host logs with the native Vector shipper
+# (roles/vector_agent, #134). TRUE only here: this is the one host in the
+# vector_agents group that runs Docker, and the role's default is false because a
+# docker_logs source on a host with no /var/run/docker.sock makes Vector log a
+# connection error on a loop while still shipping host records — permanently noisy,
+# permanently green.
+#
+# Turning this on puts the `vector` user in the `docker` group, which is
+# root-equivalent access on this host. It is the same posture the vector CONTAINER
+# has on eq12_docker (socket bind-mount) and the same telegraf already holds there:
+# a new holder of an existing grant, not a new kind of grant.
+vector_agent_docker_logs: true
+
 # Services to deploy on this Docker host
 # Each entry corresponds to an Ansible role in roles/services/
 services:
@@ -67,3 +80,19 @@ truenas_music_share: "/mnt/vault/media/music/lossless"
 # Lyrion Music Server
 lms_web_port: "9001"
 lms_advertise_addr: "192.168.30.15"  # Docker host LAN IP — visible to Squeezebox players
+
+# Scoped fail-open nftables allowlist for the portainer role's UI port (#80).
+# Per-host since #140: this used to live in the role's defaults, so this host
+# inherited eq12_docker's NPM grant (192.168.25.20/32) without anyone choosing
+# it. Pre-check on 2026-08-19 established NPM (CT 104) has exactly ONE upstream
+# on this host — lms.moutovkin.com -> n5pro-docker.lan:9001 — and no proxy host,
+# stream host, dead host or redirection for :9000; ss/conntrack showed no live
+# 9000 sessions and the Portainer instance here has never been initialised. The
+# inherited 192.168.25.20/32 grant was therefore removed.
+#
+# No vaultwarden_fw_ports here: vaultwarden is not in this host's `services`,
+# so declaring one would be dead config. The role default is `{}`, which fails
+# the nft_scoped_fw assert if the role is ever added here without an allowlist.
+portainer_fw_ports:
+  9000:
+    - 192.168.48.0/24 # operator workstation subnet — the only source that needs this UI

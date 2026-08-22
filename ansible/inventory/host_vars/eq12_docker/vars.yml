@@ -46,17 +46,90 @@ postgres_firewall:
       - 192.168.25.20/32  # NPM LXC (CT 104)
       - 192.168.48.0/24   # operator workstation subnet
 
-# Scoped fail-open nftables allowlist for VictoriaMetrics' InfluxDB ingest port
-# (#122). :8089 is an UNAUTHENTICATED write endpoint on tcp AND udp —
+# Scoped fail-open nftables allowlists for the observability stack (#122, extended
+# by #134). Sources NOT listed are dropped FOR THAT PORT ONLY; loopback and the
+# docker bridges (172.16.0.0/12, accepted only when they do NOT arrive on
+# lan_iface) are always allowed, and every ungoverned port exits on the table's
+# first terminal rule.
+#
+# :8089 (#122) is an UNAUTHENTICATED write endpoint on tcp AND udp —
 # --httpAuth.username/password guard :8428 only, never the --influxListenAddr
-# listener. Its one intended client is the Home Assistant VM. Sources NOT listed
-# are dropped for this port only; loopback and the docker bridges (172.16.0.0/12,
-# accepted only when they do NOT arrive on lan_iface) are always allowed. The read
-# ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately NOT in this list —
-# NPM and operator workstations must keep reaching them.
+# listener. Its one intended client is the Home Assistant VM.
+#
+# :9428 (#134) is authenticated, and is governed for a different reason: it became
+# a fleet ingest endpoint. See the block on that port below for the measured
+# source list.
+#
+# :8428 (VM) and :3000 (Grafana) remain UNGOVERNED, and that is now a live
+# asymmetry rather than a blanket "read ports are open" rule — this comment used
+# to lump :9428 in with them. They are authenticated read surfaces whose client
+# set has not been established the way :9428's just was; narrowing them needs the
+# same NPM-table check and its own from-a-blocked-source verification, and is
+# tracked separately. Do not extend the 9428 list to them by analogy.
 observability_firewall:
   lan_iface: eth0  # the LXC's LAN-facing interface (docker bridges are br-*/docker0)
   ports:
     # InfluxDB line protocol, tcp AND udp (nft_fw_protocols: [tcp, udp] in the role).
     8089:
       - 192.168.25.10/32  # Home Assistant VM (VM 100, MAC 02:ab:9f:1f:cd:8c)
+    # VictoriaLogs HTTP API — governed since #134, which turned it from a port only
+    # this host's own container wrote to into a FLEET INGEST ENDPOINT. The LAN is one
+    # flat 192.168.0.0/18 with no segmentation, so nftables is the only thing
+    # constraining who can reach it, and it now accepts writes from three other hosts.
+    #
+    # THE LIST BELOW IS BUILT FROM CONFIGURATION, NOT FROM OBSERVED TRAFFIC, and that
+    # is deliberate: measured 2026-08-20, the :9428 DNAT rule had passed 3 packets in
+    # the ~24 h since the container started and conntrack held no :9428 flows at all.
+    # A sample that small can only mislead — it would have "proved" nothing needs
+    # access. Each entry below is justified by a config fact, each verified:
+    #
+    #  * the three agents are the writers this change exists for (roles/vector_agent,
+    #    group vector_agents in hosts.yml);
+    #  * NPM was VERIFIED, not assumed — #140 taught that inherited NPM grants in this
+    #    repo have been wrong before, so this was checked the same way: CT 104's own
+    #    proxy_host table, read read-only, holds id 11 `vl.moutovkin.com` ->
+    #    deb-docker.lan:9428 with is_deleted=0. Unlike #140's portainer case the answer
+    #    came back YES. Removing that proxy host is what would make this grant stale.
+    #  * operators reach the VictoriaLogs UI at /select/vmui directly by IP.
+    #
+    # NOT granted, each for a measured reason:
+    #  * Grafana — it reaches VictoriaLogs as `http://victorialogs:9428` over the
+    #    observability compose network (172.20.0.0/24), confirmed in the provisioned
+    #    datasource, so it never traverses eth0 and no grant would help it anyway.
+    #  * the local vector/telegraf containers — same compose-network path, and the
+    #    role's own ingest assert uses localhost (covered by `iif lo` in the table).
+    #  * Home Assistant (192.168.25.10) — approved for 8089 only; nothing indicates it
+    #    reads logs, and the per-port shape means its 8089 grant gives it nothing here.
+    #
+    # This port is governed over tcp AND udp because nft_fw_protocols is table-wide
+    # (8089 needs udp). VictoriaLogs listens on tcp only, so the udp rules are inert
+    # defence in depth, not a functional requirement.
+    9428:
+      - 192.168.25.5/32   # eq12 hypervisor — native vector agent (#134)
+      - 192.168.30.5/32   # n5pro hypervisor — native vector agent (#134)
+      - 192.168.30.15/32  # n5pro_docker (CT 201) — native vector agent (#134)
+      - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vl.moutovkin.com -> deb-docker.lan:9428 (verified 2026-08-20)
+      - 192.168.48.0/24   # operator workstation subnet — VictoriaLogs UI (/select/vmui)
+
+# Scoped fail-open nftables allowlists for the portainer (#80) and vaultwarden
+# (#81) roles' published ports. Per-host since #140: these used to live in the
+# role defaults, so EVERY host running the role inherited this host's NPM grant.
+# The role defaults are now `{}` — an undeclared host fails the nft_scoped_fw
+# assert instead of silently borrowing another host's proxy IP.
+#
+# The 192.168.25.20/32 grant here is CHOSEN, not inherited: verified 2026-08-19
+# against NPM's own proxy_host table in CT 104 — portainer.moutovkin.com ->
+# deb-docker.lan:9000 and bw/wv.moutovkin.com -> deb-docker.lan:8086, where
+# deb-docker.lan resolves to this host (192.168.25.15).
+#
+# Per-port shape ({port: [source, ...]}, #114): a source approved for one port
+# gets no access to the others. Entries must be IPv4 CIDRs of prefix /1../32
+# (asserted by roles/nft_scoped_fw).
+portainer_fw_ports:
+  9000:
+    - 192.168.25.20/32 # NPM LXC (CT 104) — proxies portainer.moutovkin.com -> deb-docker.lan:9000
+    - 192.168.48.0/24 # operator workstation subnet
+vaultwarden_fw_ports:
+  8086:
+    - 192.168.25.20/32 # NPM LXC (CT 104) — proxies bw/wv.moutovkin.com -> deb-docker.lan:8086
+    - 192.168.48.0/24 # operator workstation subnet

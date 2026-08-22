@@ -40,6 +40,19 @@ tasks:
     cmds:
       - ansible-playbook playbooks/deploy-services.yml {{.CLI_ARGS}}
 
+  # === Fleet log shippers (native Vector on eq12 / n5pro / n5pro_docker, #134) ===
+  deploy:logagents:
+    desc: 'Deploy the native Vector log shippers (usage: task deploy:logagents -- --limit n5pro)'
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/log-agents.yml {{.CLI_ARGS}}
+
+  deploy:logagents:check:
+    desc: Dry-run the native Vector log shippers (--check --diff, no changes)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/log-agents.yml --check --diff {{.CLI_ARGS}}
+
   # === Full Deployment ===
   deploy:full:
     desc: Run the full deployment pipeline (hosts -> guests -> services)

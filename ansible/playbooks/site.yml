@@ -3,6 +3,7 @@
 # 1. Configure Proxmox host OS + provision VMs/LXCs
 # 2. Configure Docker inside guest VMs/LXCs
 # 3. Deploy Docker Compose services
+# 4. Deploy the native Vector log shippers (#134)
 # Run: ansible-playbook playbooks/site.yml
 # Or: task deploy:full
 
@@ -14,3 +15,11 @@
 
 - name: Deploy services
   ansible.builtin.import_playbook: deploy-services.yml
+
+# LAST, and the order is load-bearing rather than aesthetic. The vector_agent role
+# finishes by writing a marker on the agent host and polling VictoriaLogs for it —
+# and VictoriaLogs is deployed by deploy-services.yml onto eq12_docker. Running the
+# agents before their sink exists would fail every first-ever run on a condition
+# that has nothing to do with the agent.
+- name: Deploy fleet log shippers
+  ansible.builtin.import_playbook: log-agents.yml

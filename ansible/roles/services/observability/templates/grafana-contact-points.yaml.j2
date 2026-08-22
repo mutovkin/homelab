@@ -1,0 +1,35 @@
+apiVersion: 1
+
+{# Grafana file-provisioned alerting — the contact point (#139).
+
+   This is an Ansible TEMPLATE, not a static file under files/data/, because the
+   destination address is a vault value and must not be committed. That has one
+   consequence the role's tasks/main.yml has to handle and which must not be
+   undone: the "Deploy Grafana provisioning" synchronize runs with delete:true
+   over the same directory, so it carries
+   `--exclude=alerting/contact-points.yaml`. Remove that exclude and the rsync
+   deletes this file on every run, the template writes it back, and Grafana
+   restarts on every deploy forever.
+
+   Grafana does interpolate ${ENV} inside DATASOURCE provisioning files, which is
+   how datasources.yaml gets its credentials. That is not documented for alerting
+   provisioning, so this templates the value in rather than assuming.
+
+   `addresses` below is vault_watchtower_email_to — the host's shared Gmail relay,
+   see the comment block in templates/env.j2. Deliberately reusing watchtower's
+   credentials rather than adding a second copy of the same Gmail app password to
+   the vault. Keep every Jinja comment OUTSIDE the mapping below: a Jinja comment
+   block sitting between `settings:` and its first key leaves the block's own
+   indentation in the rendered output, which is valid YAML today only because
+   `settings` has exactly one key. (And never write a literal comment-close
+   sequence inside one of these blocks — it terminates the comment early and the
+   rest of the prose renders into the file. Yes, that happened.) #}
+contactPoints:
+  - orgId: 1
+    name: homelab-email
+    receivers:
+      - uid: homelab-email-primary
+        type: email
+        settings:
+          addresses: {{ vault_watchtower_email_to }}
+        disableResolveMessage: false

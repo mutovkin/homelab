@@ -9,10 +9,11 @@ apiVersion: 1
 # Nothing in the stack notices absence, so absence is what this rule measures: not
 # "is Vector healthy" but "did ANY log line land in the last few minutes".
 #
-# NOTE — there is no contact point provisioned (out of scope for #108, and inventing
-# SMTP config here would be guesswork). The rule fires and is visible in
-# Alerting > Alert rules; it does not yet page anyone. Wiring a contact point is the
-# follow-up.
+# ROUTING: this rule now delivers. #139 provisioned the `homelab-email` contact
+# point (templates/grafana-contact-points.yaml.j2) and made it the ROOT
+# notification policy receiver (notification-policies.yaml), so everything in this
+# folder — including this rule — is emailed. Until then there was no contact point
+# at all and this rule paged nobody, which was the follow-up #108 left open.
 groups:
   - orgId: 1
     name: ingest-health
@@ -79,12 +80,155 @@ groups:
               settings:
                 mode: dropNN
           # C: the condition. < 1 row in 5 minutes on a host that logs continuously
-          # (syslog, auth.log, kern.log and every container's stdout) means ingestion
-          # has stopped, not that the host went quiet.
+          # (/var/log/structured.log — every syslog facility, see #143 — plus every
+          # container's stdout) means ingestion has stopped, not that the host went
+          # quiet.
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:
               from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+
+      # ---------------------------------------------------------------------
+      # #143 opened a hole this rule closes. Before it, host logs reached Vector
+      # from /var/log/syslog and /var/log/auth.log — files rsyslog writes for the
+      # OPERATOR's benefit, so if they stopped a human would notice. They now come
+      # from /var/log/structured.log, which exists for Vector alone and is written
+      # by one extra rsyslog action that can fail independently of syslog.
+      #
+      # obs-log-ingest-stalled above cannot see that: it counts ALL sources, and
+      # docker alone contributes on the order of a thousand records per 15 minutes
+      # on this host, so host ingestion can go to exactly zero and that rule stays
+      # Normal forever. This is the per-source twin, and it is also precisely the
+      # per-host recency rule #134 needs — one host at a time.
+      # ===================== UNPAUSED: THE HEARTBEAT REPAIRED IT ====================
+      # This rule flapped for ~21 hours and was PAUSED as a stopgap (#134). The
+      # heartbeat now landing in roles/rsyslog_structured is what makes it
+      # meaningful again, so it is unpaused in the same change — the fleet never
+      # sits in a state where the rule exists but means nothing.
+      #
+      # WHAT CHANGED: every host now emits a marker every 5 minutes, so a healthy
+      # host has a guaranteed FLOOR of ~2 host records per 10m window. `count() < 1`
+      # therefore means "not one line, not even the beat" — a real stall — instead
+      # of "this host happened to be quiet", which was true two-thirds of the time.
+      # The query is unchanged; the DATA underneath it changed. Do not re-pause or
+      # widen this without also removing the heartbeat, or you will be tuning
+      # against a problem that no longer exists.
+      #
+      # WHY IT FLAPS, measured 2026-08-20 rather than guessed:
+      #   host          empty 10m windows      max gap
+      #   eq12_docker   66.2% (VL: 68.1%)      3600.0s
+      #   eq12          39.7%                  3600.0s
+      #   n5pro          0.0%                   448s
+      #   n5pro_docker   0.0%                   396s
+      # `_time:10m source:host | count() < 1` is therefore TRUE about two-thirds of
+      # the time on this very host, in perfect health. The rule is not detecting a
+      # stall; it is detecting that host logs arrive in BURSTS with long silences
+      # between them (one 10m bucket held 1288 records, another held 1).
+      #
+      # WHY NOT JUST WIDEN THE WINDOW. Because the max gap on both offending hosts
+      # is EXACTLY 3600.0s — that is not headroom, it is a single incidental hourly
+      # event holding the window open (on eq12_docker: recurring dockerd
+      # "failed to validate image signature" ERRORS). A 60m window would be one
+      # bugfix away from flapping again, and would cost ~70 min of detection
+      # latency for the privilege.
+      #
+      # THE REAL FIX is a heartbeat: every host emits a marker every 5 minutes, so
+      # absence becomes unambiguous instead of being indistinguishable from a quiet
+      # host. That also REPAIRS this rule rather than retiring it — a guaranteed
+      # floor of ~2 records per 10m per host makes `count() < 1` meaningful again,
+      # which is exactly why it gets unpaused rather than deleted.
+      #
+      # Note the sibling rule above (obs-log-ingest-stalled, ALL sources) is NOT
+      # affected and stays live: measured over the same 24h it had ZERO empty 5m
+      # buckets with a MINIMUM of 88 records per bucket — an ~88x margin, not a 1x
+      # one. Docker traffic is genuinely continuous. Do not pause it by analogy.
+      - uid: obs-host-log-ingest-stalled
+        title: Host log ingest stalled
+        condition: C
+        for: 10m
+        # Same reasoning as the rule above: for a rule whose whole job is detecting
+        # absence, "no data" IS the failure, not the healthy case.
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: No host syslog lines reached VictoriaLogs in the last 10 minutes.
+          description: >-
+            `_time:10m source:host | count()` is 0. Docker logs may still be
+            flowing, which is why the all-sources rule does not catch this. The
+            usual cause is rsyslog no longer routing to /var/log/structured.log —
+            the file every Vector in the fleet tails for ALL host logs since #143.
+            It is written by /etc/rsyslog.d/40-vector-structured.conf; the
+            human-facing /var/log/syslog and /var/log/auth.log are written by
+            separate rules and can keep growing while this one is dead, so their
+            size proves nothing.
+            SCOPE, since #134: this query spans ALL FOUR hosts (eq12, eq12_docker,
+            n5pro, n5pro_docker), so for it to reach zero every shipper in the fleet
+            must be silent — which points at VictoriaLogs itself or at something
+            fleet-wide, not at one host's rsyslog. ONE dead host is
+            obs-host-log-ingest-stalled-per-host's job and names the host in its
+            summary; this rule firing while that one is quiet is the fleet-wide
+            case.
+            Check `systemctl status rsyslog` on the affected host(s), confirm the
+            drop-in is present, and confirm no drop-in sorting before it ends the
+            ruleset with `stop`. Re-running that host's deploy re-asserts the whole
+            path — it writes a `logger` marker and waits for it to come back out of
+            VictoriaLogs: `--tags observability --limit eq12_docker` for the
+            container, `ansible-playbook playbooks/log-agents.yml --limit <host>`
+            for the three native agents.
+        labels:
+          severity: critical
+          component: log-pipeline
+        data:
+          - refId: A
+            datasourceUid: PD775F2863313E6C7
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-logs-datasource
+                uid: PD775F2863313E6C7
+              queryType: stats
+              expr: "_time:10m source:host | count() as rows"
+          # dropNN, not replaceNN — a null must not silently become a 0 and fire,
+          # nor become a number and mask a stall. See the rule above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 1 host record in 10 minutes. This host writes syslog continuously
+          # (systemd, sshd, cron, dockerd), so zero means the path is broken, not
+          # that the host went quiet.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
               to: 0
             model:
               refId: C

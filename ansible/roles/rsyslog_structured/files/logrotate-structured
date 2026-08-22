@@ -1,0 +1,45 @@
+# Managed by Ansible — roles/rsyslog_structured (#143, moved here by #134).
+# Do not edit on the host.
+#
+# /var/log/structured.log is a full duplicate of syslog+auth.log in RFC5424, written
+# for Vector (see /etc/rsyslog.d/40-vector-structured.conf). Rotate it on exactly the
+# cadence Debian's own /etc/logrotate.d/rsyslog uses for /var/log/syslog.
+#
+# It cannot outgrow syslog+auth COMBINED, but it is not free: measured over 60s,
+# syslog grew 30,412 B and auth.log 7,651 B (38,063 B total) against structured.log's
+# 39,647 B — i.e. +4.2% for the RFC5424 header. That confirms `*.*` really does equal
+# syslog+auth with no duplication, and it also means this file roughly DOUBLES
+# /var/log write volume on a rootfs that is 74% used with 6.4 G free.
+#
+# maxsize is the flood brake, and it is why the weekly cadence alone is not enough:
+# logrotate's daily timer rotates early once the file passes the limit, so a chatty
+# daemon cannot fill the rootfs waiting for Sunday. This repo has had two log floods
+# already. Weekly + rotate 4 still governs the normal case.
+#
+# FLEET NOTE (#134): the 74%/6.4 G figure above was measured on eq12_docker, the only
+# host that had this file before Vector went fleet-wide. The other three have far more
+# headroom (measured 2026-08-19: eq12 1.8 T with 23 G used, n5pro 3.5 T with 9.3 G
+# used, n5pro_docker 45 G free), so `maxsize 100M` is the binding constraint there, not
+# the free space. The policy is deliberately identical on all four — one file, one
+# rotation window, and therefore one bound on Vector's post-buffer-reset re-read.
+#
+# The rotation period is also the bound on Vector's re-read window: the file source
+# reads this file from the beginning, so after a buffer reset (which wipes
+# checkpoints) Vector re-ingests at most one rotation's worth of duplicates.
+#
+# postrotate calls Debian's own rsyslog helper — the same one /etc/logrotate.d/rsyslog
+# invokes — so rsyslog reopens the file instead of writing to an unlinked inode.
+/var/log/structured.log
+{
+        rotate 4
+        weekly
+        maxsize 100M
+        missingok
+        notifempty
+        compress
+        delaycompress
+        sharedscripts
+        postrotate
+                /usr/lib/rsyslog/rsyslog-rotate
+        endscript
+}

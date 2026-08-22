@@ -37,6 +37,17 @@
     - vault_vl_auth_password
     - vault_grafana_user
     - vault_grafana_password
+    # Grafana alerting's SMTP relay (#139) — the SAME vault vars watchtower uses,
+    # deliberately shared (see the comment block in templates/env.j2). Listed here
+    # so a rename or a blanking fails at the top of the play, BY NAME, instead of
+    # leaving Grafana with alert rules it can never deliver: a contact point that
+    # cannot send is the same silent failure as no contact point at all.
+    - vault_watchtower_email_server
+    - vault_watchtower_email_port
+    - vault_watchtower_email_user
+    - vault_watchtower_email_password
+    - vault_watchtower_email_from
+    - vault_watchtower_email_to
 
 # --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
 # --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
@@ -66,6 +77,11 @@
     # is non-local and exits before the drop.
     nft_fw_scope_guard: fib
     nft_fw_lan_iface: "{{ observability_firewall.lan_iface }}"
+    # Opt in to drop counters on THIS table only (#134). Scoped to this consumer
+    # so the other four scoped firewalls keep byte-identical .nft files and do not
+    # reload for a diagnostic this batch wanted. See the variable's comment in
+    # roles/nft_scoped_fw/defaults/main.yml for why a counter is not evidence.
+    nft_fw_count_drops: true
 
 - name: Stat Docker socket
   ansible.builtin.stat:
@@ -87,6 +103,20 @@
     - "{{ data_mount }}/grafana/config"
     - "{{ data_mount }}/grafana/dashboards"
     - "{{ data_mount }}/grafana/provisioning"
+
+# --- Structured host-log stream for Vector (#143) -----------------------------
+# Lifted to the shared roles/rsyslog_structured in #134: eq12/n5pro/n5pro_docker
+# need the byte-identical stream for their native Vector agents, and the drop-in
+# and the Vector config that reads it must travel together. The block that used to
+# be inlined here moved VERBATIM — copy the drop-in, copy the logrotate policy,
+# `rsyslogd -N1`, restart-if-changed, ensure-running-ungated, then the end-to-end
+# `logger` freshness probe and its assert. See roles/rsyslog_structured/README.md.
+#
+# Ordered before the config copy below on purpose: the file must exist and be
+# written before Vector restarts onto a config that reads only that file.
+- name: Deploy the RFC5424 structured host-log stream Vector tails
+  ansible.builtin.include_role:
+    name: rsyslog_structured
 
 # The compose file bind-mounts these paths directly (not from the deploy dir), so
 # without these tasks a config edited in the repo never reaches the container and
@@ -123,7 +153,40 @@
     use_ssh_args: true
     rsync_opts:
       - "--checksum"
+      # alerting/contact-points.yaml is TEMPLATED (its address is a vault value),
+      # so it exists on the host but not in files/. Without this exclude, delete:true
+      # removes it every run and the template below writes it back every run —
+      # Grafana would restart on every single deploy, forever. Same precedent as
+      # _deploy's `--exclude=.env` (#139).
+      - "--exclude=alerting/contact-points.yaml"
   register: grafana_provisioning
+
+# AFTER the synchronize, never before: delete:true runs first, and although the
+# exclude above protects this file, ordering it here keeps the protection from
+# being load-bearing twice over.
+#
+# WHY A TEMPLATE and not a file under files/data/: the notification address is a
+# vault value. Grafana interpolates ${ENV} in *datasource* provisioning (which is
+# how datasources.yaml gets its credentials) but that is not documented for
+# alerting provisioning, so this removes the assumption rather than testing it in
+# production.
+#
+# mode 0640, not 0644: this is the one provisioning file carrying a personal
+# address. The grafana process runs 472:0 (measured on eq12_docker:
+# `docker exec grafana id` → uid=472(grafana) gid=0(root)), so a root:root 0640
+# file is group-readable to it. If that ever stops being true, Grafana treats an
+# unreadable provisioning file as a FATAL startup error and the health gate below
+# fails the play loudly rather than leaving alerting quietly unrouted.
+- name: Template the Grafana alerting contact point
+  ansible.builtin.template:
+    src: grafana-contact-points.yaml.j2
+    dest: "{{ data_mount }}/grafana/provisioning/alerting/contact-points.yaml"
+    mode: "0640"
+  # Carries a notification address; --diff would print it into the transcript.
+  # diff:false, never no_log — no_log would also censor an undefined-variable
+  # failure, and that loud failure is itself a control (#88).
+  diff: false
+  register: grafana_contact_point
 
 # Separate from provisioning because Grafana hot-reloads provisioned dashboards —
 # a dashboard change needs no restart. Without this the first dashboard JSON ever
@@ -146,6 +209,18 @@
     name: services/_deploy
   vars:
     svc: observability
+    # NO svc_rsync_extra any more, and that is a consequence of the #134 lift rather
+    # than a relaxation. Until then this role's files/ held two HOST config files
+    # (/etc/rsyslog.d, /etc/logrotate.d) that are not part of the compose payload, so
+    # _deploy's `delete: true` synchronize had to be told to leave them out of
+    # {{ data_mount }}/deploy/observability/ — where they mean nothing and would only
+    # invite someone to "fix" the wrong copy (#143). Both files now live in
+    # roles/rsyslog_structured/files/, so there is nothing in this role's files/ for
+    # those excludes to match and keeping them would name paths that no longer exist.
+    # Verified a no-op on the live host before removal: the excludes worked from the
+    # day they were added, so neither file was ever present in the deploy dir
+    # (`ls /data/deploy/observability/` → compose.yaml, data/, .env), and dropping
+    # them therefore deletes nothing.
 
 # Single source of truth for the restart decision, shared by the check-mode
 # preview, the restart itself and the readiness gates (postgresql/lms/frigate
@@ -154,12 +229,16 @@
 # needs no restart — provisioning would then never load and the play would still
 # report converged, the do-nothing failure mode #78 is about. (The `default([])`
 # on observability_configs.results guards a different thing: a legitimately
-# skipped copy loop, not a typo'd name.)
+# skipped copy loop, not a typo'd name.) grafana_contact_point.changed is in the
+# same no-default() club and for the same reason: the contact point arrives by a
+# different mechanism (template, excluded from the rsync) but Grafana still only
+# reads it at startup, so a change to it that does not restart Grafana leaves
+# alerting routed at the OLD address with the play reporting converged (#139).
 - name: Determine observability containers to restart for changed config
   vars:
     _targets: >-
       {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
-          + (['grafana'] if grafana_provisioning.changed else [])) | unique }}
+          + (['grafana'] if grafana_provisioning.changed or grafana_contact_point.changed else [])) | unique }}
   ansible.builtin.set_fact:
     observability_restart_targets: "{{ _targets }}"
     # grafana has its own HTTP gate below; these two are gated on staying alive.
@@ -245,6 +324,108 @@
   loop: "{{ observability_settled.results | default([]) }}"
   loop_control:
     label: "{{ item.item }}"
+  when: not ansible_check_mode
+
+# THE CHECK THIS ROLE WAS MISSING. Everything above proves processes are up:
+# containers running after a settle period, Grafana answering /api/health. That is
+# exactly the evidence that was green for the ~30 days the log pipeline was dead
+# (docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md),
+# whose own Prevention section says: assert the data ARRIVED, not that the process
+# is running — query the destination for recent records, never container state.
+#
+# #143 added three new in-process ways to ship nothing while staying up: the
+# parse_syslog failure branch, the "*" label expansion, and VRL abort paths (an
+# aborted remap drops the event silently — drop_on_abort defaults true and nothing
+# is rerouted). None of them stops the container; all of them are invisible except
+# in stderr, which nobody reads on a green run.
+#
+# Deliberately NOT gated on "vector was restarted this run". A converged run that
+# reports green over a dead pipeline is the precise failure this whole issue family
+# is about, so this runs on EVERY real run. If Vector is down, this is supposed to
+# fail.
+# THE FILTER IS SCOPED TO THIS HOST, AND #134 IS WHY.
+#
+# Until #134 eq12_docker was the ONLY producer of `source:host` records, so the
+# bare `_time:10m source:host | count()` this used to run was implicitly per-host
+# and the distinction never mattered. #134 puts native Vector agents on eq12,
+# n5pro and n5pro_docker, all writing `source:host` into this same VictoriaLogs.
+# Left bare, this assert would be satisfied by THREE OTHER HOSTS' records while
+# the container it exists to check was dead or 401-ing — a green
+# `--tags observability` deploy over exactly the failure it was written for, with
+# the comment above it still claiming it asserts the data arrived. That is the
+# regression this change repairs, not a new feature.
+#
+# Two filters, because one is not enough. `hostname:` alone would pass on records
+# this container shipped BEFORE it broke, anywhere in the 10-minute window; the
+# per-run marker makes it a freshness proof, the same shape as the rsyslog
+# freshness probe and roles/vector_agent's ingest proof. Both filters are needed:
+# the marker proves recency, the hostname proves provenance.
+- name: Generate a unique marker for the VictoriaLogs ingest proof
+  ansible.builtin.set_fact:
+    observability_ingest_probe: "observability-ingest-probe-{{ ansible_date_time.iso8601_micro | regex_replace('[^0-9]', '') }}"
+  when: not ansible_check_mode
+
+# changed_when: false — one line into the log stream IS the probe, not a state
+# change. local0.notice so Debian also routes it to /var/log/syslog, where a human
+# debugging this can see it.
+- name: Emit the VictoriaLogs ingest probe marker
+  ansible.builtin.command: logger -p local0.notice "{{ observability_ingest_probe }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Query VictoriaLogs for this host's own log records
+  ansible.builtin.uri:
+    url: "http://localhost:{{ victorialogs_web_port }}/select/logsql/query"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: '_time:10m hostname:{{ inventory_hostname }} source:host "{{ observability_ingest_probe }}" | stats count() as rows'
+    url_username: "{{ vault_vl_auth_username }}"
+    url_password: "{{ vault_vl_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: observability_host_ingest
+  # /select/logsql/query returns JSONL. `stats count()` yields a single line, but
+  # sum the findall rather than assuming one — a shape change must read as "no
+  # rows" and retry, not raise a Jinja error inside `until`.
+  until: >-
+    observability_host_ingest.status | default(0) == 200
+    and (observability_host_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+  # 12 retries, not the 6 this used to carry. The old query was satisfied by ANY
+  # host record in a 10-minute window, so on a healthy pipeline it returned on the
+  # first attempt and the retry budget was nearly decorative. This one waits for a
+  # marker written seconds ago to traverse logger -> rsyslog -> structured.log ->
+  # Vector's file source -> a 5s sink batch -> VictoriaLogs, which is a real round
+  # trip. Matching roles/vector_agent's budget (2 minutes) keeps a slow but healthy
+  # pipeline from failing a deploy.
+  retries: 12
+  delay: 10
+  changed_when: false
+  # failed_when:false so the RETRY EXHAUSTION lands on the assert below, which can
+  # say what to check. Deliberately no no_log anywhere on this pair: censoring it
+  # would blind the one diagnostic this exists to print (#88).
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Assert this host's own log records actually reached VictoriaLogs
+  ansible.builtin.assert:
+    that:
+      - observability_host_ingest.status | default(0) == 200
+      - (observability_host_ingest.content | default('') | regex_findall('"rows":"([0-9]+)"') | map('int') | list | sum) > 0
+    fail_msg: >-
+      A marker written on {{ inventory_hostname }} a minute ago did not come back
+      out of VictoriaLogs labelled hostname={{ inventory_hostname }}, so this
+      host's pipeline is deployed and running but not delivering. Every container
+      may still be Up — that is the failure mode, not evidence against it. Note
+      this query is scoped to THIS host (#134 added three more `source:host`
+      producers to the same store), so other hosts still shipping does not make
+      this a false alarm. Check, in order: `docker logs --tail 100 vector` on this
+      host for remap aborts or sink errors; that /var/log/structured.log is still
+      GROWING (not merely present); and `systemctl status rsyslog`. If the disk
+      buffer is wedged, the runbook is
+      docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+      HTTP status was {{ observability_host_ingest.status | default('none') }}.
+    quiet: true
   when: not ansible_check_mode
 
 # --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------

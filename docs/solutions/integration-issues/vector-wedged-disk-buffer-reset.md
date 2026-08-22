@@ -99,8 +99,24 @@ What it does, in `roles/services/observability/tasks/vector-buffer-reset.yml`:
 ## What it costs
 
 - Everything still queued in the buffer is **lost**.
-- The file-source checkpoints go with it, so vector re-reads `/var/log/*` from
-  wherever `read_from` puts it — a window of host logs is duplicated or skipped.
+- The file-source checkpoints go with it. Since #143 that cost is **duplication
+  rather than loss** — it used to be silent loss — but the two source groups are
+  bounded very differently, and the difference matters:
+  - **Host logs**: one file, `/var/log/structured.log`, read with
+    `read_from: beginning` and no `ignore_older_secs`, rotated weekly with
+    `maxsize 100M`. A reset re-reads at most one rotation period.
+  - **Package-audit logs**: NOT the same bound, despite an earlier version of this
+    note saying so. Debian rotates `dpkg.log` and `apt/history.log` **monthly,
+    `rotate 12`**, and the `unattended-upgrades` logs **monthly, `rotate 6`** — so
+    a reset can re-read up to **a year** of package history, not a week. Worse,
+    every re-read record is re-stamped with ingest time (these lines are not
+    syslog-shaped, so Vector has no event time to use), which means each reset
+    multiplies the audit trail and drags its apparent dates forward. The ~293-line
+    figure is today's volume, not a bound.
+
+  Before #143 the sources were `read_from: end` + `ignore_older_secs: 600`, so a
+  reset — and any outage longer than ten minutes — silently threw the window away
+  instead. Duplicates you can see; a hole you cannot.
 
 This is a recovery action, not maintenance. If you find yourself running it
 regularly, the buffer is a symptom and something upstream (sink availability,

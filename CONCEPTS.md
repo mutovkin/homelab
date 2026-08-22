@@ -202,6 +202,21 @@ by substitution so it is never echoed. Reverting a file to run the counterfactua
 the last committed state, which silently discards an uncommitted fix — so the fix is
 committed first, or re-applied and re-verified afterwards.
 
+### Drifted fixture
+A synthetic input built to carry the very condition a verification claims to surface, used
+when the live system cannot be made to exhibit that condition on demand.
+
+A fully converged fleet is the wrong instrument for any claim about drift reporting: the
+branch that would demonstrate the claim is never taken, so the fixed and the unfixed code
+emit identical output and the comparison establishes nothing — worse, it reads as a pass.
+A fixture replaces the system's state, never its logic: the task's own expressions and
+conditions run verbatim and only the side effect is stubbed, because a fixture that
+paraphrases the condition tests the paraphrase. The same construction doubles as a truth
+table, since once state is synthetic the awkward rows — empty values, absent values,
+reversed orderings, removals — cost nothing to add. This is the mirror image of a Canary
+dry-run: there a planted value proves a suppression fired, here planted state proves a
+report fires.
+
 ### Reconcile task
 An explicit task that converges one named attribute of an already-existing Guest,
 written and owned by the role rather than delegated to a provisioning module.
@@ -271,6 +286,49 @@ hypervisor reports; only the other one actually builds anything. It follows that
 ordinary converged run says nothing about these fields, so their correctness cannot be
 inferred from the absence of drift — the opposite of how a Reconcile task is verified.
 
+### Inventory-name label
+The identity a per-host signal is tagged with, which is by convention the name the
+inventory uses for that host and not any name the host can discover about itself.
+
+A machine knows several names — its OS hostname, the id of whatever container the
+collector happens to be running in, whatever DNS says — and a collector asked for
+"the hostname" will return one of those. None of them is the name an alert or a
+playbook is written against, and two of them change without anyone editing anything.
+Because the correct value cannot be derived on the host, it is injected from the
+deploy layer and made mandatory there: a missing value must abort the deployment
+rather than resolve to an empty label, since a signal labelled wrongly-but-plausibly
+is harder to notice than one that is missing.
+
+### Structured log stream
+A second, machine-parseable copy of a host's system log, emitted alongside the
+human-facing log files rather than replacing them, because the default file format
+omits fields the collector needs.
+
+It exists for the case where data is not merely hard to extract but absent: the
+routine format drops the priority that carries severity and facility, so no parser
+can recover them and the collector is reduced to asserting a single hardcoded level
+for every record. The human-facing files are deliberately left in their original
+format — they are what an operator reads during an incident — so the two streams
+carry the same messages under different formats, and the collector must read exactly
+one of them or every event is stored twice. Because the stream is a duplicate, its
+growth is bounded on the same rotation cadence as the original.
+
+### Absence-owning rule
+Among several alert rules watching the same signal, the single rule designated to
+fire when the signal stops arriving at all, so that every other rule treats
+no-data as healthy.
+
+Absence and badness are different questions and they are usually answered by
+different queries: a threshold rule sees nothing when a collector dies, and a rule
+written to detect "nothing" must ask a question that still returns rows for a source
+that has gone quiet. Without a designated owner, either every rule treats no-data as
+an alert — so one dead collector pages once per rule — or every rule treats it as
+healthy, and a dead collector is indistinguishable from a healthy system. A separate
+failure mode the owner does not cover is a source that never started: absence
+measured against a signal that has never existed returns nothing and is
+indistinguishable from a mistyped query, so that case has to be watched at the
+receiving end instead, where a counter exists whether or not anyone is writing to it.
+
 ### Blank-credential disable
 A credential whose empty value is read by the consuming software as an instruction to
 switch the protection off, rather than as a malformed value to reject.
@@ -297,3 +355,25 @@ the configuration that describes it. The hardest variant is a control that never
 functioned at all: it leaves no regression, no failing run, and no drift, so there is
 nothing to notice and the only defence is verifying a control the first time it is
 introduced.
+
+### Pre-deploy dump
+A backup a service role takes of its own data immediately before handing that data to a
+possibly newer image, so a one-way schema migration always has something to go back to.
+
+Gated on the DATA existing, never on an upgrade being pending: the dump is cheap and
+online, while a wrong gate computation means no backup at all in front of an
+irreversible migration. Fail-safe over-backup is the deliberate trade, which is why a
+routine redeploy legitimately reports work done here and why an idempotency check must
+not chase this task to zero. Scope is the data the migration can destroy — not
+everything that happens to share the same database server.
+
+### Restore drill
+An exercise that proves a backup by restoring it under a scratch identity and comparing
+object counts against the live source, then discarding the copy.
+
+Restoring is not the drill; *counting* is. A restore that aborts partway still leaves a
+database that exists, carries the right owner, and holds nothing — so identity-level
+checks are guaranteed to pass and therefore carry no information. The drill is also
+version-coupled: it reads the backup tool's output format, so a server major-version
+upgrade can silently turn it into a ritual that proves nothing. Re-run it after such an
+upgrade, not only after the backup code changes.
