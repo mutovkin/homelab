@@ -543,10 +543,23 @@ makes queryable, so `level:err` works without paying for stream cardinality.
 | `procid` | no | host | `1234` (`null` when the header says `-`) | RFC5424 header |
 | `syslog_hostname` | no | host | `deb-docker` | RFC5424 header — the CT's real OS hostname |
 | `parse_failed` | no | host | `syslog` | set only when a line is not RFC5424; `level` is then `unknown`, never a fabricated `info` |
-| `timestamp_source` | no | all | `event` / `ingest` | provenance of `_time`, so a host record that fell through the syslog parse is queryable |
+| `timestamp_source` | no | all | `event` / `ingest` | provenance of `_time`. `ingest` = the record carried no time of its own. **Was `event` for every record until #154** — see below |
 | `file`, `source_type` | no | host, pkg | `/var/log/structured.log`, `file` | Vector's file source |
 | `_msg` | — | all | the message text | `message`, with the RFC5424 header stripped on host records |
 | `_time` | — | all | — | host: the line's own timestamp, to the microsecond. docker: the **Docker daemon's** log timestamp. pkg: the line's own timestamp where the line carries one, ingestion time otherwise — check `timestamp_source` (see limitation 4) |
+
+> **`timestamp_source` used to be unable to say `ingest`, and nothing reported
+> it.** `finalize` stamps `now()` + `ingest` only when nothing upstream supplied a
+> timestamp — but BOTH upstream sources pre-set one: `docker_logs` from the
+> daemon's log timestamp (legitimate, that IS the event time) and the `file`
+> source from the **read** time (not an event time at all). So the
+> `!is_timestamp` branch never fired for host or pkg records and every single one
+> was labelled `event`. Measured 2026-08-22: 1672 pkg records claiming `event`
+> while carrying ingest time, 0 claiming `ingest`, ever. The one field built to
+> make that distinction queryable was the one field that could not express it —
+> and because the value it reported was a plausible one, nothing looked wrong.
+> #154 adds `del(.timestamp)` to `parse_pkg`'s and `parse_host`'s no-timestamp
+> branches, which is what makes the fallback reachable and the label honest.
 
 `hostname` is deliberately the **Ansible inventory name**, not the container ID
 (`get_hostname!()`, the old value — it changed on every recreate) and not the CT's
@@ -659,8 +672,9 @@ duplicated.
    `unattended-upgrades.log`'s leading `YYYY-MM-DD HH:MM:SS`, and the
    `Start-Date:` / `End-Date:` / `Log started:` / `Log ended:` markers, which use
    **two** spaces between date and time. Lines with no timestamp at all (apt
-   history block bodies, dpkg progress spam) correctly keep ingest time and stay
-   queryable as `timestamp_source:"ingest"`.
+   history block bodies, dpkg progress spam) correctly keep ingest time and are
+   now genuinely queryable as `timestamp_source:"ingest"` — see the note under the
+   schema table for why that label was previously impossible to produce.
 
    **The timezone pin is load-bearing, and it is the part that would have shipped
    silently wrong.** These formats carry no zone marker, so they resolve through

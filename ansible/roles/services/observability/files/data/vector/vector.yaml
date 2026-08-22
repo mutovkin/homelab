@@ -228,6 +228,15 @@ transforms:
         # is 0 today, so this costs nothing and is here for the day it is not.
         .level = "unknown"
         .parse_failed = "syslog"
+        # Same correction as parse_pkg's else branch, found by the same probe: the
+        # file source pre-set .timestamp to the READ time, so a line that fell
+        # through the syslog parse kept it and was stamped
+        # timestamp_source:"event" — the exact case this field exists to expose,
+        # labelled as if it had a real event time. Delete so finalize stamps now()
+        # and marks "ingest". (`parse_failed` already flags these independently;
+        # this makes the provenance field agree with it instead of contradicting
+        # it.)
+        del(.timestamp)
       }
 
   # Package-change audit trail. dpkg/apt/unattended-upgrades write their own line
@@ -279,6 +288,16 @@ transforms:
       }
       if ts != null {
         .timestamp = ts
+      } else {
+        # DELETE IT, do not just leave it. Vector's `file` source has ALREADY set
+        # .timestamp to the READ time, so finalize's `!is_timestamp` fallback can
+        # never fire on this branch and every pkg record was stamped
+        # timestamp_source:"event" while carrying ingest time — measured 2026-08-22,
+        # 1672 of them, all lying, for the whole life of the field. That made the one
+        # field designed to tell line-time from ingest-time useless for the one
+        # source where the distinction is real. Deleting the key lets finalize stamp
+        # now() and mark "ingest" honestly.
+        del(.timestamp)
       }
 
   # Normalise the timestamp and build the Loki label set
@@ -303,9 +322,15 @@ transforms:
       # fallback still matters for pkg: apt history block bodies and dpkg progress
       # lines genuinely have no timestamp and correctly keep ingest time.
       #
-      # .timestamp_source records the provenance so it is QUERYABLE: a host record
-      # reading "ingest" fell through the syslog parse, which is otherwise visible
-      # only in stderr.
+      # .timestamp_source records the provenance so it is QUERYABLE: a record
+      # reading "ingest" carries no time of its own — a host line that fell through
+      # the syslog parse, or a pkg line with no leading timestamp. That claim was
+      # FALSE until #154 and nothing reported it: both upstream sources pre-set
+      # .timestamp (docker_logs to the daemon's log time, file to the READ time),
+      # so `!is_timestamp` never fired for host or pkg and every record read
+      # "event" regardless. The two `del(.timestamp)` calls in parse_host and
+      # parse_pkg are what make this branch reachable. Docker records legitimately
+      # keep "event": the daemon's timestamp IS the event time.
       ts = .timestamp
       if !is_timestamp(ts) {
         .timestamp = now()
