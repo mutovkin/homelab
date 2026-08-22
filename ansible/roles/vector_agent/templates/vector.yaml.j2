@@ -16,7 +16,20 @@
 #      vector_agent_docker_logs is true;
 #   3. this file is templated, so `{{ '{{' }} ... {{ '}}' }}` sink templates have to
 #      be escaped from Jinja, and `timezone` comes from a Jinja var rather than
-#      the container's ${TZ};
+#      from the container's TZ environment variable.
+#
+#      DO NOT write a dollar-brace env reference in a COMMENT in this file.
+#      Vector's env-var interpolation is a textual pre-pass over the whole config
+#      and does not skip comments, so a commented-out reference to a variable that
+#      is not in /etc/vector/vector.env fails the config LOAD:
+#        x Missing environment variable in config. name = "TZ"
+#      Measured — an earlier version of this very line mentioned the container's
+#      TZ in dollar-brace form and broke all three agents' config load. It was
+#      caught by this role's pre-flight `vector validate`, which runs BEFORE the
+#      restart, so the agents kept running and nothing was lost; that gate is the
+#      only reason this was a failed play rather than three dead shippers.
+#      Every dollar-brace reference below is to a variable vector.env really
+#      defines (VECTOR_HOSTNAME, VL_AUTH_*);
 #   4. NO internal_metrics source and NO prometheus_remote_write sink (#151).
 #      Vector's self-telemetry is container-only, so the four obs-vector-* alert
 #      rules do not cover these hosts. Deliberate scope, tracked in #160 — not an

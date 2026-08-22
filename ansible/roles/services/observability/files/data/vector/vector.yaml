@@ -16,11 +16,19 @@ data_dir: "/var/lib/vector"
 # #154 exists to make right, with nothing to report it. Vector bundles chrono-tz,
 # so a named zone needs no tzdata on disk.
 #
-# ${TZ}, not a hardcoded zone: TZ is already in this container's environment,
-# set by compose from TIMEZONE, which templates/env.j2 renders from group_vars/all's
-# `timezone`. One source of truth, so this file cannot drift from the fleet's zone.
-# Env interpolation reaches this key because VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION
-# is set for this container (it has to be, for the sink credentials).
+# The value below is the TZ env var, not a hardcoded zone: TZ is already in this
+# container's environment, set by compose from TIMEZONE, which templates/env.j2
+# renders from group_vars/all's `timezone`. One source of truth, so this file
+# cannot drift from the fleet's zone. Env interpolation reaches this key because
+# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION is set for this container (it has
+# to be, for the sink credentials).
+#
+# NOTE, and it bit the agent twin: that interpolation is a textual pre-pass over
+# the WHOLE file and does not skip comments, so a dollar-brace reference written
+# in prose is still resolved. It is harmless here because TZ exists; in
+# roles/vector_agent's template it does not, and the identical sentence failed the
+# config load with `Missing environment variable in config. name = "TZ"`. Prefer
+# naming variables in prose without the dollar-brace form.
 # Both directions measured against the binary before relying on either:
 #   TZ=America/Los_Angeles + the flag  -> parses "2026-08-16 06:19:24" to 13:19:24Z
 #   TZ set, flag ABSENT                -> "Configuration error. error=No such time
