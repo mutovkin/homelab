@@ -18,6 +18,16 @@ apiVersion: 1
 # add a folder matcher to "scope" it, that would orphan every rule outside the
 # folder back to the stub receiver.
 #
+# WHY THIS IS NOW A TEMPLATE (#152): the routing tree branches on
+# observability_alert_telegram, and a static file cannot. Consequence, and it must
+# not be undone: the "Deploy Grafana provisioning" synchronize runs with
+# delete:true over this directory, so it carries
+# `--exclude=alerting/notification-policies.yaml`. Remove that exclude and rsync
+# deletes this file every run while the template writes it back — Grafana would
+# restart on every deploy, forever. Same mechanism and same precedent as
+# contact-points.yaml. No secrets render here (receiver NAMES only), so unlike
+# contact-points this task needs no diff:false.
+#
 # NOTE: a provisioned root policy is READ-ONLY in the Grafana UI, so this file is
 # now the only editable source of routing. Editing it means editing this file and
 # re-running the deploy. Before this
@@ -43,14 +53,48 @@ policies:
     # established pattern here: `server` is absent from both log-ingest rules and
     # they group fine. Alertmanager simply treats the missing label as empty for
     # grouping purposes.
+    # `component_id` joins them for #151: the vector-health rules carry one
+    # instance per Vector component, and without it two different components
+    # discarding events would collapse into one notification naming neither.
     group_by:
       - grafana_folder
       - alertname
       - server
       - hostname
+      - component_id
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s
     group_interval: 5m
     # 12h: these are homelab alerts on a mailbox a human reads, not a pager.
     repeat_interval: 12h
+    routes:
+{% if observability_alert_telegram | bool %}
+      # ORDER MATTERS: first match wins, and there is no `continue` on these. The
+      # delivery-failure alert must reach Telegram ONLY (#152: email cannot page
+      # about email being broken), so its matcher sits BEFORE the generic
+      # severity route it would otherwise be caught by.
+      - receiver: homelab-telegram
+        object_matchers:
+          - ["channel", "=", "telegram-only"]
+{% endif %}
+      # The daily delivery heartbeat (#152). It fires forever by design and
+      # re-notifies every 24h on the both-channels receiver. Silence on a channel
+      # past 24h IS that channel's failure signal — the heartbeat is the monitor,
+      # a human noticing its absence is the alarm, and neither depends on the
+      # broken channel being able to report itself. repeat_interval is the
+      # delivery cadence, so it belongs on this route and not on the root (the
+      # root's 12h governs every ordinary alert and must not be dragged around by
+      # the heartbeat).
+      - receiver: homelab-critical
+        object_matchers:
+          - ["heartbeat", "=", "true"]
+        repeat_interval: 24h
+      # Critical rules page on BOTH channels once Telegram exists. homelab-critical
+      # degrades to email-only while it does not (see the contact-points
+      # template), which is why this route renders unconditionally — a route to a
+      # receiver that does not exist is a fatal provisioning error, and this shape
+      # means it can never dangle.
+      - receiver: homelab-critical
+        object_matchers:
+          - ["severity", "=", "critical"]

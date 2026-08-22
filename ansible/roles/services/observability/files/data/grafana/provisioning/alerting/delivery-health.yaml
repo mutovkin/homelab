@@ -1,0 +1,226 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — the DELIVERY path itself (#152)
+#
+# Every other rule in this folder watches something the stack collects. These two
+# watch the thing that carries all of them. Until #152 nothing did: if the Gmail
+# app password was revoked or rotated, if Google blocked the sender, or if egress
+# to 587 was filtered, every alert in the stack failed silently into
+# `docker logs grafana` — including obs-log-ingest-stalled and
+# obs-host-log-ingest-stalled, whose entire job is reporting that the log pipeline
+# is dead. Primary signal and watchdog silent at once.
+#
+# TWO rules because one cannot do it. A failure alert is a monitor with a
+# dependency on the thing it monitors, so it needs a channel the failure cannot
+# take out (obs-alert-delivery-failing, routed telegram-only). And a channel can
+# fail in ways Grafana never counts — accepted by the API and dropped, a chat the
+# bot was removed from — which no counter shows, so the second control is a
+# dead-man's switch that must be seen ARRIVING (obs-alert-delivery-heartbeat).
+#
+# Both need telegraf's Grafana /metrics scrape (files/data/telegraf/telegraf.conf);
+# the heartbeat does not, but lives here because it is the same control.
+groups:
+  - orgId: 1
+    name: delivery-health
+    folder: Observability
+    interval: 5m
+    rules:
+      # ---------------------------------------------------------------------
+      # THIS RULE IS SUPPOSED TO FIRE FOREVER. It is not broken, it is not
+      # misconfigured, and it must not be "fixed" by making it resolve.
+      #
+      # It is a dead-man's switch for the DELIVERY path. The heartbeat route in
+      # templates/grafana-notification-policies.yaml.j2 matches its
+      # `heartbeat: "true"` label and re-notifies every 24h on homelab-critical,
+      # which is BOTH channels once Telegram is armed. So each channel must
+      # produce one message a day. A channel going quiet past 24h means that
+      # channel is broken even though every rule in the stack is green — and,
+      # crucially, noticing that costs nothing from the broken channel itself.
+      # The heartbeat is the monitor; a human noticing its absence is the alarm.
+      #
+      # Same principle as the rsyslog_structured host heartbeat (#134): absence
+      # of incidental traffic is not evidence of anything, so make the signal
+      # deliberate. This is that idea applied one layer up, to notifications
+      # instead of log records.
+      - uid: obs-alert-delivery-heartbeat
+        title: Alert delivery heartbeat
+        condition: C
+        for: 0s
+        # Alerting on NoData, and Alerting on exec error — both, deliberately. A
+        # heartbeat that cannot evaluate should still fire: firing IS its normal
+        # state, so there is no false-alarm cost, and a datasource outage that
+        # silenced it would be indistinguishable from a delivery failure.
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Alert delivery heartbeat — this firing is NORMAL and expected.
+          description: >-
+            You are meant to receive this once per channel per 24h. It proves the
+            whole notification path works end to end: Grafana evaluated a rule,
+            matched a route, and a real message arrived. NOTHING IS WRONG. What is
+            wrong is NOT receiving it: if this stops arriving on one channel for
+            more than a day while the other keeps delivering, that channel is
+            broken — check `docker logs grafana` for SMTP or telegram errors, and
+            grafana_alerting_notifications_failed_total in VictoriaMetrics. If it
+            stops on BOTH, Grafana's alerting engine itself is down or the rule
+            was paused. Do not silence this rule; silencing it removes the only
+            control that does not depend on the channel it is testing.
+        labels:
+          severity: info
+          # Matched by the heartbeat route (repeat_interval 24h) in
+          # templates/grafana-notification-policies.yaml.j2. Change one, change
+          # both — a label typo here routes this to the root policy and the 24h
+          # cadence silently becomes 12h.
+          heartbeat: "true"
+        data:
+          # `vector(1)` — a constant that always evaluates, touching no series, so
+          # the heartbeat cannot be taken out by the data it does not depend on.
+          # VERIFIED against the live VictoriaMetrics before shipping:
+          #   /api/v1/query?query=vector(1) -> {"status":"success", value 1}
+          # (a bare `1` also works; vector(1) is the explicit form).
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "vector(1)"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+
+      # ---------------------------------------------------------------------
+      - uid: obs-alert-delivery-failing
+        title: Alert notification delivery failing
+        condition: C
+        # for: 0s — a failed notification is a page that did not arrive. There is
+        # nothing to ride out.
+        for: 0s
+        # OK, and this is the ONE place in this repo where NoData is genuinely the
+        # healthy state rather than a concession. MEASURED on the live Grafana
+        # 2026-08-21: /metrics exposes
+        #   grafana_alerting_notifications_total{integration="email",org="1"}
+        # and NO _failed_total series at all. A Prometheus counter is not exported
+        # until something increments it, so "no data" here means "nothing has ever
+        # failed to send". Alerting on NoData would page continuously, forever,
+        # starting the moment this file lands — the exact false-alarm shape #134
+        # shipped twice. Absence of the ABILITY to see failures is owned by the
+        # heartbeat above, which is why that one is NoData: Alerting and this one
+        # is not.
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Grafana failed to deliver alert notifications via {{ $labels.integration }}.
+          description: >-
+            grafana_alerting_notifications_failed_total increased for
+            integration={{ $labels.integration }} — alerts fired and the message
+            did not go out. If integration="email", suspect the shared Gmail app
+            password (revoked or rotated — it is the same credential watchtower
+            uses, see templates/env.j2), a Google sender block, or egress to
+            smtp.gmail.com:587. THIS ALERT DELIBERATELY DID NOT COME BY EMAIL: it
+            carries channel=telegram-only and routes to the Telegram receiver,
+            because a rule that emails you to say email is broken is not a
+            control (#152). If integration="telegram", the bot token or chat id is
+            wrong or the bot was removed from the chat — the transport itself was
+            operator-confirmed working, so suspect Grafana's contact-point
+            settings before the credential. `docker logs grafana` carries the
+            underlying SMTP/API error either way.
+        labels:
+          severity: critical
+          component: alerting
+          # Matched by the telegram-only route, which sits FIRST in the routing
+          # tree so it wins over the generic severity=critical route. While
+          # observability_alert_telegram is false that route is not rendered and
+          # this alert falls through to the root policy — i.e. by email, the thing
+          # it may be reporting on. That is transitional and is exactly why the
+          # flag is not meant to stay false.
+          channel: telegram-only
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not silently become a 0 and read
+          # as "delivery is fine" (#108).
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
