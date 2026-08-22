@@ -18,7 +18,16 @@ datasources:
     url: http://victoriametrics:8428                    # VictoriaMetrics service URL
     isDefault: true                                     # Set as default datasource
     editable: true                                      # Allow editing in UI
-    version: 1                                          # Datasource version
+    # VERSION IS THE UPDATE GATE, NOT A LABEL — BUMP IT WHENEVER ANY FIELD BELOW
+    # CHANGES, ESPECIALLY THE PASSWORD. Grafana's provisioner only re-applies a
+    # datasource when this number is greater than the stored one; with it pinned,
+    # an existing datasource is NEVER updated again, secureJsonData included. That
+    # is not theoretical: rotating vault_vm_auth_password (#165) left Grafana
+    # querying with the OLD secret while its container env, the .env file and an
+    # in-container curl all showed the NEW one — every check passed and every
+    # VM-backed alert rule 401'd. See the datasource-health assert in
+    # tasks/main.yml, which now turns that silence into a failed deploy.
+    version: 2
     jsonData:
       httpMethod: POST                                  # Use POST for queries (better for large queries)
       timeInterval: 30s                                 # Default scrape interval
@@ -37,7 +46,16 @@ datasources:
     url: http://victorialogs:9428                       # VictoriaLogs base URL
     isDefault: false                                    # Not the default datasource
     editable: true                                      # Allow editing in UI
-    version: 1                                          # Datasource version
+    # VERSION IS THE UPDATE GATE, NOT A LABEL — BUMP IT WHENEVER ANY FIELD BELOW
+    # CHANGES, ESPECIALLY THE PASSWORD. Grafana's provisioner only re-applies a
+    # datasource when this number is greater than the stored one; with it pinned,
+    # an existing datasource is NEVER updated again, secureJsonData included. That
+    # is not theoretical: rotating vault_vm_auth_password (#165) left Grafana
+    # querying with the OLD secret while its container env, the .env file and an
+    # in-container curl all showed the NEW one — every check passed and every
+    # VM-backed alert rule 401'd. See the datasource-health assert in
+    # tasks/main.yml, which now turns that silence into a failed deploy.
+    version: 2
     jsonData:
       maxLines: 1000                                    # Max log lines per query (prevents browser overload)
       httpMethod: POST                                  # Use POST for queries
