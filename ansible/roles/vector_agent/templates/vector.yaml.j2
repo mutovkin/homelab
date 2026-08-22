@@ -25,6 +25,17 @@
 # Data directory for buffers. Created by the .deb's preinst as vector:vector.
 data_dir: "/var/lib/vector"
 
+# Global VRL timezone. The package-audit timestamps (#154) carry no zone marker
+# and parse through this. Pinned rather than left on the default `local`: on the
+# container twin of this file that default silently resolves to UTC (distroless,
+# no tzdata) and skews every pkg record by 7-8 hours, and a native agent that
+# agreed with the container only by accident of the host having tzdata is not a
+# property worth relying on. `timezone` comes from group_vars/all and matches
+# each host's own zone — change them together.
+# Only zone-less parse_timestamp calls read this: parse_host's RFC5424 timestamps
+# carry their own offset and are untouched.
+timezone: "{{ timezone }}"
+
 # Sources - Where logs come from
 sources:
 {% if vector_agent_docker_logs | bool %}
@@ -175,11 +186,29 @@ transforms:
         .parse_failed = "syslog"
       }
 
-  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own
-  # line formats with no severity and no syslog header, so these keep the file
-  # source's ingestion time as their timestamp (the in-line timestamps are not
-  # syslog-shaped). Noted in the observability README as a known limitation, and it
-  # applies identically here.
+  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own line
+  # formats with no severity, but they DO carry in-line timestamps, and until #154
+  # every record here kept the file source's INGESTION time — the whole backfill
+  # landed inside a 3.8 ms window while the lines carried dates days older, and a
+  # buffer reset re-stamped up to a year of package history with the reset date.
+  # Four formats, measured on the live files, not assumed:
+  #   dpkg.log:                     "2026-08-16 06:19:24 status installed ..."
+  #   unattended-upgrades.log:      "2026-08-16 06:19:22,919 INFO ..." (the first
+  #                                 19 chars parse identically; the ,millis are
+  #                                 sliced off, not parsed)
+  #   apt/history.log:              "Start-Date: 2026-08-16  06:19:24" (TWO spaces)
+  #   unattended-upgrades-dpkg.log: "Log started: 2026-08-16  06:19:23" (two too)
+  # Lines with no leading timestamp (apt history block bodies, dpkg progress
+  # spam) keep ingest time and stay queryable as timestamp_source:"ingest" — the
+  # finalize transform stamps that provenance, unchanged.
+  # .timestamp must be a timestamp TYPE: the loki sink honours it only then and
+  # silently falls back to now() on a string — the same trap parse_host documents.
+  # Every coercion defaulted, none fallible-abort (an aborted remap DROPS the
+  # event: no counter, no dead-letter). `?? null` and an explicit null test rather
+  # than a fallible assignment, for the same reason parse_host uses `?? {}`.
+  # The formats carry NO zone marker, so they resolve through the global
+  # `timezone` pinned at the top of this file. That pin is load-bearing — see the
+  # comment there.
   parse_pkg:
     type: remap
     inputs:
@@ -189,6 +218,24 @@ transforms:
       .hostname = "${VECTOR_HOSTNAME}"
       .host = "${VECTOR_HOSTNAME}"
       .level = "info"
+
+      msg = to_string(.message) ?? ""
+      # dpkg.log / unattended-upgrades*.log: leading "YYYY-MM-DD HH:MM:SS"
+      ts = parse_timestamp(slice(msg, 0, 19) ?? "", "%Y-%m-%d %H:%M:%S") ?? null
+      if ts == null {
+        # apt/history.log Start-Date:/End-Date: blocks and the dpkg-log
+        # "Log started:/Log ended:" markers — note the variable run of spaces.
+        parts = parse_regex(msg, r'^(?:Start-Date|End-Date|Log started|Log ended):\s+(?P<d>\d{4}-\d{2}-\d{2})\s+(?P<t>\d{2}:\d{2}:\d{2})') ?? {}
+        if length(parts) > 0 {
+          # No `??` on these two: parse_regex captures are strings, so to_string
+          # here is infallible and VRL rejects the coalescing as unnecessary (E651).
+          joined = to_string(parts.d) + " " + to_string(parts.t)
+          ts = parse_timestamp(joined, "%Y-%m-%d %H:%M:%S") ?? null
+        }
+      }
+      if ts != null {
+        .timestamp = ts
+      }
 
   # Normalise the timestamp and build the Loki label set
   finalize:
@@ -205,10 +252,13 @@ transforms:
       # ingest time instead of the time in the line (#143); precision is the tell
       # (nanoseconds = now(), exactly six digits = rsyslog's microseconds).
       #
-      # It does NOT rescue the package-audit files: parse_pkg sets no timestamp, so
-      # those records land in a millisecond-wide window at first-tail time while
-      # their _msg values carry dates going back days. Their in-line timestamps are
-      # not syslog-shaped; parsing them is tracked separately.
+      # Since #154 it also covers the package-audit branch: parse_pkg parses each
+      # line's own in-line timestamp, so a pkg record reaching here already carries
+      # one and takes the "event" branch below. Before that those records all
+      # landed in a millisecond-wide window at first-tail time while their _msg
+      # values carried dates going back days. The fallback still matters for pkg:
+      # apt history block bodies and dpkg progress lines genuinely have no
+      # timestamp and correctly keep ingest time.
       #
       # .timestamp_source records the provenance so it is QUERYABLE: a host record
       # reading "ingest" fell through the syslog parse, which is otherwise visible
