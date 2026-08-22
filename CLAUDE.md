@@ -217,6 +217,14 @@ Hard-won lessons — check here before debugging from scratch.
   a key means teaching the role to read it AND adding it to the allowlist in the
   same change. Editing VM 100's `net0` string later hot-rewrites the running HA
   VM's NIC (it is live-reconciled now).
+  Two rebuild-only traps measured 2026-08-21 (#157): `pveam available | grep <os> | tail -1`
+  picked **arm64** once upstream published both arches (it sorts after `amd64`) — the CT
+  creates fine and dies at boot with `Exec format error`; select on the arch COLUMN
+  (`awk '$3 == arch'`) and map `ansible_architecture` with NO `| default('amd64')`. And
+  `resolved_templates[item.os] | default(...)` only catches an **Undefined**: on a host
+  mixing `os:` and `ostemplate:` guests the lookup is a real dict, so `item.os` raises
+  `dict has no attribute 'os'` and fails the whole play on EVERY run. `| default()` is not a
+  membership test — use `if item.os is defined`.
   See [docs/solutions/integration-issues/create-time-only-fields-are-rebuild-declarations.md](docs/solutions/integration-issues/create-time-only-fields-are-rebuild-declarations.md).
 - **`authorized_key` reports ok while deploying ZERO keys.** It strips blank and
   `#`-comment lines before parsing, so an empty or comment-only `.pub` (truncated
@@ -264,6 +272,15 @@ Hard-won lessons — check here before debugging from scratch.
   those against the binary on a host, never against a dry run (#134 shipped
   `vector validate --config`, which the CLI rejects — the path is positional — and no
   dry-run could have caught it).
+- **Arm a guard from durable state, not a one-shot `changed`.** #127's restore gate keyed
+  its marker task on the provisioning result's `.changed` — a signal any run that dies
+  before the marker consumes for good; later runs see `changed=false` on an existing CT and
+  the gate stays unarmed for exactly the rebuild it guards. Measured: kill the play after
+  provisioning, re-run to a GREEN recap → running CT, empty `/data`, no markers. Fix: a
+  write-ahead intent file on the host (`fresh_allocation_intent_dir`), written before the
+  create, removed only after the artefacts land. Don't probe the volume instead — empty
+  `/data` + no manifest can't tell an un-armed allocation from an operator-ACKNOWLEDGED one,
+  so probing re-arms what the operator just cleared, in a loop (#148).
 - **Absence of incidental traffic is not evidence of anything — measure the empty-window
   fraction, then make the signal deliberate.** Host logs here arrive in **bursts**:
   measured 2026-08-20, 66% of eq12_docker's and 40% of eq12's 10-minute windows were
@@ -279,6 +296,10 @@ Hard-won lessons — check here before debugging from scratch.
   because the first taught us to look. **A caveat in an error string is where a missing
   conditional hides:** the broken assert's own `fail_msg` named the false-alarm case and
   asserted anyway.
+  Alerting corollary (#151): a counter that only EXISTS while non-zero
+  (`vector_component_errors_total`) can't carry `noDataState: Alerting` — absence IS its
+  healthy state. Give those `noDataState: OK` and put liveness on a separate,
+  continuously-exported series (`min(lag(vector_uptime_seconds[24h]))`).
 - **`--check` overstates `docker_compose_v2` churn: a predicted `Recreate` is not a real
   one.** Dry-runs of `services/*` roles routinely report `Pulling` + `Recreate` for
   containers a real run then leaves untouched (`ok`, same container ID, same `.Created`).
@@ -306,6 +327,13 @@ Hard-won lessons — check here before debugging from scratch.
   dumped, and a live DB's own growth (~62 KB/h here) dwarfs most format changes. See
   [docs/solutions/integration-issues/pg18-restrict-slicing-silent-green-restore-drill.md](docs/solutions/integration-issues/pg18-restrict-slicing-silent-green-restore-drill.md)
   and [docs/solutions/conventions/prove-notification-delivery-not-just-config-validity.md](docs/solutions/conventions/prove-notification-delivery-not-just-config-validity.md).
+
+- **Measure the baseline before claiming a win, and carry verification through the
+  transform.** #147's case for narrowing the Joplin dump was measured against the wrong
+  baseline — narrowing was size-NEUTRAL, `gzip -1` was the lever. And verify the dump BEFORE
+  compressing, fronting restore recipes with `gzip -t &&`: decompressing an unverified
+  archive proves nothing about the dump inside. See
+  [docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md](docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md).
 
 ## Conventions
 
