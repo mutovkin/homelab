@@ -61,6 +61,38 @@ plus, via `include_role: rsyslog_structured`, `/etc/rsyslog.d/40-vector-structur
 and `/etc/logrotate.d/vector-structured` — the RFC5424 side-stream Vector's only
 host-log source tails.
 
+`vector.yaml.j2` is a deliberate near-duplicate of the container's
+`roles/services/observability/files/data/vector/vector.yaml`: **change one, change
+both**, and change the record-schema table in
+[that role's README](../services/observability/README.md#log-record-schema) with
+them. A difference between the two files is a difference in the stored record
+schema, and nothing would report it. **Five** things may legitimately differ, and
+the list in the template's header is the drift guard — extend it in the same change
+that adds a sixth, or it silently stops guarding:
+
+1. the sink endpoint (a LAN address, not a compose service name);
+2. the `docker_logs` source and its `parse_docker` transform, present only where
+   `vector_agent_docker_logs` is true;
+3. Jinja escaping, and `timezone` from a Jinja var rather than the container's `${TZ}`;
+4. no `internal_metrics` source or metrics sink (#151, container-only — see below);
+5. no `throttle_vector_own` transform (#153, container-only: a systemd unit does not
+   read its own stderr back through `docker_logs`, so there is no loop to bound).
+
+Two properties of the rendered file worth knowing before editing it:
+
+- **`timezone: {{ timezone }}` is pinned, not left on Vector's `local` default
+  (#154).** The package-audit timestamps `parse_pkg` now parses carry no zone
+  marker, so they resolve through this. On the container twin the default resolves
+  to UTC (distroless, no tzdata) and skews every pkg record by 7-8 hours; a native
+  agent that agreed with the container only by accident of the host having tzdata is
+  not a property to rely on. Only zone-less `parse_timestamp` calls read it —
+  `parse_syslog`'s RFC5424 timestamps carry their own offset.
+- **`internal_metrics` is NOT exported from these agents.** #151 scoped Vector's
+  self-telemetry to the container only, so the four `obs-vector-*` alert rules cover
+  eq12_docker's Vector and nothing else. The agents' own partial-loss blindness is
+  tracked in **#160**; their coverage today is the per-host ingest rule plus this
+  role's own end-to-end ingest assert on every run.
+
 ## The four systemd traps
 
 The unit the `.deb` ships is not safe to run unmodified. Each override in

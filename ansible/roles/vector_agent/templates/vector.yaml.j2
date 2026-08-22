@@ -7,14 +7,39 @@
 # documented in ONE place — roles/services/observability/README.md, section
 # "Log record schema". CHANGE ONE, CHANGE BOTH, and change the README with them.
 #
-# Only three things differ from the container's copy, and they are the only three
-# that may differ:
+# FIVE things differ from the container's copy, and they are the only five that
+# may differ. This list IS the drift guard — if you add a sixth difference, add it
+# here in the same change, or the guard silently stops guarding:
 #   1. the sink endpoint is the LAN address of VictoriaLogs, not a compose service
 #      name (there is no docker network here);
 #   2. the docker_logs source and its parse_docker transform exist only where
 #      vector_agent_docker_logs is true;
 #   3. this file is templated, so `{{ '{{' }} ... {{ '}}' }}` sink templates have to
-#      be escaped from Jinja.
+#      be escaped from Jinja, and `timezone` comes from a Jinja var rather than
+#      from the container's TZ environment variable.
+#
+#      DO NOT write a dollar-brace env reference in a COMMENT in this file.
+#      Vector's env-var interpolation is a textual pre-pass over the whole config
+#      and does not skip comments, so a commented-out reference to a variable that
+#      is not in /etc/vector/vector.env fails the config LOAD:
+#        x Missing environment variable in config. name = "TZ"
+#      Measured — an earlier version of this very line mentioned the container's
+#      TZ in dollar-brace form and broke all three agents' config load. It was
+#      caught by this role's pre-flight `vector validate`, which runs BEFORE the
+#      restart, so the agents kept running and nothing was lost; that gate is the
+#      only reason this was a failed play rather than three dead shippers.
+#      Every dollar-brace reference below is to a variable vector.env really
+#      defines (VECTOR_HOSTNAME, VL_AUTH_*);
+#   4. NO internal_metrics source and NO prometheus_remote_write sink (#151).
+#      Vector's self-telemetry is container-only, so the four obs-vector-* alert
+#      rules do not cover these hosts. Deliberate scope, tracked in #160 — not an
+#      omission to "fix" by copying the block across without the LAN endpoint and
+#      the VM credentials it needs;
+#   5. NO throttle_vector_own transform (#153). That bounds the container's
+#      self-ingestion feedback loop; a native agent is not reading its own stderr
+#      back through docker_logs, so there is no loop here to bound. On
+#      n5pro_docker, which DOES collect docker logs, `vector` is not a container
+#      at all — it is a systemd unit — so its own output never enters that source.
 # Everything else — every VRL line, every comment explaining WHY a coercion is
 # defaulted rather than fallible — was copied across verbatim rather than
 # "improved", because a difference between the two files is a difference in the
@@ -24,6 +49,17 @@
 
 # Data directory for buffers. Created by the .deb's preinst as vector:vector.
 data_dir: "/var/lib/vector"
+
+# Global VRL timezone. The package-audit timestamps (#154) carry no zone marker
+# and parse through this. Pinned rather than left on the default `local`: on the
+# container twin of this file that default silently resolves to UTC (distroless,
+# no tzdata) and skews every pkg record by 7-8 hours, and a native agent that
+# agreed with the container only by accident of the host having tzdata is not a
+# property worth relying on. `timezone` comes from group_vars/all and matches
+# each host's own zone — change them together.
+# Only zone-less parse_timestamp calls read this: parse_host's RFC5424 timestamps
+# carry their own offset and are untouched.
+timezone: "{{ timezone }}"
 
 # Sources - Where logs come from
 sources:
@@ -173,13 +209,40 @@ transforms:
         # precisely the record worth seeing. `parse_failed:*` is queryable.
         .level = "unknown"
         .parse_failed = "syslog"
+        # Same correction as parse_pkg's else branch, found by the same probe: the
+        # file source pre-set .timestamp to the READ time, so a line that fell
+        # through the syslog parse kept it and was stamped
+        # timestamp_source:"event" — the exact case this field exists to expose,
+        # labelled as if it had a real event time. Delete so finalize stamps now()
+        # and marks "ingest". (`parse_failed` already flags these independently;
+        # this makes the provenance field agree with it instead of contradicting
+        # it.)
+        del(.timestamp)
       }
 
-  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own
-  # line formats with no severity and no syslog header, so these keep the file
-  # source's ingestion time as their timestamp (the in-line timestamps are not
-  # syslog-shaped). Noted in the observability README as a known limitation, and it
-  # applies identically here.
+  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own line
+  # formats with no severity, but they DO carry in-line timestamps, and until #154
+  # every record here kept the file source's INGESTION time — the whole backfill
+  # landed inside a 3.8 ms window while the lines carried dates days older, and a
+  # buffer reset re-stamped up to a year of package history with the reset date.
+  # Four formats, measured on the live files, not assumed:
+  #   dpkg.log:                     "2026-08-16 06:19:24 status installed ..."
+  #   unattended-upgrades.log:      "2026-08-16 06:19:22,919 INFO ..." (the first
+  #                                 19 chars parse identically; the ,millis are
+  #                                 sliced off, not parsed)
+  #   apt/history.log:              "Start-Date: 2026-08-16  06:19:24" (TWO spaces)
+  #   unattended-upgrades-dpkg.log: "Log started: 2026-08-16  06:19:23" (two too)
+  # Lines with no leading timestamp (apt history block bodies, dpkg progress
+  # spam) keep ingest time and stay queryable as timestamp_source:"ingest" — the
+  # finalize transform stamps that provenance, unchanged.
+  # .timestamp must be a timestamp TYPE: the loki sink honours it only then and
+  # silently falls back to now() on a string — the same trap parse_host documents.
+  # Every coercion defaulted, none fallible-abort (an aborted remap DROPS the
+  # event: no counter, no dead-letter). `?? null` and an explicit null test rather
+  # than a fallible assignment, for the same reason parse_host uses `?? {}`.
+  # The formats carry NO zone marker, so they resolve through the global
+  # `timezone` pinned at the top of this file. That pin is load-bearing — see the
+  # comment there.
   parse_pkg:
     type: remap
     inputs:
@@ -189,6 +252,34 @@ transforms:
       .hostname = "${VECTOR_HOSTNAME}"
       .host = "${VECTOR_HOSTNAME}"
       .level = "info"
+
+      msg = to_string(.message) ?? ""
+      # dpkg.log / unattended-upgrades*.log: leading "YYYY-MM-DD HH:MM:SS"
+      ts = parse_timestamp(slice(msg, 0, 19) ?? "", "%Y-%m-%d %H:%M:%S") ?? null
+      if ts == null {
+        # apt/history.log Start-Date:/End-Date: blocks and the dpkg-log
+        # "Log started:/Log ended:" markers — note the variable run of spaces.
+        parts = parse_regex(msg, r'^(?:Start-Date|End-Date|Log started|Log ended):\s+(?P<d>\d{4}-\d{2}-\d{2})\s+(?P<t>\d{2}:\d{2}:\d{2})') ?? {}
+        if length(parts) > 0 {
+          # No `??` on these two: parse_regex captures are strings, so to_string
+          # here is infallible and VRL rejects the coalescing as unnecessary (E651).
+          joined = to_string(parts.d) + " " + to_string(parts.t)
+          ts = parse_timestamp(joined, "%Y-%m-%d %H:%M:%S") ?? null
+        }
+      }
+      if ts != null {
+        .timestamp = ts
+      } else {
+        # DELETE IT, do not just leave it. Vector's `file` source has ALREADY set
+        # .timestamp to the READ time, so finalize's `!is_timestamp` fallback can
+        # never fire on this branch and every pkg record was stamped
+        # timestamp_source:"event" while carrying ingest time — measured 2026-08-22,
+        # 1672 of them, all lying, for the whole life of the field. That made the one
+        # field designed to tell line-time from ingest-time useless for the one
+        # source where the distinction is real. Deleting the key lets finalize stamp
+        # now() and mark "ingest" honestly.
+        del(.timestamp)
+      }
 
   # Normalise the timestamp and build the Loki label set
   finalize:
@@ -205,14 +296,20 @@ transforms:
       # ingest time instead of the time in the line (#143); precision is the tell
       # (nanoseconds = now(), exactly six digits = rsyslog's microseconds).
       #
-      # It does NOT rescue the package-audit files: parse_pkg sets no timestamp, so
-      # those records land in a millisecond-wide window at first-tail time while
-      # their _msg values carry dates going back days. Their in-line timestamps are
-      # not syslog-shaped; parsing them is tracked separately.
+      # Since #154 it also covers the package-audit branch: parse_pkg parses each
+      # line's own in-line timestamp, so a pkg record reaching here already carries
+      # one and takes the "event" branch below. Before that those records all
+      # landed in a millisecond-wide window at first-tail time while their _msg
+      # values carried dates going back days. The fallback still matters for pkg:
+      # apt history block bodies and dpkg progress lines genuinely have no
+      # timestamp and correctly keep ingest time.
       #
-      # .timestamp_source records the provenance so it is QUERYABLE: a host record
-      # reading "ingest" fell through the syslog parse, which is otherwise visible
-      # only in stderr.
+      # .timestamp_source records the provenance so it is QUERYABLE: a record
+      # reading "ingest" carries no time of its own — a host line that fell through
+      # the syslog parse, or a pkg line with no leading timestamp. That claim was
+      # FALSE until #154: the upstream sources pre-set .timestamp (file to the READ
+      # time), so `!is_timestamp` never fired and every record read "event". The
+      # two `del(.timestamp)` calls above are what make this branch reachable.
       ts = .timestamp
       if !is_timestamp(ts) {
         .timestamp = now()

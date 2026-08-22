@@ -194,7 +194,14 @@ reverse-engineer rather than skip.
   a server log is often the only available documentation.
 - **Absence should be alerted on exactly once.** When several rules watch the same
   signal, one of them owns "no data at all" and the others treat no-data as OK —
-  otherwise a single dead collector pages once per rule.
+  otherwise a single dead collector pages once per rule. **And the owner's own series
+  must itself be continuously exported in health** — verify by sampling it, do not assume
+  it from the metric's name. A counter that is only exported once non-zero cannot carry
+  an absence rule; #152 nearly shipped one that would have fired permanently. See
+  [absence-alerts-need-a-continuously-exported-sentinel](../conventions/absence-alerts-need-a-continuously-exported-sentinel.md),
+  and
+  [instant-query-cannot-prove-a-series-is-live](../conventions/instant-query-cannot-prove-a-series-is-live.md)
+  for why an instant query cannot do that verification.
 
 ## Related Issues
 

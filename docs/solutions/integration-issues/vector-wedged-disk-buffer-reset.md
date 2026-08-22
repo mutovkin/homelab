@@ -108,11 +108,24 @@ What it does, in `roles/services/observability/tasks/vector-buffer-reset.yml`:
   - **Package-audit logs**: NOT the same bound, despite an earlier version of this
     note saying so. Debian rotates `dpkg.log` and `apt/history.log` **monthly,
     `rotate 12`**, and the `unattended-upgrades` logs **monthly, `rotate 6`** — so
-    a reset can re-read up to **a year** of package history, not a week. Worse,
-    every re-read record is re-stamped with ingest time (these lines are not
-    syslog-shaped, so Vector has no event time to use), which means each reset
-    multiplies the audit trail and drags its apparent dates forward. The ~293-line
-    figure is today's volume, not a bound.
+    a reset can re-read up to **a year** of package history, not a week. The
+    ~293-line figure is today's volume, not a bound.
+
+    **Corrected by #154 — the second half of this used to be worse than it now
+    is.** Until #154, every re-read record was also re-stamped with *ingest* time
+    (nothing parsed these lines' own timestamps), so each reset both multiplied the
+    audit trail *and dragged its apparent dates forward*. `parse_pkg` now parses
+    the in-line timestamps, so a re-read line keeps the time it actually happened.
+    A reset after #154 therefore costs **duplication only, not re-dating** — the
+    chronology survives. Two residual effects worth knowing:
+    - a re-read line older than VictoriaLogs' **90-day retention** is dropped on
+      ingest rather than re-dated, so the audit trail's depth is the retention
+      depth, not the log files' depth;
+    - lines that genuinely carry no timestamp (apt history block bodies, dpkg
+      progress spam) still take ingest time, and since #154 they say so —
+      `timestamp_source:"ingest"`, which before #154 no record could ever report.
+      Query `source:pkg timestamp_source:"ingest"` to see exactly which rows those
+      are.
 
   Before #143 the sources were `read_from: end` + `ignore_older_secs: 600`, so a
   reset — and any outage longer than ten minutes — silently threw the window away

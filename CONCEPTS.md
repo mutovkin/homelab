@@ -327,7 +327,48 @@ healthy, and a dead collector is indistinguishable from a healthy system. A sepa
 failure mode the owner does not cover is a source that never started: absence
 measured against a signal that has never existed returns nothing and is
 indistinguishable from a mistyped query, so that case has to be watched at the
-receiving end instead, where a counter exists whether or not anyone is writing to it.
+receiving end instead, on a counter maintained there rather than by the sender.
+
+The owner's own signal is the part most easily got wrong, because choosing it feels
+like naming rather than measuring. A signal can only carry an absence rule if it is
+continuously present while the system is healthy, and that is a property to be
+sampled, not assumed — a receiving-end counter is not automatically continuous, since
+counters are commonly published only once non-zero and some only while activity is
+in flight. Where the signal of interest is intermittent, the choices are to
+manufacture a continuous one or to watch a continuously published stand-in on the
+same collection path; the stand-in then has to be recorded as load-bearing at both
+ends, because nothing connects a rule to the collection filter that feeds it.
+
+### Heartbeat marker
+A signal emitted on a fixed cadence for no reason other than to be counted, so that
+its absence is unambiguous.
+
+It exists because most real signals are bursty: a source can be silent for a long
+stretch in perfect health, which makes "nothing arrived" and "nothing was supposed to
+arrive" the same observation, and any rule written on the raw stream is either
+constantly wrong or permanently useless. A marker gives the healthy state a guaranteed
+floor, so a count falling below it means the path is broken rather than the source
+being quiet — this repairs the obvious rule instead of replacing it, which is why the
+rule is usually kept and the marker added underneath. A marker only proves the segment
+it actually traverses, so it is emitted at the far end of the path being watched, not
+next to the thing doing the watching. The same shape applies to a delivery path, where
+the marker is a notification that is meant to arrive on a schedule and whose silence is
+the alarm; there the receiving human is the detector, and nothing about the alerting
+system needs to be working for the absence to be noticed.
+
+### Sentinel signal
+A continuously published signal watched as a stand-in for one that matters but is not
+continuous enough to carry an Absence-owning rule.
+
+The substitution is only valid if the stand-in travels the identical collection path,
+because the claim being made is about that path rather than about the stand-in itself.
+Its value is often a second, free signal — a stand-in chosen from the same subsystem
+usually encodes something about that subsystem's configuration. The cost is a coupling
+nothing enforces: the rule depends on the stand-in continuing to be collected, and a
+collection filter that no longer matches it disables the rule without any error, which
+is the failure the rule was there to catch. That coupling therefore has to be recorded
+in both the rule and the collector, since a note in only one of them is one edit away
+from being false.
 
 ### Blank-credential disable
 A credential whose empty value is read by the consuming software as an instruction to

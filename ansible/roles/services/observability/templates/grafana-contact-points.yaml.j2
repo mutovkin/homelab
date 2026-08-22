@@ -33,3 +33,49 @@ contactPoints:
         settings:
           addresses: {{ vault_watchtower_email_to }}
         disableResolveMessage: false
+
+{# homelab-critical (#152): the both-channels receiver the severity=critical route
+   targets. When Telegram is disabled it degrades to email-only — exactly the
+   coverage #139 shipped — so the policy template can reference it
+   UNCONDITIONALLY. That shape matters: a route pointing at a receiver that does
+   not exist is a FATAL Grafana provisioning error, and this is what keeps the
+   route from ever dangling as the flag flips. #}
+  - orgId: 1
+    name: homelab-critical
+    receivers:
+      - uid: homelab-critical-email
+        type: email
+        settings:
+          addresses: {{ vault_watchtower_email_to }}
+        disableResolveMessage: false
+{% if observability_alert_telegram | bool %}
+      - uid: homelab-critical-telegram
+        type: telegram
+        settings:
+          bottoken: "{{ vault_grafana_telegram_bot_token }}"
+          chatid: "{{ vault_grafana_telegram_chat_id }}"
+        disableResolveMessage: false
+{% endif %}
+{% if observability_alert_telegram | bool %}
+{# Telegram-ONLY receiver, for the one alert that must not depend on email:
+   obs-alert-delivery-failing. #152's core argument — a rule that emails you to
+   say email is broken is not a control. Rendered only when the channel exists;
+   until then that rule falls through to the root policy (email), which is
+   transitional and stated in the rule's own comment.
+
+   `chatid` is quoted here AND the vault value is itself a quoted string, on
+   purpose: an unquoted YAML scalar parses as an INTEGER and Grafana's contact
+   point wants the textual form. Key names are `bottoken`/`chatid`, Grafana's own
+   provisioning spelling — verified against /api/v1/provisioning/contact-points
+   after the apply, because a wrong key here is a provisioning error and the
+   role's /api/health gate is what catches it. #}
+  - orgId: 1
+    name: homelab-telegram
+    receivers:
+      - uid: homelab-telegram-primary
+        type: telegram
+        settings:
+          bottoken: "{{ vault_grafana_telegram_bot_token }}"
+          chatid: "{{ vault_grafana_telegram_chat_id }}"
+        disableResolveMessage: false
+{% endif %}

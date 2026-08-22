@@ -107,6 +107,15 @@ crash-looping, impossible to miss. Env-var interpolation is a *runtime* behaviou
 happily and only the receiving end rejects the request. A fix verified by "does it start?" passes
 while the pipeline delivers nothing.
 
+> **Qualifier added 2026-08-22 (#154).** That is true while the flag is *off* — the
+> literal passthrough case this incident was about. With the flag **on** and a
+> referenced variable *undefined*, interpolation is a **load-time** hard failure:
+> `x Missing environment variable in config. name = "TZ"`, and Vector refuses to
+> start. Loud, not silent. Also, within the config Vector parses itself the
+> substitution is a textual pre-pass over the whole file — comments included, so
+> there is no inert region. See
+> [vector-interpolates-env-vars-inside-comments](vector-interpolates-env-vars-inside-comments.md).
+
 The healthcheck problem is structural: `depends_on: condition: service_healthy` against a service
 that *cannot* become healthy is a permanent deploy block. It stayed hidden because the containers
 already existed; it only fires when something forces a recreate — which is exactly when you are

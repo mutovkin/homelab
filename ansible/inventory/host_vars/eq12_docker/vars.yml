@@ -46,6 +46,20 @@ postgres_firewall:
       - 192.168.25.20/32  # NPM LXC (CT 104)
       - 192.168.48.0/24   # operator workstation subnet
 
+# Arm the Telegram second alert channel (#152). The role's default is false so a
+# host without the keys deploys email-only; this host has them, so it gets the
+# real thing: critical alerts on BOTH channels, and the delivery-failure alert on
+# Telegram ONLY — because a rule that emails you to say email is broken is not a
+# control.
+#
+# REQUIRES, in inventory/host_vars/eq12_docker/vault.yml (asserted BY NAME at the
+# top of the play, so blanking either fails the deploy loudly):
+#   vault_grafana_telegram_bot_token
+#   vault_grafana_telegram_chat_id   <- deliberately a QUOTED string; an unquoted
+#                                       YAML scalar parses as an integer and
+#                                       Grafana's contact point wants the text
+observability_alert_telegram: true
+
 # Scoped fail-open nftables allowlists for the observability stack (#122, extended
 # by #134). Sources NOT listed are dropped FOR THAT PORT ONLY; loopback and the
 # docker bridges (172.16.0.0/12, accepted only when they do NOT arrive on

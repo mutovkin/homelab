@@ -62,11 +62,14 @@ roles/services/observability/
         └── provisioning/
             ├── datasources/datasources.yaml   uids pinned — alerts reference them
             └── alerting/
-                ├── ingest-health.yaml         "log ingest stalled" rule (#108)
-                ├── probe-health.yaml          three http_response rules (#139)
-                └── notification-policies.yaml root policy → homelab-email (#139)
-                    (contact-points.yaml is TEMPLATED, not a file here — see
-                     templates/grafana-contact-points.yaml.j2)
+                ├── ingest-health.yaml          three ingest-stalled rules (#108/#143/#154)
+                ├── per-host-ingest-health.yaml per-host shipper rule (#134)
+                ├── probe-health.yaml           three http_response rules (#139)
+                ├── vector-health.yaml          four Vector internal-metric rules (#151)
+                └── delivery-health.yaml        heartbeat + delivery-failure (#152)
+                    (contact-points.yaml AND notification-policies.yaml are
+                     TEMPLATED, not files here — see templates/*.j2. Both are
+                     --exclude'd from the provisioning rsync; see Alerting.)
 ```
 
 The rsyslog drop-in and its logrotate policy used to live in `files/` here. #134
@@ -133,21 +136,97 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-Six provisioned rules, all in the **Observability** folder, all delivered by
-email. (This table listed four and omitted `obs-host-log-ingest-stalled`, which has
-existed since #143; #134 added the sixth and corrected the count.)
+**Fourteen** provisioned rules, all in the **Observability** folder. #151, #152 and
+#154 added eight of them (four Vector-health, one docker-ingest twin, three
+delivery-path). Routing is no longer "all by email" — see
+[Notification channel](#notification-channel).
 
 | uid | rule | fires when | noData |
 | --- | ---- | ---------- | ------ |
 | `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
 | `obs-host-log-ingest-stalled` | Host log ingest stalled (fleet-wide) | `_time:10m source:host \| count()` < 1, `for: 10m` | **Alerting** |
+| `obs-docker-log-ingest-stalled` | Docker log ingest stalled (#154) | `_time:10m source:docker \| count()` < 1, `for: 10m` | **Alerting** |
 | `obs-host-log-ingest-stalled-per-host` | A host stopped shipping logs | `_time:24h source:host \| stats by (hostname) count() if (_time:15m)` < 1, `for: 10m` | OK |
 | `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
 | `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
 | `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-vector-discarding-events` | Vector is discarding events (#151) | `sum by (component_id) (increase(vector_component_discarded_events_total[15m]))` > 0, `for: 0s` | OK |
+| `obs-vector-component-errors` | Vector component errors (#151) | `sum by (component_id) (increase(vector_component_errors_total[15m]))` > 0, `for: 0s` | OK |
+| `obs-vector-metrics-absent` | Vector metrics export stopped (#151) | `min(lag(vector_uptime_seconds[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
+| `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
+| `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
+| `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_alertmanager_receivers[24h]))` > 600, `for: 5m` | **Alerting** |
 
-`execErrState: Alerting` on all six — a datasource that cannot be reached is not
-evidence of health.
+`execErrState: Alerting` on all fourteen — a datasource that cannot be reached is
+not evidence of health.
+
+### Why so many of the new rules are `noDataState: OK` (#151, #152)
+
+Not a uniform default, and not laziness. Two reasons, and the second is the
+non-obvious one.
+
+**Absence must be owned exactly once**, or one dead component pages three times.
+`obs-vector-metrics-absent` owns absence for the whole `vector_*` family;
+`obs-alert-delivery-heartbeat` owns it for the delivery path.
+
+And **a Prometheus counter does not exist until something increments it**. Measured
+on the live Grafana before these rules were written:
+`grafana_alerting_notifications_total{integration="email"}` is present,
+`grafana_alerting_notifications_failed_total` is **not present at all** — because
+nothing has ever failed to send. Same for Vector's discard and error counters on a
+healthy pipeline. `noDataState: Alerting` on those would page continuously, in
+perfect health, from the moment the file lands. That is the same false-alarm shape
+#134 shipped twice, and it is why the two Vector counter rules and
+`obs-alert-delivery-failing` are OK on NoData while the absence owners are not.
+
+### Vector's own health (#151)
+
+Everything else in this stack detects only **total** absence. The ingest-stalled
+rules count rows; the role's deploy-time assert waits for one marker to come back
+out of VictoriaLogs. All of them are satisfied by a pipeline that is dropping half
+its events — a remap abort, a stalled sink, a sink rejecting a subset. #143 replaced
+Vector's fallible `!` coercions with defaulted forms precisely because an abort
+drops the event with no dead-letter and no counter; that mitigation was blind by
+construction until these metrics existed.
+
+`vector.yaml` now carries an `internal_metrics` source (60s — these land in a
+5y-retention TSDB, per-second scrapes of hundreds of series buy nothing) and a
+`prometheus_remote_write` sink to the same VictoriaMetrics endpoint telegraf
+already writes to.
+
+**Which counter covers what is not the obvious split, and it was measured on
+0.57.0 rather than assumed** (both counters are absent in health, so they were
+forced on a throwaway container):
+
+| counter | covers |
+| ------- | ------ |
+| `vector_component_errors_total` | sink errors including **auth failures** — the exact signature of the ~30-day silent 401 ([vector-057](../../../../docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md)) — **and VRL remap aborts** (`error_type=conversion_failed`, `stage=processing`) |
+| `vector_component_discarded_events_total` | the #153 throttle engaging (`component_id=throttle_vector_own`, `intentional=true`), or a sink dropping a batch. **Not** a full buffer — this sink is `when_full: block`, so a full buffer back-pressures and stalls the sources instead of discarding; only `drop_newest` discards, and nothing here uses it |
+
+The surprise is in the first row: **a remap abort does NOT increment the
+discarded-events counter.** An aborted remap drops the event with no dead-letter
+(`drop_on_abort` defaults true, nothing is rerouted), and `component_errors_total`
+is the only counter that sees it — so `obs-vector-component-errors`, not
+`obs-vector-discarding-events`, is what covers the silent-abort hazard #143 left
+behind. Do not read a quiet discard counter as proof nothing is being dropped.
+
+The discard series also carries an `intentional` tag — true for a throttle, false
+for real loss — which answers "is this the flood bound or is this data loss?"
+faster than any log.
+
+Two couplings that nothing enforces, so both ends say so:
+
+- The `vector_` prefix is Vector's default namespace for that sink. Vector has
+  renamed internal metrics across releases (#151 says so), so a version bump means
+  **re-checking** the four names in `vector-health.yaml` against
+  `/api/v1/label/__name__/values`, not assuming them.
+- `obs-vector-buffer-filling`'s threshold `134217728` is exactly **128 MiB**,
+  i.e. half of a true 256 MiB, against `vector.yaml`'s `buffer.max_size` of
+  `268435488` — which is *not* 256 MiB but 16 bytes over it, so the threshold is
+  ~49.99999%, not 50%. Nothing turns on the rounding and the live `max_size` is
+  deliberately left alone (changing it would resize the on-disk buffer), but the
+  two numbers are coupled by hand: change both together.
 
 ### The two-rule split for log ingest, and why the per-host query looks odd (#134)
 
@@ -274,11 +353,168 @@ silent no-send.
 Two mechanical consequences, both of which have bitten this repo's shape before:
 
 - `Deploy Grafana provisioning` runs `synchronize` with `delete: true` over that
-  directory, so it carries `--exclude=alerting/contact-points.yaml`. Remove the
-  exclude and the rsync deletes the templated file every run, the template writes it
-  back, and Grafana restarts on every deploy forever.
+  directory, so it carries `--exclude=alerting/contact-points.yaml` **and, since
+  #152, `--exclude=alerting/notification-policies.yaml`**. Remove either exclude
+  and the rsync deletes the templated file every run, the template writes it back,
+  and Grafana restarts on every deploy forever.
 - A provisioned root policy and provisioned contact points are **read-only in the
   Grafana UI**. Routing changes go in these files.
+
+#### The second channel, and why one channel is not a control (#152)
+
+Until #152 there was exactly one channel and **nothing watched it**. If the Gmail
+app password were revoked or rotated, if Google blocked the sender, or if egress to
+587 were filtered, every alert in the stack would fail silently into
+`docker logs grafana` — including `obs-log-ingest-stalled` and
+`obs-host-log-ingest-stalled`, whose entire job is reporting that the log pipeline
+is dead. The primary signal and its watchdog go quiet at the same moment.
+
+The obvious fix cannot stand alone: **a rule that emails you to say email is broken
+is not a control.** So the load-bearing half is a second, independent channel.
+
+`observability_alert_telegram` (role default `false`, **`true` on eq12_docker**)
+gates everything Telegram-shaped. False, delivery is email-only — the same
+*channel coverage* #139 shipped, though not the same routing tree, since the
+flag-false render still carries #152's heartbeat and severity routes. So this role
+still deploys on a host whose vault has no Telegram keys. True, it
+requires `vault_grafana_telegram_bot_token` and `vault_grafana_telegram_chat_id`,
+both asserted BY NAME at the top of the play — a blank key fails the deploy loudly
+rather than provisioning a contact point that can never send. (The chat id is
+stored as a **quoted string** on purpose: unquoted it parses as an integer and
+Grafana's contact point wants the textual form.)
+
+Three receivers and a four-route tree, order-sensitive (first match wins, no
+`continue` anywhere):
+
+| route matcher | receiver | channels | why |
+| ------------- | -------- | -------- | --- |
+| `channel = telegram-only` **and** `integration = telegram` | `homelab-email` | email | a **Telegram** delivery failure must not be reported by Telegram. More specific, so it goes FIRST |
+| `channel = telegram-only` | `homelab-telegram` | Telegram | everything else carrying that label (in practice `integration = email`). Second of the pair, and must stay second — promoted, it would swallow the Telegram case |
+| `heartbeat = true` | `homelab-critical` | email + Telegram, `repeat_interval: 24h` | the dead-man's switch, below |
+| `severity = critical` | `homelab-critical` | email + Telegram | critical rules page on both |
+| *(root, no matcher)* | `homelab-email` | email | everything else, unchanged from #139 |
+
+The `channel = telegram-only` label reads as **"route me off the failing
+channel"**, not "always Telegram" — the name is historical, from before the
+mirrored pair existed. The principle is symmetric: an alert reporting that a
+channel failed must not travel by that channel, in *either* direction. Without the
+first row, a "Telegram is broken" page would have gone out over Telegram —
+reintroducing, for the Telegram half, exactly the defect #152 removed for the
+email half.
+
+`homelab-critical` **degrades to email-only** when the flag is false, which is why
+the heartbeat and severity routes render unconditionally: a route pointing at a
+receiver that does not exist is a **fatal** Grafana provisioning error, and this
+shape means they can never dangle as the flag flips. The two `telegram-only` rows
+are not rendered at all in that state, so `obs-alert-delivery-failing` is caught by
+the `severity = critical` route and arrives by email — including when email is what
+failed. That is the irreducible single-channel gap, and it is the reason the flag is
+not meant to stay false. (`homelab-email` is unconditional, so the first row is safe
+to render whenever the block is rendered at all.)
+
+**Three rules, because each covers a failure the other two cannot see.**
+`obs-alert-delivery-failing` catches "Grafana tried and the send failed".
+`obs-alert-delivery-telemetry-absent` catches "the telemetry died, so the first
+rule is blind" — without it, a dead telegraf or a `fieldpass` that stops matching
+after a Grafana metric rename leaves the failure rule permanently NoData → **OK**:
+a rule that cannot fire, reporting Normal.
+
+> **The obvious series for that rule does not work, and finding out why is the
+> most useful thing in this section.** The natural choice is
+> `lag(grafana_alerting_notifications_total[24h])`, on the reasoning that telegraf
+> writes it every 60s whether or not it increments. Telegraf can only write what
+> Grafana *exports*, and Grafana exports that counter **only transiently**, around
+> the time notifications are actually sent. Measured: sampled every 30s for 4.5
+> minutes on a healthy idle instance, `grafana_alerting_notifications_total` was
+> absent from **every** sample, while `grafana_alerting_alertmanager_receivers`
+> and `grafana_alerting_active_configurations` were present in all of them; in
+> VictoriaMetrics the notifications series exists for about six minutes after a
+> notification and then vanishes for the rest of a completely healthy hour. An
+> absence rule on it would fire forever — the third instance of the category error
+> this repo has already shipped twice.
+>
+> A trap inside the trap: an instant query issued *within five minutes* of the
+> last sample still returns it, because that is VictoriaMetrics' default lookback,
+> and the result is stamped with the *query* time rather than the sample's. A
+> vanished series looks alive for five more minutes — long enough to "confirm" it
+> during a deploy and be wrong. The general rule and its measurements live in
+> [docs/solutions/conventions/instant-query-cannot-prove-a-series-is-live.md](../../../../docs/solutions/conventions/instant-query-cannot-prove-a-series-is-live.md);
+> choosing a series that can carry an absence rule at all is
+> [absence-alerts-need-a-continuously-exported-sentinel.md](../../../../docs/solutions/conventions/absence-alerts-need-a-continuously-exported-sentinel.md).
+
+So the rule watches `grafana_alerting_alertmanager_receivers`, which Grafana
+exports for its whole process lifetime and which travels the identical path
+(grafana `/metrics` → telegraf → VictoriaMetrics). Its *value* is a bonus signal:
+`state="active"` should equal the number of provisioned receivers. Its
+`noDataState: Alerting` is genuinely false-alarm-free on that series, which it
+would not have been on the counter — and it must stay inside telegraf's
+`fieldpass`, which is a hand-coupled pair called out in both files.
+
+The heartbeat still matters to this rule, but not as a dependency: it is what
+guarantees the *notifications* counter appears at least once a day, which is what
+makes `obs-alert-delivery-failing` able to observe a failure at all.
+
+**`obs-alert-delivery-heartbeat` is supposed to fire forever.** It is not broken. It
+is a dead-man's switch: one notification per channel per 24 hours, so a channel
+going quiet for more than a day is that channel's failure signal — and noticing it
+costs nothing from the broken channel. A counter cannot cover this case (Grafana can
+believe it delivered), which is why the heartbeat exists alongside
+`obs-alert-delivery-failing` rather than instead of it. Same principle as #134's
+host-log heartbeat, one layer up: absence of incidental traffic proves nothing, so
+make the signal deliberate. Do not "fix" it by making it resolve, and do not silence
+it — silencing removes the only control that does not depend on the channel it tests.
+
+#### Drilling the delivery chain (done once, 2026-08-22 — repeat after changing routing)
+
+Config that validates is not delivery that works, so the whole chain was exercised
+once against a real failure: **broken send → Grafana counter → telegraf scrape →
+VictoriaMetrics → rule fires → route → message on the *other* channel.**
+
+The recipe, and the two dead ends that are worth knowing before you repeat it:
+
+1. Deploy with `-e vault_watchtower_email_server=smtp.invalid`, scoped
+   `--tags observability` so only Grafana's `.env` moves (watchtower's own config
+   is not in that play).
+2. **A restart alone does not produce a notification.** Grafana persists alert
+   state across restarts, and `repeat_interval` (24h on the heartbeat route)
+   suppresses a re-send for an instance that has already notified. Eight minutes of
+   polling after the broken deploy showed nothing at all.
+3. **Grafana's per-receiver test endpoint does not move the counters.** It reports
+   the send accurately — `status: failure` in 50 ms against `smtp.invalid`,
+   `status: success` in 1.2 s against the real relay — but it bypasses the
+   notification pipeline, so `grafana_alerting_notifications_*` never changes. It
+   is a good SMTP check and a useless delivery-monitoring check, which is a second
+   reason not to build anything on it (the first is in
+   [grafana-alerting-provisioned-but-undeliverable](../../../../docs/solutions/integration-issues/grafana-alerting-provisioned-but-undeliverable.md)).
+   Note the endpoint name is the **unpadded** base64 of the receiver title —
+   `homelab-email` → `aG9tZWxhYi1lbWFpbA`, no `==`, or it 404s.
+4. What works: force a **new alert instance**, by adding a temporary label to the
+   heartbeat rule (its labels are its identity, so a new label is a new instance
+   with no notification history). Apply, then watch.
+
+Measured result, with email broken and Telegram live throughout:
+
+```
+06:32  grafana  notifications_failed_total{email}=1  notifications_total{telegram}=1
+06:34  VM       failed_total{email}=1                      (scrape + remote write)
+06:37  rule     obs-alert-delivery-failing = firing        (VM -> rule)
+06:37  grafana  notifications_total{telegram}=1 -> 3       (routed to the OTHER channel)
+```
+
+Restore by re-deploying without the override; prove it, do not assume it — a test
+send returned `success` in 1.2 s (a real Gmail round trip) and the next heartbeat
+notification incremented `{email}` again with no new `failed_total`. The
+delivery-failing rule keeps firing for up to 15 minutes afterwards, because that is
+its `increase()` window, and then resolves itself.
+
+Telegraf scrapes Grafana's `/metrics` for the delivery counters (nothing did
+before). Two measured facts live in `telegraf.conf` because both are traps:
+`metric_version` 1 and 2 produce the *reverse* of the obvious shapes, and the
+`*pass` filters match the **measurement** name — which under `metric_version = 2`
+is the literal string `prometheus` for every metric, so `namepass` matches nothing
+and the input silently yields **zero** metrics. It must be `fieldpass`. Filtering
+itself is not optional: Grafana exposes 505 metric names / 3615 series into a
+5-year-retention TSDB.
 
 Datasource **uids are pinned** in `provisioning/datasources/datasources.yaml`
 because alert rules reference datasources by uid, never by name. Those strings are
@@ -414,10 +650,25 @@ makes queryable, so `level:err` works without paying for stream cardinality.
 | `procid` | no | host | `1234` (`null` when the header says `-`) | RFC5424 header |
 | `syslog_hostname` | no | host | `deb-docker` | RFC5424 header — the CT's real OS hostname |
 | `parse_failed` | no | host | `syslog` | set only when a line is not RFC5424; `level` is then `unknown`, never a fabricated `info` |
-| `timestamp_source` | no | all | `event` / `ingest` | provenance of `_time`, so a host record that fell through the syslog parse is queryable |
+| `timestamp_source` | no | all | `event` / `ingest` | provenance of `_time`. `ingest` = the record carried no time of its own. **Was `event` for every record until #154** — see below |
 | `file`, `source_type` | no | host, pkg | `/var/log/structured.log`, `file` | Vector's file source |
 | `_msg` | — | all | the message text | `message`, with the RFC5424 header stripped on host records |
-| `_time` | — | all | — | host: the line's own timestamp, to the microsecond. docker: the **Docker daemon's** log timestamp. pkg: ingestion time (see limitation 4) |
+| `_time` | — | all | — | host: the line's own timestamp, to the microsecond. docker: the **Docker daemon's** log timestamp. pkg: the line's own timestamp where the line carries one, ingestion time otherwise — check `timestamp_source` (see limitation 4) |
+
+> **`timestamp_source` used to be unable to say `ingest`, and nothing reported
+> it.** `finalize` stamps `now()` + `ingest` only when nothing upstream supplied a
+> timestamp — but BOTH upstream sources pre-set one: `docker_logs` from the
+> daemon's log timestamp (legitimate, that IS the event time) and the `file`
+> source from the **read** time (not an event time at all). So the
+> `!is_timestamp` branch never fired for host or pkg records and every single one
+> was labelled `event`. Measured 2026-08-22 UTC — dates in this README are UTC,
+> which is why late-evening local (America/Los_Angeles) measurements carry the
+> next day's date; the pkg examples below deliberately show both. 1672 pkg records claiming `event`
+> while carrying ingest time, 0 claiming `ingest`, ever. The one field built to
+> make that distinction queryable was the one field that could not express it —
+> and because the value it reported was a plausible one, nothing looked wrong.
+> #154 adds `del(.timestamp)` to `parse_pkg`'s and `parse_host`'s no-timestamp
+> branches, which is what makes the fallback reachable and the label honest.
 
 `hostname` is deliberately the **Ansible inventory name**, not the container ID
 (`get_hostname!()`, the old value — it changed on every recreate) and not the CT's
@@ -448,7 +699,7 @@ the recovery. The cost is the mirror image: a reset wipes checkpoints, so
 `structured.log` is re-read from its start and up to one logrotate period is
 duplicated.
 
-### Known limitations (four, all deliberate)
+### Known limitations (four; two now closed or bounded)
 
 1. **No kernel or OOM-kill events — on eq12_docker. PARTIALLY CLOSED fleet-wide by
    #134.** This entry used to say "there is no kernel ring buffer in an LXC", and
@@ -480,34 +731,88 @@ duplicated.
    building a custom image. Measured 2026-08-18, journal and syslog+auth agreed
    exactly (968 lines each), so today's practical loss is a handful of early-boot
    lines — but it is a real gap, not a solved one.
-3. **This change INTRODUCED Vector self-ingestion; it did not eliminate it.** Say it
-   that way round, because the comfortable phrasing gets it backwards. #143 item 3 was
-   filed about a self-amplifying loop — Vector re-ingesting its own noisy stderr.
-   Measured, that loop was **not** happening before: zero records with
-   `container_name:vector` across all seven prior container-ID hostname labels, and
-   zero containing the old label-render warning, verified against control phrases from
-   Vector's own stderr that *do* return hits. Measured after: **77 records and
-   counting**, all under the new `eq12_docker` label, starting the moment the
-   post-change container came up. `docker_logs` does not self-exclude.
-   **Why self-ingestion began with this change was not determined**, and no guess is
-   recorded here.
-   Today it is harmless — the volume is trivial, almost all of it startup lines, and
-   Vector's own internal flood suppression bounds repeats. But the honest conclusion
-   is the uncomfortable one: the amplification hazard the issue was filed about is now
-   **live rather than hypothetical**, and because we cannot explain why it started, we
-   cannot promise it stays bounded.
-   `exclude_containers: ["vector"]` on the `docker_logs` source is the one-line
-   mitigation and is deliberately NOT applied: it would also delete Vector's own
-   diagnostics from VictoriaLogs, the first place anyone looks when this pipeline
-   misbehaves, and the only copy that survives a container recreate. Tracked as its own
-   issue rather than left to this paragraph.
-4. **Package-audit records carry ingestion time, not line time.** `dpkg.log`,
-   `apt/history.log` and the two `unattended-upgrades` logs are not syslog-shaped and
-   are tailed directly, so `_time` is when Vector read the line. This is a known
-   property, not a defect: on the backfill run all 293 records landed inside a 3.8 ms
-   window (`min(_time)` 2026-08-20T03:39:20.421Z, `max(_time)` …20.424Z) while their
-   `_msg` values carry dates back to 2026-08-16. Host records are the opposite — their
-   `_time` is the line's own timestamp, to the microsecond.
+3. **Vector ingests its own stderr. BOUNDED since #153, not removed — and it did
+   not start with #143.** The README used to say #143 introduced this behaviour,
+   because the measurement available at the time (zero `container_name:vector`
+   records in the preceding 7 days) looked like proof it had never happened. #153's
+   follow-up measured the whole retention window instead, and that reading was
+   wrong:
+
+   | window | records | hostname label |
+   | ------ | ------- | -------------- |
+   | 2026-06-04 → 2026-06-20T21:05 | **16,864** (~1000/day) | `751be39a3615` — the vector container's own id, what `get_hostname!()` wrote before #143 relabelled every record |
+   | 2026-06-20T21:05 → 2026-08-20T03:39 | **0** | — |
+   | since 2026-08-20T03:39 (the #143 deploy) | **153** across the 7 days to 2026-08-21 (~26/day) | `eq12_docker` |
+
+   So self-ingestion had merely been **off for two months**, and the 7-day query
+   measured a real but old absence. It is not a version boundary either: Vector
+   0.56.0 was running on both sides of the 2026-06-20T21:04 restart, and the 0.57
+   upgrade came 25 days later. Today's ~26/day is ~38x **below** the ~1000/day
+   this same store absorbed for 16 days without incident. **What toggled it off and back
+   on is undetermined, and no guess is recorded here.**
+
+   `docker_logs` does not self-exclude, and `exclude_containers: ["vector"]` is
+   deliberately NOT applied: it would delete Vector's own diagnostics from
+   VictoriaLogs — the first place anyone looks when this pipeline misbehaves, and
+   the only copy that survives a container recreate (`docker logs` does not). Both
+   prior deaths of this pipeline were diagnosed from exactly those lines.
+
+   What #153 does instead is bound the **amplification**, which is the actual
+   hazard: a `throttle` transform between `docker_logs` and `parse_docker` caps the
+   vector-container branch at **30 events/60s** (`exclude: '.container_name !=
+   "vector"'`, so every other container bypasses it untouched). Put in
+   proportion: current volume is ~26 records per **day**, so one 60-second
+   allowance already exceeds a full day's traffic and the sustained ceiling is
+   43,200/day — roughly 1,600x what this branch produces. It cannot engage in
+   health, and stays generous enough that a crash loop's startup burst
+   (~15-25 lines/attempt) remains greppable rather than being clipped exactly when
+   it is most wanted. That last case is also a documented false lead: a crash loop
+   trips the throttle with no flood at all, so `obs-vector-discarding-events` says
+   to disambiguate with the ingest-stalled and metrics-absent rules. Every event it drops increments
+   `component_discarded_events_total{component_id="throttle_vector_own"}`, which
+   `obs-vector-discarding-events` (#151) pages on — **the throttle engaging IS the
+   flood alarm**, not a silent loss. #151 and #153 compose: one bounds the loop, the
+   other announces it.
+4. **Package-audit records carry the line's own time where the line has one
+   (#154). CLOSED, with a retention caveat.** `dpkg.log`, `apt/history.log` and the
+   two `unattended-upgrades` logs are not syslog-shaped, so until #154 nothing
+   extracted their timestamps and `_time` was when Vector *read* the line — on the
+   #143 backfill, all 293 records inside a 3.8 ms window while their `_msg` values
+   carried dates days older. Worse, it compounded on every buffer reset:
+   checkpoints wiped, files re-read from the start, and Debian's monthly
+   `rotate 12` means a reset could re-ingest up to a **year** of package history and
+   drag its apparent dates forward each time.
+
+   `parse_pkg` now parses four measured formats — `dpkg.log`'s and
+   `unattended-upgrades.log`'s leading `YYYY-MM-DD HH:MM:SS`, and the
+   `Start-Date:` / `End-Date:` / `Log started:` / `Log ended:` markers, which use
+   **two** spaces between date and time. Lines with no timestamp at all (apt
+   history block bodies, dpkg progress spam) correctly keep ingest time and are
+   now genuinely queryable as `timestamp_source:"ingest"` — see the note under the
+   schema table for why that label was previously impossible to produce.
+
+   **The timezone pin is load-bearing, and it is the part that would have shipped
+   silently wrong.** These formats carry no zone marker, so they resolve through
+   Vector's global `timezone`, which defaults to `local` — and the container image
+   is `distroless-static` with no OS tzdata, so `local` resolves to **UTC**.
+   Measured against the binary:
+
+   ```
+   vector vrl -z local               'parse_timestamp!("2026-08-16 06:19:24", …)'  -> 2026-08-16T06:19:24Z   (7h early)
+   vector vrl -z America/Los_Angeles  (same input)                                 -> 2026-08-16T13:19:24Z   (correct)
+   ```
+
+   Both `vector.yaml` and `roles/vector_agent`'s template therefore pin `timezone`
+   explicitly (the agent from `group_vars/all`'s `timezone`); Vector bundles
+   chrono-tz, so a named zone needs no tzdata on disk. Only zone-less
+   `parse_timestamp` calls read it — `parse_syslog`'s RFC5424 timestamps carry
+   their own offset and are untouched.
+
+   **Caveat, real and not worth hiding:** a backfilled line older than
+   VictoriaLogs' 90-day retention is dropped on ingest. The package audit trail's
+   depth is therefore the *retention* depth, not the log files' depth, even though
+   `dpkg.log` on disk goes back further. What is fixed is that history no longer
+   gets dragged forward by a buffer reset.
 
 ## Fleet coverage (#134)
 
@@ -537,6 +842,16 @@ uses.
 The agents' config is a near-duplicate of `files/data/vector/vector.yaml`, living at
 `roles/vector_agent/templates/vector.yaml.j2`. **Change one, change both**, and keep
 the schema table above in step with them. Unifying the two is a follow-up issue.
+#154's `parse_pkg` timestamp parsing and its `timezone` pin landed in both for
+exactly this reason — they change record `_time` semantics, so the two configs
+could not be allowed to drift apart on it.
+
+One thing that is deliberately **not** symmetric: #151's `internal_metrics` source
+and its VictoriaMetrics sink exist only in the container's config. The four
+`obs-vector-*` rules therefore cover eq12_docker's Vector and no other. Extending
+self-telemetry to the three agents is a follow-up, not an oversight; their coverage
+today is `obs-host-log-ingest-stalled-per-host` plus `roles/vector_agent`'s own
+end-to-end ingest assert on every run.
 
 `:9428` gained three remote writers and no new exposure — see
 [PORT_REFERENCE.md](PORT_REFERENCE.md#port-9428-has-remote-writers-since-134) for

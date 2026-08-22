@@ -7,6 +7,46 @@
 # Data directory for buffers
 data_dir: "/var/lib/vector"
 
+# Global VRL timezone. The package-audit timestamps (#154) carry no zone marker
+# and parse through this. MEASURED, not assumed: this image is distroless-static
+# and ships no OS tzdata, so Vector's default `local` silently resolves to UTC —
+#   vector vrl -z local 'parse_timestamp!("2026-08-16 06:19:24", ...)' -> 06:19:24Z
+#   vector vrl -z America/Los_Angeles (same input)                    -> 13:19:24Z
+# i.e. every pkg record's _time would be 7-8 hours early, wrong in the one field
+# #154 exists to make right, with nothing to report it. Vector bundles chrono-tz,
+# so a named zone needs no tzdata on disk.
+#
+# The value below is the TZ env var, not a hardcoded zone: TZ is already in this
+# container's environment, set by compose from TIMEZONE, which templates/env.j2
+# renders from group_vars/all's `timezone`. One source of truth, so this file
+# cannot drift from the fleet's zone. Env interpolation reaches this key because
+# VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION is set for this container (it has
+# to be, for the sink credentials).
+#
+# Both directions measured against the binary before relying on either:
+#   TZ=America/Los_Angeles + the flag  -> parses "2026-08-16 06:19:24" to 13:19:24Z
+#   TZ set, flag ABSENT                -> "Configuration error. error=No such time
+#                                         zone" and Vector EXITS
+# The second one is why this is safe: a broken interpolation cannot silently
+# degrade to UTC, which is the failure a hardcoded value was protecting against.
+#
+# EVERY VARIABLE NAMED IN PROSE BELOW IS WRITTEN WITHOUT THE DOLLAR-BRACE FORM, ON
+# PURPOSE. This interpolation is a textual pre-pass over the WHOLE file and does not
+# skip comments, so a reference written in prose is resolved like any other: one that
+# resolves is silently rewritten to its value at load time, and one that does not
+# fails the entire config load. The agent twin was broken exactly that way — an
+# identical sentence there produced `Missing environment variable in config.
+# name = "TZ"` on all three hosts. See
+# docs/solutions/integration-issues/vector-interpolates-env-vars-inside-comments.md
+#
+# The one residual risk: compose sets TZ from TIMEZONE with a UTC default, so if
+# TIMEZONE were ever unset the zone would become UTC quietly. It cannot be today —
+# env.j2 renders TIMEZONE from `timezone` with no default, so an undefined var fails
+# the template.
+# Only zone-less parse_timestamp calls read this: parse_host's RFC5424 timestamps
+# carry their own offset and are untouched.
+timezone: "${TZ}"
+
 # Sources - Where logs come from
 sources:
   # Docker container logs
@@ -60,8 +100,13 @@ sources:
 
   # Package-change audit trail (#143 item 7). Not syslog-shaped and not written
   # through rsyslog, so these files reach VictoriaLogs only by being tailed
-  # directly. ~400 lines total on this host, so `beginning` backfills the whole
-  # history once and then tails.
+  # directly. ~400 lines on disk at first deploy, so `beginning` backfills the
+  # whole history once and then tails. (The record count in VictoriaLogs runs well
+  # above the on-disk line count — 1672 over one 7-day window — because a disk-buffer
+  # reset wipes checkpoints and these files are re-read from the start. Since #154
+  # the re-read lines keep their own timestamps instead of being re-dated, so the
+  # duplicates no longer corrupt the audit trail's chronology; see the role
+  # README's limitation 4 and the buffer-reset runbook.)
   host_pkg_logs:
     type: file
     include:
@@ -71,13 +116,101 @@ sources:
       - /var/log/unattended-upgrades/unattended-upgrades-dpkg.log
     read_from: beginning
 
+  # Vector's own health counters (#151). These are the metrics that would have
+  # shown the ~30-day silent 401 outage (vector-057) on day one. Nothing else in
+  # the stack can see PARTIAL loss: the ingest-stalled rules and the deploy-time
+  # assert both detect only total absence.
+  #
+  # Which counter covers what, MEASURED on 0.57.0 against a throwaway container
+  # rather than assumed — the split is not the obvious one:
+  #   component_errors_total          sink errors incl. auth failures, AND a VRL
+  #                                   remap ABORT (error_type=conversion_failed,
+  #                                   stage=processing). An aborted remap drops
+  #                                   the event silently, and this is the ONLY
+  #                                   counter that sees it.
+  #   component_discarded_events_total  the throttle above engaging on a flood
+  #                                   (component_id=throttle_vector_own,
+  #                                   intentional=true) or a sink dropping a
+  #                                   batch. NOT remap aborts, and NOT a full
+  #                                   buffer either: this sink sets
+  #                                   `when_full: block`, so a full buffer applies
+  #                                   back-pressure and stalls the sources instead
+  #                                   of discarding. Only `drop_newest` discards.
+  # So do not read a quiet discard counter as proof no events are being dropped.
+  #
+  # The `host` TAG on every series here is eq12_docker, NOT the container id, and
+  # that is load-bearing enough to record: internal_metrics tags by Vector's
+  # detected hostname, and Vector honours VECTOR_HOSTNAME over the OS hostname.
+  # Measured on 0.57.0 with a throwaway container:
+  #   no VECTOR_HOSTNAME -> host="ac99da101338"  (the container id)
+  #   VECTOR_HOSTNAME=probe-name -> host="probe-name"
+  # Live confirmation: /api/v1/series?match[]=vector_uptime_seconds returns exactly
+  # ONE series, host="eq12_docker", while the container's Config.Hostname is a
+  # 12-char id. So there is no per-recreate series churn — but there WOULD be if
+  # VECTOR_HOSTNAME were ever dropped from compose.yaml, and it would silently
+  # accumulate a dead series per recreate in a 5y-retention TSDB. The env var is
+  # already `:?`-guarded there for the log labels; this is a second reason it
+  # cannot become optional.
+  # 60s, not the 1s default: these go to a 5y-retention TSDB and per-second
+  # scrapes of ~hundreds of internal series buy nothing.
+  vector_metrics:
+    type: internal_metrics
+    scrape_interval_secs: 60
+
 # Transforms - Process and enrich logs
 transforms:
+  # Bound the self-ingestion feedback loop (#153) WITHOUT deleting Vector's own
+  # records from the store. docker_logs does not self-exclude here, and Vector's
+  # stderr IS ingested. That is wanted: these lines are the first thing anyone
+  # greps when the pipeline breaks, and the ONLY copy that survives a container
+  # recreate (`docker logs` does not). exclude_containers would kill exactly that
+  # signal, which is why #153 rejects it.
+  #
+  # MEASURED 2026-08-21, and it corrects #153's own premise — self-ingestion did
+  # NOT begin with #143. `_time:90d container_name:vector | stats by (hostname)`
+  # returns 16864 records under `751be39a3615` (the vector container's own id,
+  # which is what get_hostname!() wrote as `hostname` before #143 relabelled
+  # every record to the inventory name) spanning 2026-06-04 to 2026-06-20T21:05,
+  # at ~1000/day. It then stopped — 25 days BEFORE the 0.57 upgrade, with vector
+  # 0.56.0 running on both sides of the 2026-06-20T21:04 restart — and stayed at
+  # exactly zero through the healthy weeks, the 30-day silent-401 outage and its
+  # repair, until the #143 deploy at 2026-08-20T03:39:19Z. #153's "zero in the
+  # preceding 7 days" is therefore a true measurement of a two-month-old absence,
+  # not of a behaviour that had never happened. Post-#143 volume is ~26/day
+  # (153 records across the 7 days to 2026-08-21), ~38x BELOW the ~1000/day this
+  # store already absorbed for 16 days in June.
+  # What toggled it off and back on is UNDETERMINED. Do not write a mechanism
+  # here that has not been measured; the throttle bounds it either way.
+  #
+  # What must not be possible is AMPLIFICATION: Vector flooding its own stderr,
+  # re-ingesting the flood, and logging about the re-ingestion. This throttle
+  # breaks the geometric loop by capping the vector-container branch at
+  # 30 events/60s. Put in proportion: current volume is ~26 records per DAY, so a
+  # single 60-second allowance already exceeds a full day's traffic, and the
+  # sustained ceiling is 43,200/day — roughly 1,600x what this branch produces.
+  # It therefore cannot engage in health, and it stays generous enough that a
+  # crash loop's startup burst (~15-25 lines/attempt) remains greppable rather
+  # than being clipped exactly when it is most wanted. Every event it drops increments
+  # component_discarded_events_total (component_id=throttle_vector_own), which
+  # obs-vector-discarding-events (#151) pages on — so the throttle engaging IS
+  # the flood alarm, not a silent loss.
+  #
+  # `exclude` (not `filter`): events matching the exclude condition BYPASS
+  # throttling entirely — every non-vector container is passed through untouched.
+  throttle_vector_own:
+    type: throttle
+    inputs:
+      - docker_logs
+    threshold: 30
+    window_secs: 60
+    exclude: '.container_name != "vector"'
+
   # Parse Docker logs and add metadata
   parse_docker:
     type: remap
     inputs:
-      - docker_logs
+      # via the #153 self-ingestion throttle, not docker_logs directly
+      - throttle_vector_own
     source: |
       # Add standard fields for filtering/grouping
       .source = "docker"
@@ -149,12 +282,40 @@ transforms:
         # is 0 today, so this costs nothing and is here for the day it is not.
         .level = "unknown"
         .parse_failed = "syslog"
+        # Same correction as parse_pkg's else branch, found by the same probe: the
+        # file source pre-set .timestamp to the READ time, so a line that fell
+        # through the syslog parse kept it and was stamped
+        # timestamp_source:"event" — the exact case this field exists to expose,
+        # labelled as if it had a real event time. Delete so finalize stamps now()
+        # and marks "ingest". (`parse_failed` already flags these independently;
+        # this makes the provenance field agree with it instead of contradicting
+        # it.)
+        del(.timestamp)
       }
 
-  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own
-  # line formats with no severity and no syslog header, so these keep the file
-  # source's ingestion time as their timestamp (the in-line timestamps are not
-  # syslog-shaped). Noted in the role README as a known limitation.
+  # Package-change audit trail. dpkg/apt/unattended-upgrades write their own line
+  # formats with no severity, but they DO carry in-line timestamps, and until #154
+  # every record here kept the file source's INGESTION time — the whole backfill
+  # landed inside a 3.8 ms window while the lines carried dates days older, and a
+  # buffer reset re-stamped up to a year of package history with the reset date.
+  # Four formats, measured on the live files, not assumed:
+  #   dpkg.log:                     "2026-08-16 06:19:24 status installed ..."
+  #   unattended-upgrades.log:      "2026-08-16 06:19:22,919 INFO ..." (the first
+  #                                 19 chars parse identically; the ,millis are
+  #                                 sliced off, not parsed)
+  #   apt/history.log:              "Start-Date: 2026-08-16  06:19:24" (TWO spaces)
+  #   unattended-upgrades-dpkg.log: "Log started: 2026-08-16  06:19:23" (two too)
+  # Lines with no leading timestamp (apt history block bodies, dpkg progress
+  # spam) keep ingest time and stay queryable as timestamp_source:"ingest" — the
+  # finalize transform stamps that provenance, unchanged.
+  # .timestamp must be a timestamp TYPE: the loki sink honours it only then and
+  # silently falls back to now() on a string — the same trap parse_host documents.
+  # Every coercion defaulted, none fallible-abort (an aborted remap DROPS the
+  # event: no counter, no dead-letter). `?? null` and an explicit null test rather
+  # than a fallible assignment, for the same reason parse_host uses `?? {}`.
+  # The formats carry NO zone marker, so they resolve through the global
+  # `timezone` pinned at the top of this file. That pin is load-bearing — see the
+  # comment there.
   parse_pkg:
     type: remap
     inputs:
@@ -164,6 +325,36 @@ transforms:
       .hostname = "${VECTOR_HOSTNAME}"
       .host = "${VECTOR_HOSTNAME}"
       .level = "info"
+
+      msg = to_string(.message) ?? ""
+      # dpkg.log / unattended-upgrades*.log: leading "YYYY-MM-DD HH:MM:SS"
+      ts = parse_timestamp(slice(msg, 0, 19) ?? "", "%Y-%m-%d %H:%M:%S") ?? null
+      if ts == null {
+        # apt/history.log Start-Date:/End-Date: blocks and the dpkg-log
+        # "Log started:/Log ended:" markers — note the variable run of spaces.
+        parts = parse_regex(msg, r'^(?:Start-Date|End-Date|Log started|Log ended):\s+(?P<d>\d{4}-\d{2}-\d{2})\s+(?P<t>\d{2}:\d{2}:\d{2})') ?? {}
+        if length(parts) > 0 {
+          # No `??` on these two: parse_regex captures are strings, so to_string
+          # here is infallible and VRL rejects the coalescing as unnecessary (E651).
+          joined = to_string(parts.d) + " " + to_string(parts.t)
+          ts = parse_timestamp(joined, "%Y-%m-%d %H:%M:%S") ?? null
+        }
+      }
+      if ts != null {
+        .timestamp = ts
+      } else {
+        # DELETE IT, do not just leave it. Vector's `file` source has ALREADY set
+        # .timestamp to the READ time, so finalize's `!is_timestamp` fallback can
+        # never fire on this branch and every pkg record was stamped
+        # timestamp_source:"event" while carrying ingest time — measured 2026-08-22 UTC
+        # (all dates in these configs are UTC; the work ran on the evening of the
+        # 21st local, America/Los_Angeles),
+        # 1672 of them, all lying, for the whole life of the field. That made the one
+        # field designed to tell line-time from ingest-time useless for the one
+        # source where the distinction is real. Deleting the key lets finalize stamp
+        # now() and mark "ingest" honestly.
+        del(.timestamp)
+      }
 
   # Normalise the timestamp and build the Loki label set
   finalize:
@@ -179,16 +370,23 @@ transforms:
       # fixes, and precision proves it (pre-change _time carried nanoseconds, the
       # signature of now(); post-change exactly six digits, rsyslog's microseconds).
       #
-      # It does NOT rescue the package-audit backfill, and an earlier version of
-      # this comment wrongly claimed it did. parse_pkg sets no timestamp, so all
-      # 293 pkg records landed inside a 3.8 ms window at deploy time while their
-      # _msg values carry dates back to 2026-08-16. Their in-line timestamps are
-      # not syslog-shaped; parsing them is tracked separately. The role README's
-      # limitation 4 documents this as a known property — keep the two in step.
+      # Since #154 it also covers the package-audit branch: parse_pkg now parses
+      # each line's own in-line timestamp, so a pkg record reaching here already
+      # carries one and falls through to the "event" branch below. Before that it
+      # set no timestamp at all, and all 293 backfilled pkg records landed inside
+      # a 3.8 ms window while their _msg values carried dates days older. The
+      # fallback still matters for pkg: apt history block bodies and dpkg progress
+      # lines genuinely have no timestamp and correctly keep ingest time.
       #
-      # .timestamp_source records the provenance so it is QUERYABLE: a host record
-      # reading "ingest" fell through the syslog parse, which is otherwise visible
-      # only in stderr.
+      # .timestamp_source records the provenance so it is QUERYABLE: a record
+      # reading "ingest" carries no time of its own — a host line that fell through
+      # the syslog parse, or a pkg line with no leading timestamp. That claim was
+      # FALSE until #154 and nothing reported it: both upstream sources pre-set
+      # .timestamp (docker_logs to the daemon's log time, file to the READ time),
+      # so `!is_timestamp` never fired for host or pkg and every record read
+      # "event" regardless. The two `del(.timestamp)` calls in parse_host and
+      # parse_pkg are what make this branch reachable. Docker records legitimately
+      # keep "event": the daemon's timestamp IS the event time.
       ts = .timestamp
       if !is_timestamp(ts) {
         .timestamp = now()
@@ -212,8 +410,12 @@ transforms:
       # Zero of those warnings ever reached VictoriaLogs (7 days, and control
       # phrases from vector's own stderr DO return hits, so the zero is real).
       # The reason is NOT that docker_logs self-excludes — it does not, and vector's
-      # own stderr IS ingested now; why that started with this change is
-      # undetermined. Do not write a mechanism here that has not been measured.
+      # own stderr IS ingested now. #153's follow-up measured the rest: it was also
+      # ingested at ~1000/day for 16 days in June under the old container-id
+      # `hostname` label, so this change did not START it either. What toggled it
+      # off in June and back on here is undetermined; the throttle_vector_own
+      # transform above bounds it regardless. Do not write a mechanism here that
+      # has not been measured.
       # See the role README's limitations and the docs/solutions entry.
       # Do NOT invent a synthetic container_name for host events: that puts a fake
       # value in a real field.
@@ -235,6 +437,25 @@ transforms:
 
 # Sinks - Where logs go
 sinks:
+  # Ship the internal metrics to VictoriaMetrics (#151). Same endpoint, protocol
+  # and auth shape telegraf already uses (files/data/telegraf/telegraf.conf), so
+  # the write path is proven rather than new.
+  # Vector's default namespace for this sink is "vector", so the series arrive as
+  # vector_component_errors_total etc. — the vector-health alert rules
+  # (files/data/grafana/provisioning/alerting/vector-health.yaml) and this prefix
+  # must stay in step. Names were confirmed against the live 0.57.0 binary after
+  # the first apply, not taken from the issue: Vector has renamed internal
+  # metrics across releases before.
+  vector_metrics_out:
+    type: prometheus_remote_write
+    inputs:
+      - vector_metrics
+    endpoint: http://victoriametrics:8428/api/v1/write
+    auth:
+      strategy: basic
+      user: "${VM_AUTH_USERNAME}"
+      password: "${VM_AUTH_PASSWORD}"
+
   # Send to VictoriaLogs
   victorialogs:
     type: loki

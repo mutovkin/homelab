@@ -6,7 +6,7 @@
 
 | Port     | Protocol | Purpose                               | Used By                                         |
 | -------- | -------- | ------------------------------------- | ----------------------------------------------- |
-| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`), incl. the **InfluxDB v1 HTTP API** | Grafana queries, Telegraf writes, Manual queries; the only working path for an InfluxDB HTTP client |
+| **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`), incl. the **InfluxDB v1 HTTP API** | Grafana queries, Telegraf writes, **Vector's `internal_metrics` remote-write (#151)**, Manual queries; the only working path for an InfluxDB HTTP client |
 | **8089** | TCP/UDP  | **InfluxDB line protocol, raw socket** — enabled, **unauthenticated**, and **no client has ever written to it** (#133) | nothing, today |
 | **2003** | TCP/UDP  | Graphite protocol — **not enabled in this deployment** | — |
 | **4242** | TCP      | OpenTSDB protocol — **not enabled in this deployment** | — |
@@ -22,6 +22,10 @@
 - **Health Check**: http://localhost:8428/health
 - **Metrics Query**: http://localhost:8428/api/v1/query
 - **Prometheus Remote Write**: http://localhost:8428/api/v1/write
+  - Writers on the compose network: `telegraf` (system/docker/probe metrics, plus
+    Grafana's `/metrics` delivery counters since #152) and `vector`
+    (`internal_metrics` — its own drop/error/buffer counters, #151). Both use
+    basic auth with `VM_AUTH_*`.
 - **Series Query**: http://localhost:8428/api/v1/series
 
 #### Port 8089 - InfluxDB line protocol (raw socket) — **not for Home Assistant**
@@ -396,8 +400,14 @@ curl -u "$VM_USER:$VM_PASS" -X POST \
   'http://YOUR_DOCKER_HOST_IP:8428/write?db=homeassistant' \
   --data-binary 'homeassistant,entity_id=test value=123'    # → 204
 
-# Test VictoriaMetrics query (also authenticated since #88)
-curl -u "$VM_USER:$VM_PASS" 'http://YOUR_DOCKER_HOST_IP:8428/api/v1/query?query=up'
+# Test VictoriaMetrics query (also authenticated since #88).
+# NOT `query=up`: `up` is synthesised by a SCRAPER about its targets, and nothing here
+# produces one — telegraf and vector both remote-write, and telegraf's one prometheus
+# input emits no `up` — so it has never existed and the query returns
+# {"result":[]} whether VM is healthy or dead (measured 2026-08-22). Query a series
+# this stack actually writes, and read the VALUE, not merely that a row came back.
+curl -u "$VM_USER:$VM_PASS" \
+  'http://YOUR_DOCKER_HOST_IP:8428/api/v1/query?query=vector_uptime_seconds'
 
 # Test Grafana
 curl http://YOUR_DOCKER_HOST_IP:3000/api/health
@@ -449,13 +459,32 @@ configured".
 
 2. **Confirm whether the sink has EVER received a row** — this is the check that
    distinguishes "stopped" from "never started", and it is the only one that
-   would have caught #133:
+   would have caught #133.
+
+   **Read it off `/metrics`, NOT off `/api/v1/query`.** `vm_rows_inserted_total` is one
+   of VictoriaMetrics' *own* internal metrics. It is served on `:8428/metrics`, but this
+   container runs with no self-scrape flag, so it is never ingested into the TSDB — the
+   query form returns `{"result":[]}` forever, regardless of whether anything has ever
+   written (measured 2026-08-22, and the query form is what this step used to say).
 
    ```bash
    curl -s -u "$VM_USER:$VM_PASS" \
-     'http://192.168.25.15:8428/api/v1/query?query=vm_rows_inserted_total' | grep influx
+     'http://192.168.25.15:8428/metrics' | grep '^vm_rows_inserted_total{type="influx"}'
    # type="influx" stuck at 0 => no InfluxDB client has ever written, ever.
    ```
+
+   Note what this does and does not prove. The VALUE distinguishes never-started (`0`)
+   from has-written (`>0`) — on a healthy stack `{type="influx"}` is `0` while
+   `{type="promremotewrite"}` runs into the millions, which is also a quick check that the
+   endpoint itself is fine. It does **not** tell you the writer is still alive.
+
+   For liveness, poll this endpoint **twice** and require the counter to advance. A range
+   query is *not* the answer here and cannot be: this series is never ingested into the
+   TSDB, so no query against `/api/v1/*` can see it at any window. (For a series that IS
+   in the TSDB, a range query is the right instrument — an instant query answers from a
+   ~5-minute lookback, so a writer that died four minutes ago looks identical to a live
+   one. See
+   [instant-query-cannot-prove-a-series-is-live](../../../../docs/solutions/conventions/instant-query-cannot-prove-a-series-is-live.md).)
 
 3. **Test the write path HA actually uses** (HTTP on 8428, not 8089):
 
