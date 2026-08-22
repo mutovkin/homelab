@@ -88,3 +88,14 @@ proxmox_lxc_defaults:
   onboot: true
   nesting: false
   unprivileged: true
+
+# `ansible_architecture` (uname -m) -> the architecture string Proxmox prints in
+# the third column of `pveam available --section system`. Template selection
+# matches that column exactly (#157) instead of trusting sort order, so this map
+# is the one place the two vocabularies meet. Deliberately NOT consulted through
+# a `| default(...)`: an unmapped host must fail by name in the assert beside the
+# resolution task, not silently receive amd64 templates. Extend it when a host of
+# a new architecture joins the fleet.
+proxmox_template_arch_map:
+  x86_64: amd64
+  aarch64: arm64

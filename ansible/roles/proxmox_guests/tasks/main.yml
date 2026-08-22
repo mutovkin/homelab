@@ -107,7 +107,20 @@
 # LXC definitions can use `os: ubuntu-24.04` instead of a hardcoded ostemplate.
 # This pre-task resolves the latest available template for each OS, downloads
 # it if missing, and builds a lookup dict (resolved_templates) for provisioning.
-
+#
+# WHY AUTO-RESOLVE AT ALL, when the TrueNAS ISO right below is a hard version +
+# sha256 pin (#157)? Because the two downloads are not the same kind of object.
+# The ISO is a one-shot ~2 GB fetch over plain HTTPS from a vendor CDN with no
+# index and no signature, consumed once at install; nothing but the pinned hash
+# stands between a corrupt or swapped file and a VM you then trust. LXC
+# templates come from `pveam`, whose index and payloads Proxmox itself fetches
+# and verifies against its signed appliance list, are re-resolved from that
+# index on every run, and are consumed only at CREATE time — an unpinned
+# template can therefore only ever affect a guest being built from scratch,
+# where "latest security-patched point release of the declared OS" is the
+# behaviour we actually want. Pinning them would add a second fleet-wide bump
+# chore whose staleness is invisible until a rebuild. So: keep auto-latest,
+# but stop letting SORT ORDER pick the artefact.
 - name: Refresh Proxmox appliance list
   ansible.builtin.command: pveam update
   changed_when: false
@@ -117,10 +130,56 @@
   ansible.builtin.set_fact:
     lxc_os_names: "{{ proxmox_lxcs | selectattr('os', 'defined') | map(attribute='os') | unique | list }}"
 
+# The host's architecture must be a KEY in the map, not a `| default('amd64')`
+# fallback. A silent default is how this repo keeps shipping inert config: on an
+# unmapped host it would quietly hand every guest amd64 templates and the
+# failure would surface as an unbootable container, not as a bad variable. Fail
+# here, by name, with the fix in the message.
+- name: Assert this host's architecture maps to a Proxmox template architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in proxmox_template_arch_map
+    fail_msg: >-
+      ansible_facts.architecture is '{{ ansible_facts['architecture'] }}',
+      which has no entry in
+      proxmox_template_arch_map ({{ proxmox_template_arch_map | dictsort
+      | map('join', ' -> ') | join(', ') }}). LXC template selection matches the
+      arch column of `pveam available` exactly, so it cannot proceed without
+      knowing what this host's arch is CALLED there. Add the mapping to
+      proxmox_guests/defaults/main.yml.
+  when: lxc_os_names | length > 0
+
+# Selection matches the ARCH COLUMN, it does not hope for a sort order (#157).
+#
+# `pveam available --section system` prints three whitespace-separated columns:
+# section, template name, arch. Upstream published an arm64 debian-13 alongside
+# the amd64 one, and the old pipeline was `grep <pattern> | tail -1` — so on this
+# amd64 fleet `tail -1` picked `debian-13-standard_13.6-1_arm64.tar.zst` purely
+# because "arm64" sorts after "amd64". PVE creates the container happily with
+# `arch: arm64`; it then fails to boot with `Exec format error - Failed to exec
+# "/sbin/init"`, and only on a from-scratch build — the same rebuild-path
+# landmine class as #127/#148. Measured on n5pro 2026-08-22.
+#
+# One awk, no grep, deliberately: with `set -o pipefail` a grep that matches
+# nothing would abort the task with a bare rc=1 instead of letting the explicit
+# `Fail if OS template resolution failed` task below report WHICH os could not be
+# resolved. awk exits 0 on no match, so "no template of the right arch exists"
+# now reaches that named failure too. `index()` not `~` so the pattern is a
+# literal substring rather than a regex.
+#
+# `tail -1` still means "last line of the index for this os+arch" — pveam prints
+# its index sorted by name, so that is the latest point release in practice, but
+# it is lexical: a future `13.10` would sort BEFORE `13.6`. Stated rather than
+# hidden; it is the pre-existing auto-latest behaviour, now at least confined to
+# the correct architecture. Revisit if upstream's numbering ever reaches x.10.
 - name: Resolve latest template for each OS
   ansible.builtin.shell: |
     set -o pipefail
-    pveam available --section system | grep '{{ proxmox_templates[item] }}' | tail -1 | awk '{print $2}'
+    pveam available --section system \
+      | awk -v pat='{{ proxmox_templates[item] }}' \
+            -v arch='{{ proxmox_template_arch_map[ansible_facts['architecture']] }}' \
+            '$3 == arch && index($2, pat) { print $2 }' \
+      | tail -1
   args:
     executable: /bin/bash
   register: template_resolution
@@ -739,7 +798,12 @@
 
 - name: Fail if OS template resolution failed
   ansible.builtin.fail:
-    msg: "OS '{{ item.os }}' was requested but no template was resolved. Check pveam available output."
+    msg: >-
+      OS '{{ item.os }}' was requested but no template was resolved for
+      architecture '{{ proxmox_template_arch_map[ansible_facts['architecture']] }}'.
+      Check `pveam available --section system` for a
+      '{{ proxmox_templates[item.os] | default(item.os) }}' entry whose third
+      column is that arch.
   loop: "{{ proxmox_lxcs | selectattr('os', 'defined') | list }}"
   when: resolved_templates[item.os] | default('') | length == 0
   loop_control:
@@ -759,7 +823,17 @@
     node: "{{ proxmox_node }}"
     vmid: "{{ item.vmid }}"
     hostname: "{{ item.hostname }}"
-    ostemplate: "{{ resolved_templates[item.os] | default(item.ostemplate | default(proxmox_lxc_defaults.ostemplate)) }}"
+    # `if item.os is defined` and NOT `resolved_templates[item.os] | default(...)`:
+    # `default()` only catches an Undefined, and on a host where SOME container
+    # declares `os:` the lookup dict is a real dict, so `item.os` on a container
+    # that pins `ostemplate` instead raises a hard "dict has no attribute 'os'"
+    # and fails the whole play — for every container, on every run, not just at
+    # create. It survived only because no host mixed the two forms yet (eq12 is
+    # all-ostemplate, so resolved_templates never gets defined there and the
+    # Undefined chain does fall through). Measured on n5pro 2026-08-22 (#157).
+    ostemplate: >-
+      {{ resolved_templates[item.os] if item.os is defined
+      else item.ostemplate | default(proxmox_lxc_defaults.ostemplate) }}
     cores: "{{ item.cores | default(proxmox_lxc_defaults.cores) }}"
     memory: "{{ item.memory | default(proxmox_lxc_defaults.memory) }}"
     swap: "{{ item.swap | default(proxmox_lxc_defaults.swap) }}"
