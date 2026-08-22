@@ -1,0 +1,362 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — Vector's own health counters (#151)
+#
+# The failure this exists for: everything else in this stack detects only TOTAL
+# absence. obs-log-ingest-stalled and obs-host-log-ingest-stalled count rows; the
+# role's deploy-time assert waits for one marker to come back out of
+# VictoriaLogs. All three are satisfied by a pipeline that is dropping half its
+# events. PARTIAL loss — a remap abort, a full buffer, a sink rejecting a subset —
+# was invisible by construction, which is the blindness that let the ~30-day
+# silent 401 (vector-057) run its course with every container Up and every deploy
+# green.
+#
+# Vector now exports internal_metrics to VictoriaMetrics
+# (files/data/vector/vector.yaml, sink vector_metrics_out). The `vector_` prefix
+# below is Vector's default namespace for the prometheus_remote_write sink.
+# VERIFIED against the live 0.57.0 binary via
+#   /api/v1/label/__name__/values | grep vector_
+# after the first apply — not taken from the issue. #151 warns that Vector has
+# renamed internal metrics across releases, so a version bump means re-checking
+# these four names, not assuming them.
+#
+# NoData policy, deliberate per rule rather than uniform: absence is owned EXACTLY
+# ONCE, by obs-vector-metrics-absent. The three others are OK on NoData because
+# two of them query counters that DO NOT EXIST until their first non-zero event
+# (a Prometheus counter is only exported once something increments it), so "no
+# series" is their healthy state, not a fault. Copying noDataState: Alerting onto
+# them would page continuously in perfect health.
+groups:
+  - orgId: 1
+    name: vector-health
+    folder: Observability
+    # 5m, matching ingest-health. The queries below use increase()[15m], so a
+    # discard is seen within one interval and stays visible for three.
+    interval: 5m
+    rules:
+      # ---------------------------------------------------------------------
+      - uid: obs-vector-discarding-events
+        title: Vector is discarding events
+        condition: C
+        # for: 0s — any discard is data loss that already happened. There is
+        # nothing to ride out; the episode self-resolves when the 15m window
+        # slides past it, which is right for a "this happened" alert rather than
+        # a "this is broken" one.
+        for: 0s
+        # OK, and this is the case the header comment is about: Vector exports
+        # component_discarded_events_total only once something has been
+        # discarded, so on a healthy pipeline this query returns NOTHING. Total
+        # absence of the whole vector_ family is obs-vector-metrics-absent's job,
+        # and it owns it alone.
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Vector discarded events in the last 15 minutes — log data was lost.
+          description: >-
+            component_discarded_events_total increased for
+            {{ $labels.component_id }}. Discards come from a remap abort (a VRL
+            fallible-coercion failure drops the event with no dead-letter —
+            drop_on_abort defaults true), a full disk buffer, a sink rejecting the
+            batch, or the #153 self-ingestion throttle engaging on a flood. WHICH
+            of those it is is in component_id: `throttle_vector_own` means Vector
+            is flooding its own stderr and the throttle is bounding the
+            amplification loop — the throttle firing IS the flood alarm, so treat
+            it as "find the flood", not as "raise the threshold". Any other
+            component_id is real pipeline loss. Check `docker logs vector` on
+            eq12_docker. If the disk buffer is the cause, the runbook is
+            docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+        labels:
+          severity: critical
+          component: log-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "sum by (component_id) (increase(vector_component_discarded_events_total[15m]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not silently become a 0 and read
+          # as "nothing discarded" (#108). With no numeric value the rule falls
+          # through to noDataState, which is OK here on purpose (see above).
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+
+      # ---------------------------------------------------------------------
+      - uid: obs-vector-component-errors
+        title: Vector component errors
+        condition: C
+        for: 0s
+        # Same reasoning as the rule above: this counter does not exist until the
+        # first error. Absence is obs-vector-metrics-absent's job.
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: A Vector component reported errors in the last 15 minutes.
+          description: >-
+            component_errors_total increased for {{ $labels.component_id }}. THIS
+            IS THE COUNTER THAT FIRES ON SINK AUTH FAILURES — the exact signature
+            of the ~30-day silent 401 in
+            docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md,
+            where Vector kept running, kept reporting healthy, and every batch was
+            rejected. It also covers connection failures, encoding errors and
+            source-side read errors. Check `docker logs vector` on eq12_docker for
+            the error text, then confirm the destination actually has the data:
+            `_time:10m | count()` in VictoriaLogs, and
+            vector_component_sent_events_total in VictoriaMetrics.
+        labels:
+          severity: critical
+          component: log-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "sum by (component_id) (increase(vector_component_errors_total[15m]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
+
+      # ---------------------------------------------------------------------
+      - uid: obs-vector-metrics-absent
+        title: Vector metrics export stopped
+        condition: C
+        for: 5m
+        # THE absence owner for Vector's metric export, and the reason the two
+        # counter rules above are OK on NoData. If this query returns nothing,
+        # Vector has never exported internal metrics or VictoriaMetrics lost the
+        # series — either way the three other rules in this group are silently
+        # unable to fire, and a rule that cannot fire is worse than no rule.
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Vector's internal metrics have stopped arriving in VictoriaMetrics.
+          description: >-
+            No vector_uptime_seconds sample in over 10 minutes while Vector scrapes
+            its own internals every 60s. This is the partial failure the whole #151
+            rule group exists for: Vector can be shipping LOGS perfectly while its
+            metrics sink 401s against VictoriaMetrics, and nothing else would
+            notice — the log-ingest rules stay Normal throughout. It is also what
+            fires if Vector is simply gone.
+            The [24h] lookbehind mirrors obs-http-probe-absent's reasoning: a
+            series with no sample inside the lookbehind is not returned AT ALL, so
+            a shorter window makes a long-dead exporter vanish from the query,
+            Grafana marks the instance stale and RESOLVES the alert, and the
+            failure goes invisible again. relativeTimeRange below must stay >= the
+            lookbehind.
+            Check `docker logs vector` for vector_metrics_out sink errors, and that
+            VM_AUTH_USERNAME/VM_AUTH_PASSWORD reached the vector container (there
+            is no `docker exec` on a distroless image — read
+            /data/deploy/observability/.env instead).
+        labels:
+          severity: critical
+          component: log-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "min(lag(vector_uptime_seconds[24h]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 600s = ten missed 60s scrapes. Loose enough that a Vector restart or
+          # one slow remote-write cannot trip it.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600
+
+      # ---------------------------------------------------------------------
+      - uid: obs-vector-buffer-filling
+        title: Vector disk buffer filling
+        condition: C
+        # 15m, not 0s: a buffer transiently holding data during a VictoriaLogs
+        # restart is normal. Sustained growth is not.
+        for: 15m
+        # OK on NoData: absence is obs-vector-metrics-absent's job (see above).
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: A Vector disk buffer is over half full — the sink is blocked or slow.
+          description: >-
+            vector_buffer_byte_size for {{ $labels.component_id }} is above 128MB,
+            half of the 256MB disk buffer configured in
+            files/data/vector/vector.yaml (max_size: 268435488). CHANGE BOTH
+            TOGETHER — this threshold is 50% of that number and nothing enforces
+            the relationship. A filling buffer is the LEADING indicator of the
+            wedge that
+            docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
+            recovers from: the sink is rejecting or stalling, Vector is holding
+            events on disk, and when_full is `block`, so once it is full the
+            sources stop reading and events are lost at the source instead. Fix
+            the sink before it gets there — check VictoriaLogs is up and
+            authenticating (`docker logs vector` will name the error).
+        labels:
+          severity: warning
+          component: log-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "max by (component_id) (vector_buffer_byte_size)"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 134217728 = 128MiB = 50% of the 256MB (268435488 byte) disk buffer.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 134217728
