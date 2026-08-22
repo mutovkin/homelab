@@ -102,10 +102,14 @@ proxmox_lxcs:
       # (pct config 101, 2026-08-16).
       # DR: a rebuild allocates a FRESH EMPTY /data — restore it from the vzdump
       # backup (backup=1 includes mp0) before deploying services. That ordering
-      # is now ENFORCED (#127), not just documented: the run that creates this CT
+      # is now ENFORCED (#127), not just documented: a run that creates this CT
       # writes /var/lib/ansible-fresh-allocation inside it (listing every mount it
       # allocated fresh — see `fresh_allocation_manifest` in group_vars/all), and
       # deploy-services.yml refuses to run for any docker host carrying it.
+      # The arming survives an interrupted build (#148): the Proxmox host records
+      # the intent to allocate BEFORE the container is created and clears it only
+      # once the manifest is written, so a run killed in between is picked up by
+      # the next one rather than leaving the gate silently unarmed.
       # Restore the volume, then `rm /var/lib/ansible-fresh-allocation` — that rm
       # is the explicit "yes, this data is what I want" acknowledgement, and it is
       # the only thing that clears the gate. (Each listed mount also gets a
