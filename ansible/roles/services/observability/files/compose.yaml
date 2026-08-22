@@ -10,14 +10,29 @@ services:
       - "no-new-privileges:true"
     ports:
       - "8428:8428" # HTTP API and Web UI (vmui)
-      - "8089:8089" # InfluxDB HTTP API (for Home Assistant)
-      - "8089:8089/udp" # InfluxDB UDP API
+      # :8089 (--influxListenAddr) was retired in #133. It was published for Home
+      # Assistant, but HA's `influxdb:` integration speaks the InfluxDB HTTP API and
+      # :8089 is the RAW line-protocol listener — measured: every HTTP request to it
+      # returns no response at all, so HA could never have used it however it was
+      # configured. HA now pushes to :8428/write like any other HTTP client. Removing
+      # it also removes an UNAUTHENTICATED write endpoint (--httpAuth guards :8428
+      # only, never the influx listener) on both tcp and udp.
     volumes:
       - /data/victoriametrics:/victoria-metrics-data
+      # Deliberately NOT under /data/victoriametrics — that path is
+      # --storageDataPath, and config does not belong inside the TSDB's own data
+      # directory. Bind-mounted, so compose does not track its content: the role
+      # restarts victoriametrics explicitly when it changes (#133).
+      - /data/victoriametrics-config/scrape.yml:/etc/victoriametrics/scrape.yml:ro
     command:
       - "--storageDataPath=/victoria-metrics-data" # Path to store time-series data
       - "--httpListenAddr=:8428" # HTTP API and Web UI (vmui) port
-      - "--influxListenAddr=:8089" # Enable InfluxDB protocol for Home Assistant
+      # Liveness-only scrape of Home Assistant (#133). The job stores a fixed 7
+      # series (`up` + the scraper's own scrape_* metadata) regardless of how much
+      # HA exposes — see templates/scrape.yml.j2. Unconditional:
+      # the file is always templated, carrying zero jobs when the scrape is off,
+      # because VM refuses to start if this path is missing.
+      - "--promscrape.config=/etc/victoriametrics/scrape.yml"
       - "--retentionPeriod=5y" # Keep metrics for 5 years (Home Assistant historical data)
       - "--dedup.minScrapeInterval=15s" # Deduplicate metrics within 15s window (smooths HA transients)
       - "--maxLabelsPerTimeseries=50" # Maximum labels per metric (prevents cardinality explosion)
