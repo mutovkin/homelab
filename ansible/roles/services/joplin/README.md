@@ -30,14 +30,21 @@ sudo chmod -R 755 /data/joplin
 
 The container uses filesystem storage for better performance, storing note data and attachments in the mounted volume. Ensure the directory is writable and has sufficient disk space for your notes and attachments.
 
-## Pre-deploy database backup (#121a, narrowed in #142)
+## Pre-deploy database backup (#121a, narrowed in #142, compressed in #147)
 
 joplin-server is `monitor-only` (#83), so a new release only ever arrives through a
 deliberate `task deploy:service -- --tags joplin`, whose `pull: always` hands the live
 schema to a possibly newer image that runs **one-way migrations** on start. The role
 therefore takes a dump first, writes it to
-`{{ data_mount }}/backups/joplin-pgdump-<ts>.sql`, and keeps `joplin_backup_retention`
+`{{ data_mount }}/backups/joplin-pgdump-<ts>.sql.gz`, and keeps `joplin_backup_retention`
 of them.
+
+Since #147 the artifact is **gzip-compressed** — `joplin-pgdump-<ts>.sql.gz`, a single
+gzip member over the same two-half plain stream as before. Every restore recipe below is
+therefore fronted by `zcat`. Pre-#147 artifacts are plain `joplin-pgdump-<ts>.sql`; for
+those, drop the `zcat` and read the file directly (`sed -n … "$f"`, or `< "$f"`). Both
+generations sit in one retention slice, so plain dumps age out on their own — do not
+delete them by hand.
 
 ### What is in the dump
 
@@ -47,6 +54,9 @@ One file, two concatenated halves:
 | ---- | ------- | ----- |
 | cluster globals — roles, tablespaces | `pg_dumpall --globals-only` | 946 B |
 | the joplin database only | `pg_dump --create joplin` | ~633 MB |
+
+…and since #147 the concatenation is `gzip -1`-compressed into one gzip member; the
+sizes below are the PLAIN stream. See "Compression (#147)".
 
 It is **not** a `pg_dumpall`. The guard protects *joplin's* schema through a one-way
 migration, so joplin's database is the right scope; the cluster-wide dump #121a started
@@ -88,6 +98,37 @@ What the change actually buys is scope (dump what the guard protects), decouplin
 cluster growth (the day a second service lands in this shared postgres, a cluster dump
 would start dumping it on every routine joplin deploy), and restore ergonomics.
 
+### Compression (#147)
+
+Narrowing was size-neutral; **compression is the size lever**, because the "shared"
+cluster is ~99.7% joplin — the 632 MB was never cluster overhead, it was joplin:
+
+| Artifact | Bytes (2026-08-19, same window) |
+| -------- | ----- |
+| plain, both halves concatenated | 633,231,225 |
+| after `gzip -1` | 309,412,797 |
+| ratio | **~2.05x**, ~13 s of CPU on a ~9 s dump |
+
+Only ~2x because the payload is largely high-entropy note content — raising the gzip
+level buys little for much more CPU. Retention 7 therefore costs ~2.2 GB rather than
+~4.4 GB. (Compare compressed against uncompressed **for the same artifact** —
+`zcat "$f" | wc -c` vs `stat -c %s "$f"`. Never against a dump from another hour; see the
+growth warning below.)
+
+**The order is verify-then-compress, and that is the whole design.** The dump lands as a
+plain `.partial`; both bounded completion markers are checked on that plain intermediate
+in their herestring form; only then does `gzip -1` run, `gzip -t` verify the result, the
+plain intermediate get removed, and the artifact get renamed. Nothing in the verification
+path became a pipeline, so the SIGPIPE hazard described further down cannot occur. And
+`gzip -t` is not a second-class check: gzip stores a CRC32 and the length of the
+uncompressed stream, so a passing test proves the `.gz` decompresses to exactly the bytes
+the markers verified.
+
+Two alternatives were rejected. `-Fc` custom format needs `pg_restore`, kills the textual
+completion-marker asserts, and invalidates every recipe on this page.
+`pg_dump --compress=gzip:1` compresses only the pg_dump half, leaving the globals half
+plain — a mixed plain+gzip file that no single tool decompresses.
+
 **The file contains SCRAM password hashes** (in the globals half) and Joplin session
 tokens. `umask 077` / mode `0600` on it is not cosmetic, and it must never be routed
 through an Ansible register — that would copy it to the controller and print it in play
@@ -102,8 +143,8 @@ loss on that volume.
 The whole file restores in one command, into an empty or a rebuilt cluster:
 
 ```bash
-docker exec -i -u postgres postgres psql -v ON_ERROR_STOP=1 -d postgres \
-  < /data/backups/joplin-pgdump-<ts>.sql
+zcat /data/backups/joplin-pgdump-<ts>.sql.gz \
+  | docker exec -i -u postgres postgres psql -v ON_ERROR_STOP=1 -d postgres
 ```
 
 `-u postgres` is required — local connections are `peer` authenticated (#79) and a root
@@ -121,7 +162,8 @@ the globals half opens with `CREATE ROLE joplin_user`, the role already exists, 
 pg_dump section header:
 
 ```bash
-sed -n '/^-- PostgreSQL database dump$/,$p' /data/backups/joplin-pgdump-<ts>.sql \
+zcat /data/backups/joplin-pgdump-<ts>.sql.gz \
+  | sed -n '/^-- PostgreSQL database dump$/,$p' \
   | docker exec -i -u postgres postgres psql -q -v ON_ERROR_STOP=1 -d postgres
 ```
 
@@ -136,13 +178,19 @@ a different name. Slice from the pg_dump section header — **not** from `CREATE
 and rewrite only the three identity lines:
 
 ```bash
-f=$(ls -t /data/backups/joplin-pgdump-*.sql | head -1)
-sed -n '/^-- PostgreSQL database dump$/,$p' "$f" \
+f=$(ls -t /data/backups/joplin-pgdump-*.sql.gz | head -1)
+zcat "$f" | sed -n '/^-- PostgreSQL database dump$/,$p' \
   | sed -e 's/^CREATE DATABASE joplin /CREATE DATABASE joplin_restore_test /' \
         -e 's/^\\connect joplin$/\\connect joplin_restore_test/' \
         -e 's/^ALTER DATABASE joplin /ALTER DATABASE joplin_restore_test /' \
   | docker exec -i -u postgres postgres psql -q -v ON_ERROR_STOP=1 -d postgres
 ```
+
+Every consumer in these pipelines reads its input to EOF (`psql`, `sed -n '/…/,$p'`), so
+none of them can SIGPIPE `zcat` — that matters, see the marker section below.
+`ls -t … | head -1` *is* an early-exiting consumer, but this is an interactive recipe
+with no `set -o pipefail`, so it is fine here. **Do not carry that form into the role's
+shell task**, which runs under `pipefail`.
 
 It starts at the pg_dump header rather than at `CREATE DATABASE` because the globals'
 `CREATE ROLE joplin_user` would collide with the role that already exists — and because of
@@ -231,16 +279,46 @@ Two traps worth knowing before touching those five lines:
   original `tail -n 20 | grep -q` escaped that only because 20 lines fit the 64 KB pipe
   buffer — luck, not design. Do not "simplify" them back.
 
-Dumps are written to `<name>.sql.partial` and renamed only after both checks pass, so a
-truncated file can never be mistaken for a good backup. A trap removes the partial on
-error and on the catchable termination signals; **SIGKILL cannot be trapped**, so the
-role also sweeps stale `joplin-pgdump-*.sql.partial` files at the start of every run —
-before taking the new dump, since a full volume is the likeliest reason one was stranded,
-and the retention prune's `*.sql` glob does not match them.
+#### Order of operations, partials, and retention (#147)
 
-The retention prune globs exactly `joplin-pgdump-*.sql`. That is deliberately narrow:
-`/data/backups` also holds ad-hoc operator dumps and another role's archives, and this
-prune must never touch them.
+The dump is written to `joplin-pgdump-<ts>.sql.partial` — **plain**. Both marker checks
+run against that plain intermediate. Only then:
+
+```
+markers OK  →  gzip -1 -c  →  <name>.sql.gz.partial
+            →  gzip -t     →  rm the plain intermediate
+            →  mv          →  joplin-pgdump-<ts>.sql.gz
+```
+
+Verifying before compressing is what keeps the five herestring lines pipeline-free — a
+`zcat "$f" | tail -n 20 | grep -q …` check would reintroduce exactly the SIGPIPE failure
+described above. `gzip -t` then carries the guarantee across: it validates gzip's stored
+CRC32 and length of the *uncompressed* stream, so it proves the `.gz` decompresses to the
+bytes the markers already vouched for.
+
+A killed run can therefore strand **two** shapes of partial, and both are covered:
+
+| Shape | Left by | Cleaned by |
+| ----- | ------- | ---------- |
+| `joplin-pgdump-<ts>.sql.partial` | dump or marker check died | trap, and the pre-dump sweep |
+| `joplin-pgdump-<ts>.sql.gz.partial` | gzip or `gzip -t` died | trap, and the pre-dump sweep |
+
+The trap covers ERR and the catchable termination signals and names both files;
+**SIGKILL cannot be trapped**, so the role also sweeps stale partials at the start of
+every run — before taking the new dump, since a full volume is the likeliest reason one
+was stranded. The sweep needs *both* patterns because `find`'s fnmatch is a **full**
+match: `joplin-pgdump-*.sql.partial` does **not** match `x.sql.gz.partial`.
+
+The retention prune globs `joplin-pgdump-*.sql` **and** `joplin-pgdump-*.sql.gz` — same
+fnmatch reason (`*.sql` does not match `x.sql.gz`) — and sorts the combined list by
+mtime, so the two generations share ONE slice of `joplin_backup_retention`. The pre-#147
+plain ~632 MB dumps therefore age out on their own as compressed ones accumulate; do not
+delete them by hand. Neither pattern matches a `.partial`, which is why the sweep exists
+at all.
+
+Both globs keep the `joplin-pgdump-` prefix, and that is deliberately narrow:
+`/data/backups` also holds ad-hoc operator dumps (`pre-*.sql`, `pg_dumpall-post-*.sql`)
+and vaultwarden's `.tgz` archives, and this prune must never touch them.
 
 ## Configuration
 
