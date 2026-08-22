@@ -127,7 +127,10 @@
     # was killed outright, and the likeliest reason for that is the volume filling
     # up — so reclaiming the space is a precondition for this run's dump, not
     # tidying after it. Nothing else can be mid-write here (Ansible runs the role
-    # serially per host), and this run's own partial does not exist yet.
+    # serially per host WITHIN one playbook run), and this run's own partial does not
+    # exist yet. A genuinely concurrent second run is not silently corrupted by this
+    # sweep either: it loses its intermediate, its marker check or `gzip` fails, ERR
+    # fires and the rescue refuses that deploy — loudly, not silently.
     #
     # The retention prune below globs `joplin-pgdump-*.sql` and `*.sql.gz`, and
     # fnmatch is a FULL match: neither pattern matches a `.partial`, so without
@@ -202,29 +205,46 @@
     #     restore into an empty cluster creates the role before anything grants to
     #     it.
     #   - `--create`, not optional: it emits `CREATE DATABASE` + `\connect`, so the
-    #     file restores with one `psql -d postgres -f <file>` and lands in the right
-    #     database. Without it the same command creates joplin's tables inside the
-    #     `postgres` database — a silent, plausible-looking WRONG restore.
+    #     file restores with one `zcat <file> | psql -d postgres` and lands in the
+    #     right database. Without it the same command creates joplin's tables inside
+    #     the `postgres` database — a silent, plausible-looking WRONG restore.
     #   - ONE file, `joplin-pgdump-<ts>.sql.gz` since #147 (`.sql` before it), so
     #     the retention prune below needs exactly one slice — it globs both
     #     generations. A paired `joplin-globals-<ts>.sql` would need its own
     #     retention slice; one `[retention:]` slice over a mixed list keeps
     #     3.5 pairs.
     #
-    # COMPRESSION (#147): narrowing was size-neutral because the cluster IS joplin
-    # (~99.7%), so compression, not scope, is the size lever. Measured 2026-08-19 in
-    # the same window: 633,231,225 B plain vs 309,412,797 B after `gzip -1` (~2.05x,
-    # ~13 s of CPU on a ~9 s dump), taking retention 7 from ~4.4 GB to ~2.2 GB. Only
-    # ~2x because the payload is high-entropy note content — do not raise the level.
+    # COMPRESSION (#147): narrowing was size-neutral because the cluster's DUMPABLE
+    # content is essentially all joplin — the other databases dump to ~2 KB in total
+    # (numbers above) — so compression, not scope, is the size lever. Measured
+    # 2026-08-19 in the same window: 633,231,225 B plain vs 309,412,797 B after
+    # `gzip -1` (~2.05x, ~13 s of CPU on a ~9 s dump), taking retention 7 from
+    # ~4.4 GB to ~2.2 GB. Only ~2x because the payload is high-entropy note content
+    # — do not raise the level.
+    #
     # ORDER IS THE POINT: both markers are checked on the PLAIN intermediate BEFORE
-    # gzip runs, so the five herestring lines below stay byte-identical and
-    # pipeline-free; `gzip -t` then extends that verification to the shipped
-    # artifact, because gzip stores a CRC32 + length of the uncompressed stream, so
-    # a passing `gzip -t` proves the `.gz` decompresses to exactly the bytes the
-    # markers verified. Rejected alternatives: `-Fc` custom format (needs
-    # `pg_restore`, destroys the textual marker asserts and every README recipe) and
-    # `pg_dump --compress=gzip:1` (compresses only the pg_dump half, leaving a mixed
-    # plain+gzip file no single tool decompresses).
+    # gzip runs, so the marker checks stay pipeline-free — the two `grep -q … <<<`
+    # herestring lines are unchanged from #142, and the two region-capture lines
+    # changed only the filename variable they read. `gzip -t` then extends that
+    # verification to the shipped artifact, because gzip stores a CRC32 + length of
+    # the uncompressed stream, so a passing `gzip -t` proves the `.gz` decompresses
+    # to exactly the bytes the markers verified. Rejected alternatives: `-Fc` custom
+    # format (needs `pg_restore`, destroys the textual marker asserts and every
+    # README recipe) and `pg_dump --compress=gzip:1` (compresses only the pg_dump
+    # half, leaving a mixed plain+gzip file no single tool decompresses).
+    #
+    # TRANSIENT DISK PEAK, accepted deliberately: between `gzip -1` and the `rm`,
+    # the plain intermediate (~633 MB) and the compressed partial (~310 MB) coexist,
+    # so a run peaks at ~940 MB of scratch against ~633 MB before #147. /data had
+    # 99 G free when this landed; if that ever stops being true, the fix is a
+    # streaming form, and a streaming form is what forces the marker checks back
+    # into a pipeline — which is the thing this ordering exists to avoid.
+    #
+    # `rm` BEFORE `mv`, also deliberate: if the `rm` fails, ERR fires, the trap
+    # discards the verified `.gz` and the rescue refuses the deploy — fail-closed
+    # and loud. Renaming first would instead strand the plain intermediate for the
+    # next run's sweep to collect. Both are safe; this order is chosen so the
+    # success path leaves a directory with nothing to explain.
     #
     # `set -euo pipefail` aborts the whole script (firing the ERR trap) if the
     # globals half fails, so a truncated globals section can never be followed by a
