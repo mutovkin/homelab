@@ -156,7 +156,7 @@ delivery-path). Routing is no longer "all by email" — see
 | `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
 | `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
-| `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_notifications_total[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_alertmanager_receivers[24h]))` > 600, `for: 5m` | **Alerting** |
 
 `execErrState: Alerting` on all fourteen — a datasource that cannot be reached is
 not evidence of health.
@@ -417,15 +417,38 @@ to render whenever the block is rendered at all.)
 `obs-alert-delivery-telemetry-absent` catches "the telemetry died, so the first
 rule is blind" — without it, a dead telegraf or a `fieldpass` that stops matching
 after a Grafana metric rename leaves the failure rule permanently NoData → **OK**:
-a rule that cannot fire, reporting Normal. It uses `lag()` on the **success**
-counter, not the failed one, because telegraf writes that series every 60s whether
-or not it increments, so `lag > 600` means the *scrape* stopped rather than that
-nothing was sent — and the failed counter cannot be used this way, since it
-legitimately does not exist. Its `noDataState: Alerting` is free of false alarms
-only because the heartbeat guarantees at least one notification per channel per
-day, so the success series can never be legitimately absent. **The two hold each
-other up: do not pause or delete the heartbeat without revisiting that NoData
-choice.**
+a rule that cannot fire, reporting Normal.
+
+> **The obvious series for that rule does not work, and finding out why is the
+> most useful thing in this section.** The natural choice is
+> `lag(grafana_alerting_notifications_total[24h])`, on the reasoning that telegraf
+> writes it every 60s whether or not it increments. Telegraf can only write what
+> Grafana *exports*, and Grafana exports that counter **only transiently**, around
+> the time notifications are actually sent. Measured: sampled every 30s for 4.5
+> minutes on a healthy idle instance, `grafana_alerting_notifications_total` was
+> absent from **every** sample, while `grafana_alerting_alertmanager_receivers`
+> and `grafana_alerting_active_configurations` were present in all of them; in
+> VictoriaMetrics the notifications series exists for about six minutes after a
+> notification and then vanishes for the rest of a completely healthy hour. An
+> absence rule on it would fire forever — the third instance of the category error
+> this repo has already shipped twice.
+>
+> A trap inside the trap: an instant query issued *within five minutes* of the
+> last sample still returns it, because that is VictoriaMetrics' default lookback.
+> A vanished series looks alive for five more minutes, which is exactly long
+> enough to "confirm" it during a deploy and be wrong.
+
+So the rule watches `grafana_alerting_alertmanager_receivers`, which Grafana
+exports for its whole process lifetime and which travels the identical path
+(grafana `/metrics` → telegraf → VictoriaMetrics). Its *value* is a bonus signal:
+`state="active"` should equal the number of provisioned receivers. Its
+`noDataState: Alerting` is genuinely false-alarm-free on that series, which it
+would not have been on the counter — and it must stay inside telegraf's
+`fieldpass`, which is a hand-coupled pair called out in both files.
+
+The heartbeat still matters to this rule, but not as a dependency: it is what
+guarantees the *notifications* counter appears at least once a day, which is what
+makes `obs-alert-delivery-failing` able to observe a failure at all.
 
 **`obs-alert-delivery-heartbeat` is supposed to fire forever.** It is not broken. It
 is a dead-man's switch: one notification per channel per 24 hours, so a channel
