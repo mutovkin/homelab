@@ -242,3 +242,110 @@ groups:
                     type: lt
                     params:
                       - 1
+
+      # ---------------------------------------------------------------------
+      # The mirror #154 names. #139 gave us the ALL-sources rule and #143's
+      # follow-up the source:host one, because host ingestion can go to zero while
+      # docker volume keeps the all-sources rule Normal. The reverse gap stayed
+      # open: docker collection can stop — a wedged docker_logs source, a socket
+      # permission change, the group id under `user:` drifting — while host
+      # records keep obs-host-log-ingest-stalled Normal and the all-sources rule
+      # green on host traffic alone.
+      #
+      # PRE-GATED, because this repo has made the burstiness mistake twice (#134
+      # paged every ~30 min for 21 h on exactly this query shape against
+      # source:host, then shipped a deploy assert demanding traffic from three
+      # silent containers). The decision statistics are EMPTY-WINDOW FRACTION and
+      # MAX GAP, never gap percentiles. Measured on eq12_docker 2026-08-21, in
+      # perfect health:
+      #   10m buckets over 7d (1008):   0 empty, minimum 712 records
+      #    1m buckets over 24h (1440):  0 empty, minimum  73 records
+      #   168 hourly windows over 7d:   0 empty, minimum 4323 records
+      # So `count() < 1` over 10 minutes has a ~712x margin, and the max gap
+      # between consecutive docker records is under one minute. Docker traffic
+      # here is genuinely continuous — this is the sibling of obs-log-ingest-
+      # stalled (88x margin), NOT of the host rule that needed a heartbeat to
+      # become meaningful. Re-measure before widening or narrowing anything.
+      #
+      # SCOPE CAVEAT, stated because a caveat in an error string is where a
+      # missing conditional hides: `source:docker` is produced by BOTH
+      # eq12_docker's container Vector and n5pro_docker's native agent. One of the
+      # two dying while the other ships keeps this rule Normal. That partial case
+      # is not covered here — it is the same known shape as the fleet-wide host
+      # rule, and the per-host heartbeat rule covers HOSTS, not sources.
+      #
+      # `source:pkg` deliberately gets NO twin: those files are quiet by nature
+      # and an absence rule on them would be noise. #154 says so explicitly.
+      - uid: obs-docker-log-ingest-stalled
+        title: Docker log ingest stalled
+        condition: C
+        for: 10m
+        # Same reasoning as both rules above: for a rule whose whole job is
+        # detecting absence, "no data" IS the failure, not the healthy case.
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: No docker container lines reached VictoriaLogs in the last 10 minutes.
+          description: >-
+            `_time:10m source:docker | count()` is 0. Host syslog may still be
+            flowing, which is why neither the all-sources rule nor the source:host
+            rule catches this. Measured floor in health is 712 records per 10m
+            window, so zero means collection stopped, not that the containers went
+            quiet. Usual causes: Vector's docker_logs source wedged, the docker
+            socket bind-mount lost or its permissions changed, or Vector itself
+            down. Check `docker logs vector` on eq12_docker (the container's own
+            stderr is also in VictoriaLogs as container_name:vector, and that copy
+            survives a recreate), and that /var/run/docker.sock is still mounted.
+            SCOPE: source:docker comes from eq12_docker AND n5pro_docker, so this
+            firing means BOTH stopped; one alone keeps it Normal.
+        labels:
+          severity: critical
+          component: log-pipeline
+        data:
+          - refId: A
+            datasourceUid: PD775F2863313E6C7
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-logs-datasource
+                uid: PD775F2863313E6C7
+              queryType: stats
+              expr: "_time:10m source:docker | count() as rows"
+          # dropNN, not replaceNN — a null must not silently become a 0 and fire,
+          # nor become a number and mask a stall. See the rules above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
