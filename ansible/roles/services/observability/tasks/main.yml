@@ -49,6 +49,29 @@
     - vault_watchtower_email_from
     - vault_watchtower_email_to
 
+# #152: the Telegram channel's credentials, asserted only when the channel is
+# enabled — same filter chain, same quiet:true, same "fail BY NAME before
+# anything touches state" contract as the block above. Gated rather than
+# unconditional because the flag exists so the rest of the stack deploys on a
+# host whose vault has no Telegram keys; but with the flag ON, a missing key must
+# be a loud named failure and never a silently email-only Grafana. That is the
+# same defect class as a contact point that cannot send.
+- name: Assert Telegram alerting credentials are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined but observability_alert_telegram is true —
+      Grafana would provision a Telegram contact point that can never send, which
+      is the same silent failure #152 exists to remove. Set it with
+      `task vault:edit -- inventory/host_vars/eq12_docker/vault.yml`, or set
+      observability_alert_telegram: false to deploy email-only.
+    quiet: true
+  loop:
+    - vault_grafana_telegram_bot_token
+    - vault_grafana_telegram_chat_id
+  when: observability_alert_telegram | bool
+
 # --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
 # --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
 # (--httpAuth.* guards :8428 only), published on tcp AND udp, on 0.0.0.0/[::]. Its
@@ -159,6 +182,12 @@
       # Grafana would restart on every single deploy, forever. Same precedent as
       # _deploy's `--exclude=.env` (#139).
       - "--exclude=alerting/contact-points.yaml"
+      # alerting/notification-policies.yaml is TEMPLATED too since #152 (the
+      # routing tree branches on observability_alert_telegram). Identical
+      # mechanism, identical consequence if this line is dropped: delete:true
+      # would remove it every run, the template would write it back every run,
+      # and Grafana would restart on every deploy forever.
+      - "--exclude=alerting/notification-policies.yaml"
   register: grafana_provisioning
 
 # AFTER the synchronize, never before: delete:true runs first, and although the
@@ -187,6 +216,22 @@
   # failure, and that loud failure is itself a control (#88).
   diff: false
   register: grafana_contact_point
+
+# Templated for the same reason contact-points is, and excluded from the rsync
+# above for the same reason: the routing tree now branches on
+# observability_alert_telegram (#152) and a static file cannot.
+#
+# mode 0644, not the 0640 the contact point carries, and that difference is the
+# point: the rendered output holds receiver NAMES and label matchers only, no
+# address and no token. For the same reason this task needs no diff:false — there
+# is nothing here a --diff would leak. The secrets stay in contact-points.yaml,
+# which keeps its 0640 and its diff:false.
+- name: Template the Grafana notification policies
+  ansible.builtin.template:
+    src: grafana-notification-policies.yaml.j2
+    dest: "{{ data_mount }}/grafana/provisioning/alerting/notification-policies.yaml"
+    mode: "0644"
+  register: grafana_notification_policies
 
 # Separate from provisioning because Grafana hot-reloads provisioned dashboards —
 # a dashboard change needs no restart. Without this the first dashboard JSON ever
@@ -234,11 +279,16 @@
 # different mechanism (template, excluded from the rsync) but Grafana still only
 # reads it at startup, so a change to it that does not restart Grafana leaves
 # alerting routed at the OLD address with the play reporting converged (#139).
+# grafana_notification_policies.changed joins that club on identical grounds
+# (#152): same template-plus-exclude mechanism, same startup-only read, and a
+# routing change that does not restart Grafana leaves critical alerts going to
+# the OLD receiver set while the play reports converged.
 - name: Determine observability containers to restart for changed config
   vars:
     _targets: >-
       {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
-          + (['grafana'] if grafana_provisioning.changed or grafana_contact_point.changed else [])) | unique }}
+          + (['grafana'] if grafana_provisioning.changed or grafana_contact_point.changed
+             or grafana_notification_policies.changed else [])) | unique }}
   ansible.builtin.set_fact:
     observability_restart_targets: "{{ _targets }}"
     # grafana has its own HTTP gate below; these two are gated on staying alive.
