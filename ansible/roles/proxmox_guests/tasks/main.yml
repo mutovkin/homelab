@@ -158,7 +158,7 @@
 # because "arm64" sorts after "amd64". PVE creates the container happily with
 # `arch: arm64`; it then fails to boot with `Exec format error - Failed to exec
 # "/sbin/init"`, and only on a from-scratch build — the same rebuild-path
-# landmine class as #127/#148. Measured on n5pro 2026-08-22.
+# landmine class as #127/#148. Measured on n5pro 2026-08-21.
 #
 # One awk, no grep, deliberately: with `set -o pipefail` a grep that matches
 # nothing would abort the task with a bare rc=1 instead of letting the explicit
@@ -850,8 +850,10 @@
       CT {{ item.vmid }} ({{ item.hostname }}): mount {{ item.key }} =
       "{{ item.value }}" declares no mp= path (or more than one). Both the
       breadcrumb loop and the manifest derive their paths from mp=, so such a
-      mount would be armed by nothing while its intent record was cleared as
-      though it had been — a gate that reports itself armed and is not.
+      mount would be armed by nothing while its intent record was either cleared
+      as though it had been — a gate that reports itself armed and is not — or
+      left behind as a permanent phantom that the orphaned-intent check below
+      then stops every run on.
   vars:
     lxc_mounts_json: >-
       {%- set out = [] -%}
@@ -872,6 +874,13 @@
 # useless — it ASSIGNS failed=False, so any real read error (a broken pct, a
 # permissions problem) would be silently read as "absent" and arm the gate on a
 # live container.
+#
+# One edge this cannot discriminate: if pmxcfs is degraded, a LIVE container's
+# config can transiently read as "does not exist" and an intent record would be
+# written for it. The polarity is still the safe one — the consequence is a
+# blocked deploy plus a manual `rm` of the intent file, never data loss — but an
+# operator who meets the blocked-deploy message should confirm with
+# `pct config <vmid>` that the volume really is fresh before acknowledging.
 - name: Read LXC existence before provisioning
   become: true
   ansible.builtin.command: "pct status {{ item.vmid }}"
@@ -900,9 +909,12 @@
     state: directory
     mode: "0755"
 
-# `selectattr('rc', 'defined')` before rejectattr: a result from a skipped loop
-# (a host that declares no mount-bearing container at all) carries no rc, and
-# rejectattr on a missing attribute is an error rather than a no-op.
+# `selectattr('rc', 'defined')` is defence in depth, not a load-bearing guard:
+# the read above has no per-item `when`, so every result it produces carries an
+# rc, and a host declaring no mount-bearing container at all registers
+# `results: []` (verified) rather than results without rc. Keeping the filter
+# costs nothing and means a future `when` on that read cannot turn this loop
+# into a templating error.
 #
 # Content is deliberately STABLE (no timestamp): a run re-attempted while the
 # container is still absent must rewrite the identical bytes and report ok, not
@@ -946,7 +958,7 @@
     # and fails the whole play — for every container, on every run, not just at
     # create. It survived only because no host mixed the two forms yet (eq12 is
     # all-ostemplate, so resolved_templates never gets defined there and the
-    # Undefined chain does fall through). Measured on n5pro 2026-08-22 (#157).
+    # Undefined chain does fall through). Measured on n5pro 2026-08-21 (#157).
     ostemplate: >-
       {{ resolved_templates[item.os] if item.os is defined
       else item.ostemplate | default(proxmox_lxc_defaults.ostemplate) }}
@@ -1380,6 +1392,27 @@
   register: fresh_allocation_intents
   check_mode: false  # read-only; an absent directory yields zero files, not a failure
 
+# `find` cannot fail: an unreadable or missing directory comes back as
+# matched=0 plus a WARNING, which reads exactly like "no pending intents" — a
+# disarmed gate reported as a healthy one. So make the skip an error. In a REAL
+# run the unconditional directory create above guarantees the path exists, so a
+# skipped path is a genuine access problem. In `--check` on a host that has
+# never had a real run the create is skipped, so this would false-fire — hence
+# the guard; check mode still surfaces find's own warning where an operator can
+# see it.
+- name: Assert the fresh-allocation intent directory was actually readable
+  ansible.builtin.assert:
+    that:
+      - fresh_allocation_intents.skipped_paths | default({}) | length == 0
+    fail_msg: >-
+      Could not read {{ fresh_allocation_intent_dir }}:
+      {{ fresh_allocation_intents.skipped_paths | default({}) | dictsort
+      | map('join', ': ') | join('; ') }}. That directory is where the
+      fresh-allocation restore gate keeps its arming state, and an unreadable
+      one is indistinguishable from an empty one — refusing to continue rather
+      than report a rebuild's gate as clear on the strength of a failed read.
+  when: not ansible_check_mode
+
 - name: Compute fresh-allocation marker targets
   ansible.builtin.set_fact:
     lxc_fresh_markers: "{{ markers_json | from_json }}"
@@ -1412,6 +1445,43 @@
       {%- endfor -%}
       {{- out | to_json -}}
 
+# The gap between "has an intent record" and "produced marker targets": a vmid
+# that is still declared but whose `mounts` were removed from host_vars after the
+# intent was written yields ZERO marker entries. Nothing else in this file sees
+# it — it is not armed (no mounts to mark), not cleared (clearing keys off the
+# markers), and not stale-removed (that only fires for vmids no longer declared
+# at all). It would sit there silently, and the day `mounts` came back it would
+# arm the gate over whatever data the container had accumulated in the meantime.
+#
+# Deliberately a loud FAIL and not an auto-delete: `mounts` is create-time-only,
+# so the live container may still be carrying the un-restored volume the record
+# is about, and quietly discarding the record is the fail-OPEN half of exactly
+# the bug #148 fixed. Removing the file by hand is the acknowledgement, the same
+# shape as the manifest `rm`.
+- name: Refuse to continue with an intent record whose container declares no mounts
+  ansible.builtin.fail:
+    msg: >-
+      {{ fresh_allocation_intent_dir }}/{{ item }} records that CT {{ item }} had
+      its mounts freshly allocated and never restored, but CT {{ item }}'s
+      declaration in host_vars no longer carries any `mounts`. The gate cannot
+      arm — there is no mount path left to mark — and this record would
+      otherwise sit here unnoticed until `mounts` was declared again, at which
+      point it would arm the gate over data the container had accumulated
+      meanwhile. `mounts` is create-time-only, so the live container may well
+      still hold the un-restored volume: check `pct config {{ item }}`. Then
+      either restore the `mounts` declaration (the gate arms on the next run) or
+      delete {{ fresh_allocation_intent_dir }}/{{ item }} by hand — that
+      deletion is the explicit acknowledgement, the same as the
+      {{ fresh_allocation_manifest }} rm.
+  loop: >-
+    {{ fresh_allocation_intents.files | default([]) | map(attribute='path')
+    | map('basename')
+    | intersect(proxmox_lxcs | map(attribute='vmid') | map('string') | list)
+    | difference(lxc_fresh_markers | default([]) | map(attribute='vmid')
+    | map('string') | list) | list }}
+  loop_control:
+    label: "CT {{ item }} — intent record with no declared mounts"
+
 # The marker is written with `pct exec`, which needs the container RUNNING. A
 # freshly created mount-bearing CT declared `started: false` would therefore be
 # skipped — and a silent skip is worse than no gate at all, because the operator
@@ -1428,8 +1498,11 @@
       {{ item.path }}/.fresh-allocation breadcrumb and the
       {{ fresh_allocation_manifest }} manifest cannot be written. That manifest is
       what stops playbooks/deploy-services.yml from initialising services on an
-      empty, un-restored volume (#127). Set `started: true` for this container,
-      or drop its `mounts` declaration.
+      empty, un-restored volume (#127). Set `started: true` so the markers can be
+      written. Dropping the `mounts` declaration is NOT the easy way out: it is
+      only safe if the container was never actually created, and it must be
+      paired with removing {{ fresh_allocation_intent_dir }}/{{ item.vmid }},
+      or the next run stops on the orphaned-intent check instead.
   loop: "{{ lxc_fresh_markers | default([]) }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.path }}"
