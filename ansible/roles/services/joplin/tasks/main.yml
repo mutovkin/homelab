@@ -146,18 +146,22 @@
           - "joplin-pgdump-*.sql.partial"
           - "joplin-pgdump-*.sql.gz.partial"
       register: joplin_partial_dumps
-      when: not ansible_check_mode
+      # find is read-only, so it is safe under --check and gating it there only
+      # made the dry run LESS truthful: a real apply would sweep stranded
+      # multi-GB .partial files that the preceding --check reported nothing about
+      # (#158). check_mode: false rather than dropping the gate silently — it
+      # states that running this in check mode is deliberate.
+      check_mode: false
 
     - name: Report orphaned partial Joplin dumps
       ansible.builtin.debug:
         msg: >-
-          Removing {{ joplin_partial_dumps.files | length }} orphaned partial
+          {{ 'Would remove' if ansible_check_mode else 'Removing' }}
+          {{ joplin_partial_dumps.files | default([]) | length }} orphaned partial
           dump(s) left by a killed dump — a sign a previous run died
           mid-stream (OOM, disk full, dropped connection):
-          {{ joplin_partial_dumps.files | map(attribute='path') | join(', ') }}
-      when:
-        - not ansible_check_mode
-        - joplin_partial_dumps.files | default([]) | length > 0
+          {{ joplin_partial_dumps.files | default([]) | map(attribute='path') | join(', ') }}
+      when: joplin_partial_dumps.files | default([]) | length > 0
 
     - name: Remove orphaned partial Joplin dumps
       ansible.builtin.file:
@@ -333,7 +337,29 @@
           - "joplin-pgdump-*.sql"
           - "joplin-pgdump-*.sql.gz"
       register: joplin_backups
-      when: not ansible_check_mode
+      # Read-only, and the dry run is the ONLY place the retention decision can
+      # still be changed — see the report task below (#158).
+      check_mode: false
+
+    # The prune predicts correctly under --check on its own (file: state: absent
+    # reports changed without deleting), but a per-file loop label is not a
+    # summary. This states the decision BEFORE it is applied, which matters most
+    # in the case defaults/main.yml warns about: LOWERING joplin_backup_retention
+    # makes the next run delete the surplus, and that run is the only chance to
+    # notice (#158).
+    - name: Report the Joplin dump retention decision
+      ansible.builtin.debug:
+        msg: >-
+          {{ joplin_backups.files | default([]) | length }} Joplin dump(s) present,
+          retention {{ joplin_backup_retention | default(7) | int }} —
+          {{ 'would prune' if ansible_check_mode else 'pruning' }}
+          {{ _joplin_prune | length }}:
+          {{ _joplin_prune | map(attribute='path') | join(', ') | default('none', true) }}
+      vars:
+        _joplin_prune: >-
+          {{ (joplin_backups.files | default([]) | sort(attribute='mtime', reverse=true))
+             [joplin_backup_retention | default(7) | int :] }}
+      when: joplin_backups.files | default([]) | length > 0
 
     - name: Prune Joplin dumps beyond the retention limit
       ansible.builtin.file:
