@@ -2,7 +2,14 @@
 # Number of pre-deploy Joplin dumps to retain in {{ data_mount }}/backups. Each is
 # one file: the cluster globals (roles — kilobytes) followed by a
 # `pg_dump --create` of the joplin database only, NOT a whole-cluster pg_dumpall
-# (#142). Same shape and directory as the Vaultwarden pre-upgrade archives (#107);
+# (#142), gzip -1 compressed since #147 — `joplin-pgdump-<ts>.sql.gz`, restored
+# with `zcat`. Compression, not the #142 narrowing, is what moved the number:
+# ~309 MB per dump instead of ~633 MB, so retention 7 costs ~2.2 GB rather than
+# ~4.4 GB. Lowering this below 7 would prune existing dumps on the next deploy —
+# it is the remaining lever, deliberately left to the operator as a one-line
+# host_vars override. The prune slices `.sql` and `.sql.gz` together, so the
+# pre-#147 plain dumps age out under this same number.
+# Same shape and directory as the Vaultwarden pre-upgrade archives (#107);
 # the two use different filename patterns so their retentions never prune each
 # other, and the prune glob here is deliberately narrow enough to leave ad-hoc
 # operator dumps in the same directory alone.
