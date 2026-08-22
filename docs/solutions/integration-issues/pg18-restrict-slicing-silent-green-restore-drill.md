@@ -239,9 +239,9 @@ Both are documented at length in `ansible/roles/services/joplin/README.md` and i
   as "count the objects, don't trust that the database exists"
 - [[vector-057-silent-log-pipeline-failure]] — #73, the first recorded instance of the
   silent-green class; "assert the data arrived, not that the process is running"
-- [[create-time-only-fields-are-rebuild-declarations]] — #127 leaves the restore-before-deploy
-  step as operator discipline with no enforced gate; this doc supplies the missing
-  "and prove the restore actually restored something" half
+- [[create-time-only-fields-are-rebuild-declarations]] — #127 turned the restore-before-deploy
+  step into an enforced gate (and #148 made its arming survive an interrupted build); this doc
+  supplies the missing "and prove the restore actually restored something" half
 - [[ansible-change-loop-pitfalls]] — §6 "a skipped branch is an untested branch" and §8's
   destructive-retention arithmetic. Note this dump runs on *every* deploy, so there was no
   branch to force — running the code was never the missing evidence; restoring its output

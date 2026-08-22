@@ -88,3 +88,24 @@ proxmox_lxc_defaults:
   onboot: true
   nesting: false
   unprivileged: true
+
+# `ansible_architecture` (uname -m) -> the architecture string Proxmox prints in
+# the third column of `pveam available --section system`. Template selection
+# matches that column exactly (#157) instead of trusting sort order, so this map
+# is the one place the two vocabularies meet. Deliberately NOT consulted through
+# a `| default(...)`: an unmapped host must fail by name in the assert beside the
+# resolution task, not silently receive amd64 templates. Extend it when a host of
+# a new architecture joins the fleet.
+proxmox_template_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+
+# Fresh-allocation restore gate (#127/#148): host-side write-ahead intent dir.
+# BEFORE provisioning runs, one file per ABSENT mount-bearing declared CT is
+# written here; the marker tasks arm the gate from these files (not from the
+# transient `.changed` of the provisioning result) and remove each file only
+# after the markers are on the container. It lives on the Proxmox HOST, outside
+# the guest being built, precisely so it survives a run that dies between create
+# and marker. On a converged fleet the directory is simply EMPTY, never absent:
+# it is created (empty) on the first real run of the role and stays empty.
+fresh_allocation_intent_dir: /var/lib/ansible-fresh-allocation-intent
