@@ -1,6 +1,7 @@
 ---
 title: "The restore drill that restored nothing: PG18 restrict-nesting broke the slice, and psql exits 0 on a half-restore"
 date: 2026-08-19
+last_updated: 2026-08-21
 category: integration-issues
 module: services/joplin
 problem_type: integration_issue
@@ -87,7 +88,12 @@ inject one. With `--create` the pairing is **nested, not one span**. Measured on
 Slicing at line 63 keeps the `\unrestrict` on line 68 and drops its `\restrict` on line
 42. psql fails at 68 — after `CREATE DATABASE` on 63 has already committed.
 
-Slice from the pg_dump **section header** instead, so the pair stays balanced:
+Slice from the pg_dump **section header** instead, so the pair stays balanced.
+
+**Historical (pre-#147)** — the recipe exactly as it stood on 2026-08-19, when the
+artifacts were plain `.sql`. Kept as the dated record; **do not run it now**, because the
+`*.sql` glob silently selects a stale plain dump while both generations coexist in
+retention, and matches nothing at all once they age out:
 
 ```bash
 # ansible/roles/services/joplin/README.md — "Restoring under a scratch name"
@@ -100,6 +106,31 @@ sed -n '/^-- PostgreSQL database dump$/,$p' "$f" \
         -e 's/^ALTER DATABASE joplin /ALTER DATABASE joplin_restore_test /' \
   | docker exec -i -u postgres postgres psql -q -v ON_ERROR_STOP=1 -d postgres
 ```
+
+**Current form (#147)** — artifacts are now `joplin-pgdump-<ts>.sql.gz`. The slicing
+lesson below is unchanged and format-independent; only the front of the pipeline moved.
+The live recipe of record is
+[ansible/roles/services/joplin/README.md](../../../ansible/roles/services/joplin/README.md):
+
+```bash
+f=$(ls -t /data/backups/joplin-pgdump-*.sql.gz | head -1)
+gzip -t "$f"                                     # the artifact's own CRC32, checked first
+zcat "$f" | grep -c '^-- PostgreSQL database dump$'   # anchor must be unique: 1
+
+gzip -t "$f" && zcat "$f" | sed -n '/^-- PostgreSQL database dump$/,$p' \
+  | sed -e 's/^CREATE DATABASE joplin /CREATE DATABASE joplin_restore_test /' \
+        -e 's/^\\connect joplin$/\\connect joplin_restore_test/' \
+        -e 's/^ALTER DATABASE joplin /ALTER DATABASE joplin_restore_test /' \
+  | docker exec -i -u postgres postgres psql -q -v ON_ERROR_STOP=1 -d postgres
+```
+
+The anchor-uniqueness assert becomes a pipeline (`zcat "$f" | grep -c`) because the file
+is no longer readable in place. That is safe: `grep -c` counts every match and therefore
+reads to EOF, so it cannot SIGPIPE `zcat` — unlike `grep -q`, which exits at the first
+match and is exactly what must never appear downstream of a producer under `pipefail`.
+And `gzip -t` goes first because the exit status of a `zcat … | psql` pipeline is
+*psql's*: a missing or truncated input can otherwise present as a green exit 0 with
+nothing restored — the same silent-green shape this whole document is about.
 
 Then judge it by **counting objects on both sides**, never by the database existing:
 

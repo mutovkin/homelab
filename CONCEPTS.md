@@ -376,4 +376,21 @@ database that exists, carries the right owner, and holds nothing — so identity
 checks are guaranteed to pass and therefore carry no information. The drill is also
 version-coupled: it reads the backup tool's output format, so a server major-version
 upgrade can silently turn it into a ritual that proves nothing. Re-run it after such an
-upgrade, not only after the backup code changes.
+upgrade, not only after the backup code changes. The written recipe is part of what is
+under test, not instructions for testing something else — so the drill exercises the
+command exactly as it is published, composed and end to end, rather than a retyped
+approximation of it.
+
+### Carried verification
+Checking an artifact's content *before* a transform such as compression or encoding, then
+carrying that check across the transform with an integrity primitive the transform's own
+format provides, rather than re-checking the transformed artifact.
+
+The ordering exists because content checks here are deliberately pipeline-free — reading a
+bounded region into a variable and testing it — and re-checking a transformed artifact
+requires piping it back through a decoder, which is a different check with different failure
+modes. A stored checksum over the pre-transform bytes closes the gap without reintroducing
+that pipeline: if it validates, the transformed artifact decodes to exactly the bytes already
+vouched for. The trade is that the intermediate and the transformed artifact briefly coexist,
+which is accepted where scratch space is not the binding constraint; the streaming
+alternative that removes it is precisely what would force the checks back into a pipeline.
