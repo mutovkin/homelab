@@ -71,6 +71,20 @@ sources:
       - /var/log/unattended-upgrades/unattended-upgrades-dpkg.log
     read_from: beginning
 
+  # Vector's own health counters (#151). These are the metrics that would have
+  # shown the ~30-day silent 401 outage (vector-057) on day one:
+  # component_errors_total counts sink errors including auth failures, and
+  # component_discarded_events_total counts events dropped by a remap abort, a
+  # full buffer, a rejecting sink — or the #153 throttle above engaging on a
+  # self-ingestion flood. Nothing else in the stack can see PARTIAL loss: the
+  # ingest-stalled rules and the deploy-time assert both detect only total
+  # absence.
+  # 60s, not the 1s default: these go to a 5y-retention TSDB and per-second
+  # scrapes of ~hundreds of internal series buy nothing.
+  vector_metrics:
+    type: internal_metrics
+    scrape_interval_secs: 60
+
 # Transforms - Process and enrich logs
 transforms:
   # Bound the self-ingestion feedback loop (#153) WITHOUT deleting Vector's own
@@ -282,6 +296,25 @@ transforms:
 
 # Sinks - Where logs go
 sinks:
+  # Ship the internal metrics to VictoriaMetrics (#151). Same endpoint, protocol
+  # and auth shape telegraf already uses (files/data/telegraf/telegraf.conf), so
+  # the write path is proven rather than new.
+  # Vector's default namespace for this sink is "vector", so the series arrive as
+  # vector_component_errors_total etc. — the vector-health alert rules
+  # (files/data/grafana/provisioning/alerting/vector-health.yaml) and this prefix
+  # must stay in step. Names were confirmed against the live 0.57.0 binary after
+  # the first apply, not taken from the issue: Vector has renamed internal
+  # metrics across releases before.
+  vector_metrics_out:
+    type: prometheus_remote_write
+    inputs:
+      - vector_metrics
+    endpoint: http://victoriametrics:8428/api/v1/write
+    auth:
+      strategy: basic
+      user: "${VM_AUTH_USERNAME}"
+      password: "${VM_AUTH_PASSWORD}"
+
   # Send to VictoriaLogs
   victorialogs:
     type: loki

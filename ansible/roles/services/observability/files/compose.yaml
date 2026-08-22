@@ -140,6 +140,12 @@ services:
       # that has no `:?` guard upstream of it.
       VL_AUTH_USERNAME: ${VL_AUTH_USERNAME:-}
       VL_AUTH_PASSWORD: ${VL_AUTH_PASSWORD:-}
+      # VictoriaMetrics auth for the internal-metrics sink (#151) — same `:-`
+      # rationale as the VL pair above, and safe for the same reason only:
+      # victoriametrics' own `--httpAuth` `:?` lines abort the whole-file parse
+      # first, so these can never actually resolve empty.
+      VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}
+      VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
       # Vector 0.57 disabled ${VAR} interpolation inside config files by default.
       # vector.yaml is bind-mounted and read by Vector (not by compose), so without
       # this the sink's auth block is sent literally as "${VL_AUTH_USERNAME}" and
