@@ -809,6 +809,122 @@
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
 
+# --- Fresh-allocation restore gate: write-ahead intent (#127, #148) ---
+#
+# The marker tasks at the bottom of this file used to key off `.changed` of the
+# provisioning result — the one signal that evaporates if the run dies between
+# CT creation and the marker task (Ctrl-C, a dropped VPN, a vault prompt timing
+# out, an unrelated failure in the ~15 tasks that sit in between). Every later
+# run then reads changed=false on an already-existing container and the restore
+# gate stays silently unarmed for exactly the rebuild it exists to stop — the
+# rebuild whose /data is empty (#148). Measured: kill the play right after
+# provisioning, re-run to a fully GREEN recap, and the container ends up running
+# with an empty freshly-allocated /data, no `.fresh-allocation` breadcrumb and no
+# manifest.
+#
+# So the signal is made DURABLE BEFORE the risky operation. For every declared
+# mount-bearing CT that does not exist yet, persist one intent file on this
+# Proxmox host. The marker tasks arm from those files and delete each one only
+# after both marker artefacts are on the container, so a death anywhere in
+# between leaves the intent behind and the NEXT run arms the gate. Live,
+# long-existing containers never get an intent file and are never touched.
+#
+# Why not probe the volume instead (the issue's own suggestion)? "empty /data +
+# no manifest" cannot tell an UN-ARMED fresh allocation apart from an
+# operator-ACKNOWLEDGED greenfield build: after the documented
+# `rm {{ fresh_allocation_manifest }}` acknowledgement, /data is still empty
+# until services deploy. Probing would re-arm the gate the operator just cleared,
+# in a loop, inside a single site.yml run. The intent record makes "a fresh
+# allocation happened and was never marked" a first-class observable without
+# touching the operator acknowledgement protocol.
+#
+# Under --check the reads still run (they are read-only) but the writes are
+# skipped, which matches the provisioning module being skipped wholesale. A
+# LEFTOVER intent from a died run does surface in --check as pending marker
+# writes — drift made visible, which is the point.
+- name: Assert every declared LXC mount carries exactly one mp= path
+  ansible.builtin.assert:
+    that:
+      - (item.value.split(',') | select('match', 'mp=') | list | length) == 1
+    fail_msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}): mount {{ item.key }} =
+      "{{ item.value }}" declares no mp= path (or more than one). Both the
+      breadcrumb loop and the manifest derive their paths from mp=, so such a
+      mount would be armed by nothing while its intent record was cleared as
+      though it had been — a gate that reports itself armed and is not.
+  vars:
+    lxc_mounts_json: >-
+      {%- set out = [] -%}
+      {%- for ct in proxmox_lxcs | selectattr('mounts', 'defined') -%}
+      {%- for mp_key, mp_val in ct.mounts.items() -%}
+      {%- set _ = out.append({'vmid': ct.vmid, 'hostname': ct.hostname,
+      'key': mp_key, 'value': mp_val}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{- out | to_json -}}
+  loop: "{{ lxc_mounts_json | from_json }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.key }}"
+
+# Same discriminating shape as `Read current LXC configuration` below: rc != 0 is
+# a failure UNLESS pct said the config file does not exist, which is the whole
+# signal we are here to collect. `failed_when: false` would be worse than
+# useless — it ASSIGNS failed=False, so any real read error (a broken pct, a
+# permissions problem) would be silently read as "absent" and arm the gate on a
+# live container.
+- name: Read LXC existence before provisioning
+  become: true
+  ansible.builtin.command: "pct status {{ item.vmid }}"
+  register: lxc_pre_status
+  changed_when: false
+  failed_when:
+    - lxc_pre_status.rc != 0
+    - "'does not exist' not in lxc_pre_status.stderr"
+  check_mode: false  # read-only; this read is what the intent record is made of
+  loop: "{{ proxmox_lxcs | selectattr('mounts', 'defined') | list }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+# UNCONDITIONAL, deliberately. Creating it only when a container is missing kept
+# converged hosts marginally tidier and cost a permanent warning: `find` below
+# has no ignore-missing option, so an absent directory makes it print "Skipped
+# ... path due to this access issue" on EVERY run of an entirely healthy fleet.
+# A standing warning nobody can act on is how operators learn to skim warnings.
+# One empty directory per Proxmox host is the cheaper trade, and it makes the
+# gate's state a fixed, greppable location rather than a thing that blinks in
+# and out of existence.
+- name: Ensure the fresh-allocation intent directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ fresh_allocation_intent_dir }}"
+    state: directory
+    mode: "0755"
+
+# `selectattr('rc', 'defined')` before rejectattr: a result from a skipped loop
+# (a host that declares no mount-bearing container at all) carries no rc, and
+# rejectattr on a missing attribute is an error rather than a no-op.
+#
+# Content is deliberately STABLE (no timestamp): a run re-attempted while the
+# container is still absent must rewrite the identical bytes and report ok, not
+# churn. The content is informational for an operator reading the host — arming
+# keys off the FILENAME (the vmid) and recomputes mount paths from host_vars at
+# arming time, so a hand-edited body cannot mis-arm anything.
+- name: Record fresh-allocation intent for absent mount-bearing containers
+  become: true
+  ansible.builtin.copy:
+    dest: "{{ fresh_allocation_intent_dir }}/{{ item.item.vmid }}"
+    content: |
+      {{ item.item.hostname }}
+      {% for mp_val in item.item.mounts.values() %}
+      {{ (mp_val.split(',') | select('match', 'mp=') | list | first) | replace('mp=', '', 1) }}
+      {% endfor %}
+    mode: "0644"
+  loop: >-
+    {{ lxc_pre_status.results | default([]) | selectattr('rc', 'defined')
+    | rejectattr('rc', 'equalto', 0) | list }}
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }}) — intent recorded"
+
 - name: Provision LXC containers
   become: false
   no_log: true  # hides vault_proxmox_api_token_secret from -v/logs. NOTE: also
@@ -879,13 +995,13 @@
     # reconcile task. `state: started` below is unaffected — that dispatch
     # branch never reads `update`.
     update: false
-  # Registered for the fresh-allocation restore gate (#127): a per-item `changed`
-  # here is the ONLY signal that this run created the container, and therefore
-  # allocated it a brand-new empty /data. `no_log` censors the DISPLAY of each
-  # result, not the registered structure — `.changed` and `.item` read back fine
-  # (verified) — and everything downstream only ever prints vmid / hostname /
-  # mount path, never a module arg.
-  register: lxc_provision
+  # Deliberately NOT registered any more (#148). This result's per-item `changed`
+  # used to be what armed the fresh-allocation restore gate, and it is the one
+  # signal that does not survive a run dying between here and the marker tasks.
+  # The gate now arms from the write-ahead intent records written above, so
+  # nothing downstream reads this task's result — do not re-add a register
+  # without a consumer (this role's own schema guards exist because of vars that
+  # look like configuration and feed nothing).
   delegate_to: localhost
   loop: "{{ proxmox_lxcs }}"
   loop_control:
@@ -1233,11 +1349,37 @@
 # artefacts, one gate — deliberately: the reader must stat a SINGLE
 # mount-independent path or it drifts out of step with this loop the moment a
 # guest declares a second mount, which is exactly how the first version of this
-# gate was defeatable. `.changed` on the
-# provisioning result is the only honest "this run created it" signal available;
-# an already-existing CT exits changed=false through the `elif not force:` branch
-# and gets no marker. Under --check the module is skipped entirely, so nothing
-# below runs — the gate cannot fire spuriously in a dry run.
+# gate was defeatable.
+#
+# ARMING (#148). The targets come from the write-ahead INTENT RECORDS written on
+# this Proxmox host before provisioning ran, not from `.changed` on the
+# provisioning result. `.changed` was the only "this run created it" signal
+# available, and it was also a one-shot one: a run that created the container and
+# then died before reaching here consumed it, every later run saw changed=false,
+# and the gate stayed unarmed for exactly the rebuild it exists to stop. An
+# intent file is written before the create and deleted only after both artefacts
+# are on the container, so the arming survives an arbitrary death in between.
+#
+# Fail-closed edges, stated rather than discovered later:
+#   * markers written, operator acknowledged with `rm`, and only THEN the intent
+#     cleanup died -> the next run re-writes the manifest and the operator has to
+#     acknowledge a second time. Annoying, safe, and the correct polarity.
+#   * a pre-#148 half-died state (container created, gate never armed, no intent
+#     record because the code did not write them yet) is NOT healed
+#     retroactively. It is indistinguishable from a healthy long-lived container,
+#     and inventing a heuristic for it would re-arm the gate on live production
+#     data. None exists on this fleet; a rebuild from here on is covered.
+# Under --check the writes below are skipped, so the gate cannot FIRE in a dry
+# run — but a leftover intent record does show up as pending marker work, which
+# is drift being made visible rather than hidden.
+- name: Enumerate fresh-allocation intent records
+  become: true
+  ansible.builtin.find:
+    paths: "{{ fresh_allocation_intent_dir }}"
+    file_type: file
+  register: fresh_allocation_intents
+  check_mode: false  # read-only; an absent directory yields zero files, not a failure
+
 - name: Compute fresh-allocation marker targets
   ansible.builtin.set_fact:
     lxc_fresh_markers: "{{ markers_json | from_json }}"
@@ -1247,15 +1389,22 @@
       + proxmox_lxcs | rejectattr('started', 'defined') | list)
       | map(attribute='vmid') | list }}
   vars:
+    # Basenames are strings and `vmid` is an int — compare via `| string` or the
+    # intersection is silently always empty and the gate never arms at all.
+    fresh_allocation_intent_vmids: >-
+      {{ fresh_allocation_intents.files | default([])
+      | map(attribute='path') | map('basename') | list }}
+    # Paths are recomputed from host_vars `mounts`, exactly as before; the intent
+    # record contributes only WHICH containers are in scope.
     markers_json: >-
       {%- set out = [] -%}
-      {%- for r in lxc_provision.results | default([]) -%}
-      {%- if r.changed | default(false) -%}
-      {%- for mp_key, mp_val in (r.item.mounts | default({})).items() -%}
+      {%- for ct in proxmox_lxcs -%}
+      {%- if (ct.vmid | string) in fresh_allocation_intent_vmids -%}
+      {%- for mp_key, mp_val in (ct.mounts | default({})).items() -%}
       {%- set mp_path = (mp_val.split(',') | select('match', 'mp=') | list
       | first | default('')) | replace('mp=', '', 1) -%}
       {%- if mp_path | length > 0 -%}
-      {%- set _ = out.append({'vmid': r.item.vmid, 'hostname': r.item.hostname,
+      {%- set _ = out.append({'vmid': ct.vmid, 'hostname': ct.hostname,
       'key': mp_key, 'path': mp_path}) -%}
       {%- endif -%}
       {%- endfor -%}
@@ -1272,8 +1421,9 @@
 - name: Refuse to leave a freshly allocated mount unmarked
   ansible.builtin.fail:
     msg: >-
-      CT {{ item.vmid }} ({{ item.hostname }}) was created by this run with a
-      freshly allocated mount at {{ item.path }} ({{ item.key }}), but it is
+      CT {{ item.vmid }} ({{ item.hostname }}) carries a fresh-allocation intent
+      record — this run or an earlier one allocated its mount at {{ item.path }}
+      ({{ item.key }}) from scratch and the gate is still unarmed — but it is
       declared `started: false` so it is not running and the
       {{ item.path }}/.fresh-allocation breadcrumb and the
       {{ fresh_allocation_manifest }} manifest cannot be written. That manifest is
@@ -1329,6 +1479,41 @@
   loop: "{{ lxc_fresh_markers | default([]) | groupby('vmid') }}"
   loop_control:
     label: "CT {{ item.0 }} — {{ fresh_allocation_manifest }}"
+
+# Ordering is the whole design (#148): the intent record is written BEFORE the
+# create and cleared only HERE, after both marker artefacts are on the container.
+# Die before this task and the next run simply re-writes the same two idempotent
+# artefacts and clears the intent then. Moving this task any earlier reopens the
+# window the write-ahead record exists to close.
+- name: Clear fresh-allocation intent records once markers are written
+  become: true
+  ansible.builtin.file:
+    path: "{{ fresh_allocation_intent_dir }}/{{ item }}"
+    state: absent
+  # `map | unique` rather than the `groupby('vmid')` the manifest task above
+  # uses: that task needs the grouped mount list, this one needs each vmid once,
+  # and groupby hands Ansible a GroupTuple it warns about converting.
+  loop: "{{ lxc_fresh_markers | default([]) | map(attribute='vmid') | unique | list }}"
+  loop_control:
+    label: "CT {{ item }} — intent cleared"
+
+# An intent record whose vmid is no longer declared in host_vars would otherwise
+# sit here forever, unreadable and unclearable, and every future --check would
+# report phantom pending marker work. Removing it is safe: this directory only
+# ever holds vmids this host declared, and a container deleted from inventory has
+# no gate left to arm. `difference` on stringified vmids — the basenames are
+# strings.
+- name: Remove intent records for containers no longer declared
+  become: true
+  ansible.builtin.file:
+    path: "{{ fresh_allocation_intent_dir }}/{{ item }}"
+    state: absent
+  loop: >-
+    {{ fresh_allocation_intents.files | default([]) | map(attribute='path')
+    | map('basename') | difference(proxmox_lxcs | map(attribute='vmid')
+    | map('string') | list) | list }}
+  loop_control:
+    label: "stale intent record {{ item }} — removed"
 
 - name: Ensure LXC root disk is resized
   become: true
