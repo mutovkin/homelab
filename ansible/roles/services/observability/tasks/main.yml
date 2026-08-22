@@ -72,13 +72,48 @@
     - vault_grafana_telegram_chat_id
   when: observability_alert_telegram | bool
 
-# --- Firewall: scope the unauthenticated InfluxDB ingest port to its writer (#122) ---
-# --influxListenAddr=:8089 is a write endpoint with NO authentication of its own
-# (--httpAuth.* guards :8428 only), published on tcp AND udp, on 0.0.0.0/[::]. Its
-# only intended client is the Home Assistant VM. Hence nft_fw_protocols: [tcp, udp] —
-# governing only TCP would leave the UDP half of the same unauthenticated write port
-# wide open. The read ports (:8428 VM, :9428 VL, :3000 Grafana) are deliberately not
-# governed: NPM and operator workstations must keep reaching them.
+# The scrape half of #133. Same shape as the Telegram assert above and for the
+# same reason: a scrape job configured with an empty Bearer credential does not
+# fail loudly — it 401s on every poll and reports the target permanently down,
+# which is indistinguishable from Home Assistant actually being down. That is the
+# exact ambiguity the scrape exists to remove, so it must never be deployed blind.
+- name: Assert the Home Assistant scrape inputs are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - vault_ha_long_lived_token | default('', true) | string | trim | length > 0
+      - observability_ha_scrape_target | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      observability_ha_scrape is true but its inputs are incomplete.
+      vault_ha_long_lived_token is minted in Home Assistant (profile -> Security ->
+      Long-lived access tokens) and set with
+      `task vault:edit -- inventory/host_vars/eq12_docker/vault.yml`;
+      observability_ha_scrape_target is the host:port in host_vars. Set
+      observability_ha_scrape: false to deploy without the liveness scrape.
+    quiet: true
+  when: observability_ha_scrape | default(false) | bool
+
+# --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
+# Governed ports and why each is on the list:
+#
+#  * :8428 (VictoriaMetrics HTTP API) — added by #161. It is authenticated
+#    (--httpAuth) but it is also the stack's PRIMARY WRITE endpoint, and until now
+#    it was the only observability write surface with no allowlist at all: the
+#    protection was inverted relative to the risk, with the two narrower endpoints
+#    scoped and the broad one open to the whole flat 192.168.0.0/18. Its client
+#    set is built from CONFIGURATION, each entry verified — see host_vars.
+#  * :9428 (VictoriaLogs) — a fleet ingest endpoint since #134.
+#
+# NOT governed: :3000 (Grafana). It is an authenticated read surface whose client
+# set has not been established the way these two have; narrowing it needs its own
+# NPM-table check and its own from-a-blocked-source verification. Do not extend
+# these lists to it by analogy.
+#
+# :8089 is GONE, not merely ungoverned — #133 retired --influxListenAddr entirely
+# (it could not serve HA's HTTP-speaking integration at all), and its #122
+# allowlist went with it. nft_fw_protocols stays [tcp, udp] even though both
+# remaining ports are TCP-only listeners: the udp rules are now inert defence in
+# depth rather than a functional requirement, and dropping udp coverage would
+# silently unprotect any future udp bind on a governed port.
 #
 # Implemented by the shared nft_scoped_fw role (#114) rather than a fork of it — the
 # fail-open table, prerouting hook, drift probe and self-heal all live there. See
@@ -87,7 +122,7 @@
 # observability_firewall (lan_iface/ports) comes from host_vars; deliberately NO role
 # defaults — a host that deploys this role without defining it must fail loudly, not
 # silently publish an open write port.
-- name: Restrict the unauthenticated InfluxDB ingest port to its writer
+- name: Restrict the observability ports to their approved clients
   ansible.builtin.include_role:
     name: nft_scoped_fw
   vars:
@@ -118,6 +153,8 @@
     mode: "0755"
   loop:
     - "{{ data_mount }}/victoriametrics"
+    # Config, deliberately NOT inside victoriametrics/ — that is --storageDataPath.
+    - "{{ data_mount }}/victoriametrics-config"
     - "{{ data_mount }}/victorialogs"
     - "{{ data_mount }}/vector"
     - "{{ data_mount }}/vector/data"
@@ -156,6 +193,22 @@
   loop_control:
     label: "{{ item.src }}"
   register: observability_configs
+
+# SECRET-BEARING (#88): this renders vault_ha_long_lived_token, so `diff: false` —
+# the task still reports changed, its content never renders into the log or a
+# --diff run. 0600 for the same reason; VictoriaMetrics runs as root inside the
+# container (verified, not assumed) so it can still read it through the bind mount.
+#
+# Templated unconditionally even when the scrape is disabled: compose.yaml names
+# this path in --promscrape.config on every deploy, and VictoriaMetrics refuses to
+# start when that path is missing. The template renders a job-less file instead.
+- name: Template the VictoriaMetrics scrape config
+  ansible.builtin.template:
+    src: scrape.yml.j2
+    dest: "{{ data_mount }}/victoriametrics-config/scrape.yml"
+    mode: "0600"
+  diff: false
+  register: victoriametrics_scrape_config
 
 # delete: true so a file removed from the repo is removed from the host — otherwise
 # Grafana keeps provisioning a datasource that no longer exists in version control.
@@ -288,7 +341,8 @@
     _targets: >-
       {{ ((observability_configs.results | default([]) | selectattr('changed') | map(attribute='item.service') | list)
           + (['grafana'] if grafana_provisioning.changed or grafana_contact_point.changed
-             or grafana_notification_policies.changed else [])) | unique }}
+             or grafana_notification_policies.changed else [])
+          + (['victoriametrics'] if victoriametrics_scrape_config.changed else [])) | unique }}
   ansible.builtin.set_fact:
     observability_restart_targets: "{{ _targets }}"
     # grafana has its own HTTP gate below; these two are gated on staying alive.
@@ -346,21 +400,21 @@
 # there means nothing. 15s is comfortably past that window and past docker's
 # first restart backoff, so a crash-looping container is caught between attempts
 # or in `restarting`.
-- name: Let restarted vector/telegraf run long enough to crash on a bad config
+- name: Let restarted services run long enough to crash on a bad config
   ansible.builtin.wait_for:
     timeout: "{{ observability_settle_seconds }}"
   when:
     - not ansible_check_mode
     - observability_settle_targets | length > 0
 
-- name: Re-inspect the restarted vector/telegraf containers
+- name: Re-inspect the restarted containers
   community.docker.docker_container_info:
     name: "{{ item }}"
   register: observability_settled
   loop: "{{ observability_settle_targets }}"
   when: not ansible_check_mode
 
-- name: Assert restarted vector/telegraf are still running
+- name: Assert restarted services are still running
   ansible.builtin.assert:
     that:
       - item.exists
