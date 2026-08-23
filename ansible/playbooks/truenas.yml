@@ -1,0 +1,20 @@
+---
+# TrueNAS appliance configuration over its JSON-RPC API (#173).
+#
+# Runs on the CONTROL NODE (`nas` hosts are `ansible_connection: local`) and
+# reaches the appliance over the network. No SSH path into the NAS is opened.
+#
+# gather_facts is off: there is no remote host to gather from, the role needs no
+# facts, and running setup: against localhost for every play would only slow the
+# pipeline down.
+- name: Configure TrueNAS reporting exporters
+  hosts: nas
+  gather_facts: false
+  # ansible.cfg sets `become = True` fleet-wide, which is right for every SSH
+  # host here and wrong for this one: `nas` is ansible_connection: local, so
+  # become would try to sudo on the OPERATOR'S MACHINE and prompt for a password
+  # (measured — the first dry-run died with "sudo: a password is required").
+  # Nothing this play does needs privilege: it opens a WebSocket to an appliance.
+  become: false
+  roles:
+    - truenas_reporting

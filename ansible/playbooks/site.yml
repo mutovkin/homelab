@@ -23,3 +23,12 @@
 # that has nothing to do with the agent.
 - name: Deploy fleet log shippers
   ansible.builtin.import_playbook: log-agents.yml
+
+# AFTER deploy-services, and the order is load-bearing the same way log-agents'
+# is. This playbook tells TrueNAS to start pushing its metrics to telegraf's
+# graphite listener on eq12_docker — a listener that deploy-services.yml is what
+# creates. Configuring the exporter first would point the appliance at a closed
+# port; it would buffer and recover, but the first run would look broken for a
+# reason that has nothing to do with the appliance.
+- name: Configure the TrueNAS appliance
+  ansible.builtin.import_playbook: truenas.yml

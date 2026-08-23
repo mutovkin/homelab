@@ -167,6 +167,20 @@ observability_firewall:
     # in depth everywhere in this table rather than a functional requirement for any
     # port. Kept deliberately: dropping udp coverage would silently unprotect any
     # future udp bind on a governed port.
+    # TrueNAS Graphite ingest, added by #173. Unlike :8428 and :9428 this port is
+    # UNAUTHENTICATED — graphite plaintext has no credential and no TLS — so this
+    # allowlist is not defence in depth here, it is the only access control the
+    # port has. Exactly one source, and it stays that way: a second entry would
+    # mean a second machine can write arbitrary metrics into a 5-year TSDB.
+    #
+    # 192.168.30.20 is TrueNAS (VM 200 on n5pro), read from n5pro's ARP table and
+    # matched against VM 200's net0 MAC bc:24:11:2d:84:94 (2026-08-23). The grant
+    # is a source /32, so if that address is a DHCP lease rather than a static
+    # assignment, a lease change silently drops all NAS metrics at this firewall
+    # with no application-level error — the same failure shape as the missing
+    # vector-agent grants #160 fixed.
+    2003:
+      - 192.168.30.20/32  # TrueNAS (VM 200) — netdata graphite exporter (#173)
     9428:
       - 192.168.25.5/32   # eq12 hypervisor — native vector agent (#134)
       - 192.168.30.5/32   # n5pro hypervisor — native vector agent (#134)

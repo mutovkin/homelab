@@ -1,0 +1,166 @@
+---
+# #88's contract: credentials are asserted BY NAME, before anything touches
+# state, and under --check too — so a renamed or blanked vault var reports the
+# variable name instead of a Jinja trace from inside a module. The loop item is
+# the variable NAME, never its value; `quiet: true` trims success output and a
+# failure renders the literal expression, so no secret prints either way.
+#
+# no_log is deliberately NOT set on this task. It belongs on module ARGS (see the
+# converge task below), not on an assert whose entire job is to name what is
+# missing — no_log there would censor the failure output and blind the guard.
+- name: Assert TrueNAS API credentials are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined — roles/truenas_reporting cannot reach the
+      appliance without it. Set it with
+      `task vault:edit -- inventory/host_vars/truenas/vault.yml`.
+    quiet: true
+  loop:
+    - vault_truenas_api_username
+    - vault_truenas_api_key
+  tags: [truenas, truenas_reporting]
+
+- name: Assert the exporter definition is complete
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default=None) is not none
+    fail_msg: >-
+      {{ item }} is undefined — see inventory/host_vars/truenas/vars.yml. This
+      role deliberately ships no default for it: a guess here would either point
+      the appliance's metric stream at the wrong host or silently accept one of
+      the two hazardous appliance-side defaults.
+    quiet: true
+  loop:
+    - truenas_api_url
+    - truenas_exporter_name
+    - truenas_exporter_destination_ip
+    - truenas_exporter_destination_port
+    - truenas_exporter_prefix
+    - truenas_exporter_namespace
+    - truenas_exporter_update_every
+    - truenas_exporter_matching_charts
+  tags: [truenas, truenas_reporting]
+
+# The two appliance defaults that are hazards rather than choices, refused
+# explicitly. Both were read off the live schema on 2026-08-23:
+#
+#   matching_charts default "*"  -> the entire netdata firehose. Unfiltered this
+#     box would push thousands of series into a 5-year-retention TSDB on an N100.
+#   update_every default 1       -> one sample per second PER DIMENSION.
+#
+# These asserts exist because the failure mode is silent: an exporter configured
+# either way deploys green, stays healthy, and simply costs storage forever.
+- name: Assert the exporter is not configured to stream the whole firehose
+  ansible.builtin.assert:
+    that:
+      - truenas_exporter_matching_charts | trim != '*'
+      - truenas_exporter_matching_charts | trim | length > 0
+    fail_msg: >-
+      truenas_exporter_matching_charts is "*" (or empty), which exports every
+      netdata chart on the appliance into a 5-year-retention TSDB. This is the
+      schema default and it is refused deliberately — name the chart families you
+      want. See inventory/host_vars/truenas/vars.yml.
+    quiet: true
+  tags: [truenas, truenas_reporting]
+
+- name: Assert the exporter's sample interval is sane
+  ansible.builtin.assert:
+    that:
+      - truenas_exporter_update_every | int >= truenas_exporter_min_update_every | int
+    fail_msg: >-
+      truenas_exporter_update_every is {{ truenas_exporter_update_every }}s, below
+      the {{ truenas_exporter_min_update_every }}s floor. The appliance default is
+      1s — one sample per second per dimension — which is a storage incident, not
+      a resolution choice.
+    quiet: true
+  tags: [truenas, truenas_reporting]
+
+# no_log on the ARGS, because the API key is one of them (#88's precedent:
+# proxmox_guests does the same). The module's own messages name the exporter and
+# the changed FIELDS, never values, so a failure is still diagnosable.
+- name: Converge the Graphite reporting exporter
+  truenas_reporting_exporter:
+    api_url: "{{ truenas_api_url }}"
+    api_key: "{{ vault_truenas_api_key }}"
+    validate_certs: "{{ truenas_validate_certs | default(false) }}"
+    name: "{{ truenas_exporter_name }}"
+    enabled: "{{ truenas_exporter_enabled | bool }}"
+    attributes:
+      exporter_type: GRAPHITE
+      destination_ip: "{{ truenas_exporter_destination_ip }}"
+      destination_port: "{{ truenas_exporter_destination_port | int }}"
+      prefix: "{{ truenas_exporter_prefix }}"
+      namespace: "{{ truenas_exporter_namespace }}"
+      update_every: "{{ truenas_exporter_update_every | int }}"
+      matching_charts: "{{ truenas_exporter_matching_charts }}"
+      buffer_on_failures: "{{ truenas_exporter_buffer_on_failures | int }}"
+      send_names_instead_of_ids: "{{ truenas_exporter_send_names_instead_of_ids | bool }}"
+  # NO `no_log: true` HERE, deliberately, and this was measured rather than
+  # reasoned: with it, a failing run returns only
+  #   {"censored": "the output has been hidden due to the fact that 'no_log'..."}
+  # and the module's own error message — wrong credential, unreachable appliance,
+  # rejected field — is unreadable. That is the trap CLAUDE.md names: no_log
+  # censors FAILURE output, which blinds the very guard you added it next to.
+  # The API key is protected by the module's argument_spec (`no_log=True` on
+  # api_key), which redacts that ONE value while leaving diagnostics intact.
+  register: truenas_exporter_result
+  tags: [truenas, truenas_reporting]
+
+- name: Report what the exporter convergence changed
+  ansible.builtin.debug:
+    msg: >-
+      {{ truenas_exporter_result.msg | default('exporter task skipped') }}
+      {{ ('changed fields: ' ~ (truenas_exporter_result.changes | default({}) | list | join(', ')))
+         if truenas_exporter_result.changes | default({}) else '' }}
+  tags: [truenas, truenas_reporting]
+
+# THE SECOND RUN, inside the first. CLAUDE.md: "The test of a guard is the SECOND
+# run, on an already-converged host — a first apply is the one run where even a
+# broken guard appears to work." Re-running the module in check mode immediately
+# after the apply proves the diff logic actually converges, instead of trusting
+# that `changed: true` meant the right thing.
+#
+# Skipped under --check because there the apply above did not happen, so this
+# would correctly report "would change" and assert on a state nobody wrote.
+- name: Verify the exporter has actually converged (re-diff, read-only)
+  truenas_reporting_exporter:
+    api_url: "{{ truenas_api_url }}"
+    api_key: "{{ vault_truenas_api_key }}"
+    validate_certs: "{{ truenas_validate_certs | default(false) }}"
+    name: "{{ truenas_exporter_name }}"
+    enabled: "{{ truenas_exporter_enabled | bool }}"
+    attributes:
+      exporter_type: GRAPHITE
+      destination_ip: "{{ truenas_exporter_destination_ip }}"
+      destination_port: "{{ truenas_exporter_destination_port | int }}"
+      prefix: "{{ truenas_exporter_prefix }}"
+      namespace: "{{ truenas_exporter_namespace }}"
+      update_every: "{{ truenas_exporter_update_every | int }}"
+      matching_charts: "{{ truenas_exporter_matching_charts }}"
+      buffer_on_failures: "{{ truenas_exporter_buffer_on_failures | int }}"
+      send_names_instead_of_ids: "{{ truenas_exporter_send_names_instead_of_ids | bool }}"
+  # Same reasoning as the converge task above: argument_spec redacts the key,
+  # a task-level no_log would redact the evidence.
+  check_mode: true
+  changed_when: false
+  register: truenas_exporter_verify
+  when: not ansible_check_mode
+  tags: [truenas, truenas_reporting]
+
+- name: Assert the exporter converged
+  ansible.builtin.assert:
+    that:
+      - not truenas_exporter_verify.changed
+    fail_msg: >-
+      The reporting exporter did not converge: a read-back immediately after the
+      apply still reports pending changes
+      ({{ truenas_exporter_verify.changes | default({}) | list | join(', ') }}).
+      That means a field the module writes is not the field the appliance stores
+      — do not treat the previous task's `changed` as success.
+    success_msg: >-
+      Reporting exporter '{{ truenas_exporter_name }}' converged and re-reads clean.
+    quiet: true
+  when: not ansible_check_mode
+  tags: [truenas, truenas_reporting]
