@@ -66,7 +66,8 @@ roles/services/observability/
                 ├── per-host-ingest-health.yaml per-host shipper rule (#134)
                 ├── probe-health.yaml           three http_response rules (#139)
                 ├── vector-health.yaml          four Vector internal-metric rules (#151)
-                └── delivery-health.yaml        heartbeat + delivery-failure (#152)
+                ├── delivery-health.yaml        heartbeat + delivery-failure (#152)
+                └── truenas-health.yaml         NAS disk thermals + stream liveness (#176)
                     (contact-points.yaml AND notification-policies.yaml are
                      TEMPLATED, not files here — see templates/*.j2. Both are
                      --exclude'd from the provisioning rsync; see Alerting.)
