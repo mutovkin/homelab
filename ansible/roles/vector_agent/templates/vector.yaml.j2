@@ -63,6 +63,23 @@ timezone: "{{ timezone }}"
 
 # Sources - Where logs come from
 sources:
+  # Vector's own telemetry (#160), mirroring what #151 gave the container agent on
+  # eq12_docker. Without it this host can be losing a FRACTION of its events —
+  # a VRL remap abort, a filling disk buffer, a sink dropping batches — with every
+  # existing check still green: the per-host ingest-stalled rule and this role's
+  # end-to-end assert both detect only TOTAL absence.
+  #
+  # internal_metrics tags by Vector's detected hostname and Vector honours
+  # VECTOR_HOSTNAME over the OS hostname; templates/vector.env.j2 sets it to
+  # inventory_hostname, so these series carry host="eq12" / "n5pro" /
+  # "n5pro_docker" alongside the container's host="eq12_docker".
+  #
+  # 60s, not the 1s default: these land in a 5y-retention TSDB and per-second
+  # scrapes of hundreds of internal series buy nothing.
+  vector_metrics:
+    type: internal_metrics
+    scrape_interval_secs: 60
+
 {% if vector_agent_docker_logs | bool %}
   # Docker container logs. Present only on hosts where Docker runs; the `vector`
   # user is added to the `docker` group by this role so it can read the socket.
@@ -349,6 +366,35 @@ transforms:
 
 # Sinks - Where logs go
 sinks:
+  # Ship Vector's own telemetry to VictoriaMetrics (#160). Same protocol and auth
+  # shape the container agent and telegraf already use, so the write path is proven
+  # rather than new. Vector's default namespace for this sink is "vector", so series
+  # arrive as vector_component_errors_total etc. — the four vector-health alert
+  # rules aggregate by (component_id) with no host selector, so these join them
+  # automatically.
+  vector_metrics_out:
+    type: prometheus_remote_write
+    inputs:
+      - vector_metrics
+    endpoint: {{ victoriametrics_ingest_endpoint }}
+    auth:
+      strategy: basic
+      user: "${VM_AUTH_USERNAME}"
+      password: "${VM_AUTH_PASSWORD}"
+    # Vector probes this endpoint at startup and expects 200; VictoriaMetrics
+    # answers the remote-write path with 204 No Content, so the probe logs
+    # `Healthcheck failed. error=Unexpected status: 204 No Content` on EVERY start
+    # while the sink is working perfectly — measured on all three agents, with the
+    # series arriving in VM at the same moment (#160). The healthcheck is
+    # non-fatal and gates nothing, so its only effect was a standing ERROR that
+    # says the sink is broken when it is not, which is how operators learn to skim
+    # errors. Disabled deliberately, NOT because health does not matter: health is
+    # proven by the data instead, per-host, by obs-vector-metrics-absent
+    # (min by (host) (lag(vector_uptime_seconds[24h]))) — an assertion about
+    # ARRIVAL, which a startup probe could never make anyway.
+    healthcheck:
+      enabled: false
+
   # Send to VictoriaLogs on eq12_docker, over the LAN.
   #
   # Cleartext HTTP with basic auth, same as every other internal hop in this

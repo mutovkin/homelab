@@ -29,14 +29,19 @@
       - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
     fail_msg: >-
       {{ item }} is empty or undefined, so this host cannot authenticate to
-      VictoriaLogs and Vector would come up, stay up, and silently drop every batch
-      on a 401 (docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md).
-      It lives in ansible/inventory/group_vars/all/vault.yml since #134 —
+      VictoriaLogs (vl_*) or VictoriaMetrics (vm_*) and Vector would come up, stay
+      up, and silently drop every batch on a 401
+      (docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md).
+      Both pairs live in ansible/inventory/group_vars/all/vault.yml — vl_* since
+      #134, vm_* moved there from host_vars/eq12_docker by #160 for exactly the
+      same reason (host_vars are invisible to other hosts) —
       `task vault:edit -- inventory/group_vars/all/vault.yml`.
     quiet: true
   loop:
     - vault_vl_auth_username
     - vault_vl_auth_password
+    - vault_vm_auth_username
+    - vault_vm_auth_password
 
 # systemd's EnvironmentFile parser strips ONE surrounding pair of double quotes and
 # takes the contents literally. A value that itself contains a `"` would therefore
@@ -89,12 +94,14 @@
   loop:
     - vault_vl_auth_username
     - vault_vl_auth_password
+    - vault_vm_auth_username
+    - vault_vm_auth_password
 
 # Defined in group_vars/all/vars.yml, derived from eq12_docker's inventory address
 # and the :9428 publish in roles/services/observability/files/compose.yaml. Asserted
 # here so a rename fails by name rather than templating an empty endpoint into
 # vector.yaml — which Vector accepts at validate time and then fails on at runtime.
-- name: Assert the VictoriaLogs endpoints are set and non-empty
+- name: Assert the VictoriaLogs and VictoriaMetrics endpoints are set and non-empty
   ansible.builtin.assert:
     that:
       - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
@@ -105,6 +112,7 @@
   loop:
     - victorialogs_ingest_endpoint
     - victorialogs_query_endpoint
+    - victoriametrics_ingest_endpoint
 
 # --- The host-log stream Vector reads ----------------------------------------
 # FIRST, and that ordering is the point: Vector's only host-log input is

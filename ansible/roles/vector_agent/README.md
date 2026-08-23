@@ -74,7 +74,8 @@ that adds a sixth, or it silently stops guarding:
 2. the `docker_logs` source and its `parse_docker` transform, present only where
    `vector_agent_docker_logs` is true;
 3. Jinja escaping, and `timezone` from a Jinja var rather than the container's `${TZ}`;
-4. no `internal_metrics` source or metrics sink (#151, container-only — see below);
+4. ~~no `internal_metrics` source or metrics sink~~ — CLOSED by #160; the agents now
+   export self-telemetry exactly as the container does (see below);
 5. no `throttle_vector_own` transform (#153, container-only: a systemd unit does not
    read its own stderr back through `docker_logs`, so there is no loop to bound).
 
@@ -87,11 +88,30 @@ Two properties of the rendered file worth knowing before editing it:
   agent that agreed with the container only by accident of the host having tzdata is
   not a property to rely on. Only zone-less `parse_timestamp` calls read it —
   `parse_syslog`'s RFC5424 timestamps carry their own offset.
-- **`internal_metrics` is NOT exported from these agents.** #151 scoped Vector's
-  self-telemetry to the container only, so the four `obs-vector-*` alert rules cover
-  eq12_docker's Vector and nothing else. The agents' own partial-loss blindness is
-  tracked in **#160**; their coverage today is the per-host ingest rule plus this
-  role's own end-to-end ingest assert on every run.
+- **`internal_metrics` IS exported from these agents (#160).** This section used to
+  say the opposite: #151 scoped Vector's self-telemetry to the container, so the four
+  `obs-vector-*` rules covered eq12_docker and nothing else, and these three hosts
+  were blind to PARTIAL loss — a VRL remap abort, a filling disk buffer, a sink
+  dropping batches — while the per-host ingest rule and this role's end-to-end assert
+  detected only TOTAL absence. **That gap is closed.** Each agent now has an
+  `internal_metrics` source and a `prometheus_remote_write` sink to VictoriaMetrics,
+  and because `VECTOR_HOSTNAME` is `inventory_hostname` the series carry
+  `host="eq12"` / `"n5pro"` / `"n5pro_docker"` beside the container's
+  `host="eq12_docker"`. Measured after the first apply: four `vector_uptime_seconds`
+  series, one per host.
+
+  Three consequences worth knowing before editing this:
+  - The sink needs `VM_AUTH_*`, which is why `vault_vm_auth_*` MOVED to
+    `group_vars/all/vault.yml` — host_vars are invisible to other hosts, the same
+    reason `vault_vl_auth_*` moved there in #134.
+  - It needs an nftables grant on `:8428`. Without it the writes are dropped at the
+    firewall with NO application-level error: Vector stays up and reports nothing.
+    The approved-source list lives in `host_vars/eq12_docker/vars.yml`.
+  - `healthcheck.enabled: false` on that sink is deliberate. VictoriaMetrics answers
+    the remote-write path with `204 No Content` and Vector's probe expects `200`, so
+    it logged `Healthcheck failed` on every start while the sink worked perfectly.
+    Health is proven by ARRIVAL instead — `obs-vector-metrics-absent`, now grouped
+    `by (host)` so one healthy agent cannot mask a dead one.
 
 ## The four systemd traps
 

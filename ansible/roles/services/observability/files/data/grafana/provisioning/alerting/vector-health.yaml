@@ -256,6 +256,18 @@ groups:
         # Vector has never exported internal metrics or VictoriaMetrics lost the
         # series — either way the three other rules in this group are silently
         # unable to fire, and a rule that cannot fire is worse than no rule.
+        #
+        # `min BY (HOST)`, not a bare `min` (#160). That is not cosmetic labelling:
+        # a bare min collapses every agent into ONE value, so the healthiest host
+        # sets the result and a single quiet agent is MASKED by its peers. It was
+        # correct while eq12_docker's container was the only exporter; #160 gives
+        # eq12, n5pro and n5pro_docker the same internal_metrics sink, so from four
+        # exporters onward the bare form would report Normal while one of them was
+        # dead. Grouping evaluates each host on its own AND names it in the alert.
+        # The [24h] window is what makes a stopped host visible at all: its series
+        # stops receiving samples but remains in the lookback, so lag() keeps
+        # climbing for it — a host absent for more than 24h leaves the result set
+        # entirely, and only the whole-query NoData below still covers that.
         noDataState: Alerting
         execErrState: Alerting
         isPaused: false
@@ -292,7 +304,7 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              expr: "min(lag(vector_uptime_seconds[24h]))"
+              expr: "min by (host) (lag(vector_uptime_seconds[24h]))"
               instant: true
               range: false
               intervalMs: 60000
