@@ -1,0 +1,287 @@
+{
+  "uid": "ha-devices",
+  "title": "Home Assistant — Vacuum & Misc Sensors",
+  "description": "Roborock telemetry plus the sensors that do not fit the climate or air-quality views.",
+  "tags": [
+    "home-assistant",
+    "devices"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Vacuum cleaning area",
+      "description": "Per-run and lifetime cleaned area.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "{__name__=\"m²_value\"}",
+          "legendFormat": "{{entity_id}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "areaM2",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "pointSize": 5
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Vacuum battery & cleaning time",
+      "description": "Battery percentage and run duration on one axis — the shape of a full clean cycle.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "{__name__=\"%_value\", entity_id=\"roborock_s7_battery\"}",
+          "legendFormat": "battery %",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "{__name__=\"s_value\", entity_id=\"roborock_s7_cleaning_time\"}",
+          "legendFormat": "cleaning time (s)",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "pointSize": 5
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Illuminance",
+      "description": "Lux from the multisensors — a reasonable proxy for whether a room is in use.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "{__name__=\"lx_value\"}",
+          "legendFormat": "{{entity_id}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "lux",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "pointSize": 5
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Atmospheric pressure",
+      "description": "A sharp fall usually precedes weather within 6-12 hours.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "{__name__=\"hPa_value\"}",
+          "legendFormat": "{{entity_id}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pressurehpa",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "pointSize": 5
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}
