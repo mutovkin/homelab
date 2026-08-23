@@ -152,7 +152,7 @@ delivery-path). Routing is no longer "all by email" — see
 | `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-vector-discarding-events` | Vector is discarding events (#151) | `sum by (component_id) (increase(vector_component_discarded_events_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-vector-component-errors` | Vector component errors (#151) | `sum by (component_id) (increase(vector_component_errors_total[15m]))` > 0, `for: 0s` | OK |
-| `obs-vector-metrics-absent` | Vector metrics export stopped (#151) | `min(lag(vector_uptime_seconds[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-vector-metrics-absent` | Vector metrics export stopped (#151, #160) | `min by (host) (lag(vector_uptime_seconds[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
 | `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
@@ -169,6 +169,12 @@ non-obvious one.
 **Absence must be owned exactly once**, or one dead component pages three times.
 `obs-vector-metrics-absent` owns absence for the whole `vector_*` family;
 `obs-alert-delivery-heartbeat` owns it for the delivery path.
+
+Since #160 that rule groups **`by (host)`**, and that is not cosmetic labelling: a
+bare `min` collapses every exporter into ONE value, so the healthiest host sets the
+result and a single quiet agent is masked by its peers. That was correct while the
+container was the only exporter; with four it would report Normal while one was
+dead.
 
 And **a Prometheus counter does not exist until something increments it**. Measured
 on the live Grafana before these rules were written:
@@ -194,6 +200,19 @@ construction until these metrics existed.
 5y-retention TSDB, per-second scrapes of hundreds of series buy nothing) and a
 `prometheus_remote_write` sink to the same VictoriaMetrics endpoint telegraf
 already writes to.
+
+**Fleet-wide since #160.** #151 scoped this to the container, so these four rules
+covered `eq12_docker` and nothing else. `roles/vector_agent` now renders the same
+source and sink on `eq12`, `n5pro` and `n5pro_docker`, which write to `:8428` over
+the LAN — so all four hosts are covered and the rules needed no change beyond the
+`by (host)` above (they already aggregate `by (component_id)` with no host
+selector). Two things travel with it: `vault_vm_auth_*` moved to
+`group_vars/all/vault.yml` (host_vars are invisible to other hosts) and the three
+agent IPs were added to the `:8428` nftables allowlist — without that grant the
+writes are dropped at the firewall with no application-level error. The sink sets
+`healthcheck.enabled: false` because VictoriaMetrics answers the remote-write path
+with `204 No Content` while Vector's probe expects `200`, which logged a
+`Healthcheck failed` ERROR on every start while the sink worked perfectly.
 
 **Which counter covers what is not the obvious split, and it was measured on
 0.57.0 rather than assumed** (both counters are absent in health, so they were
