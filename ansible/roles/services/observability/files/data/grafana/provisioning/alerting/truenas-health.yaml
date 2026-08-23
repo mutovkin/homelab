@@ -1,0 +1,328 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — TrueNAS disk thermals and stream liveness (#176)
+#
+# WHY THE LIVENESS RULE SHIPS WITH THE TEMPERATURE RULES, NOT AFTER THEM.
+# A temperature rule alone is a false sense of safety. If the exporter stalls,
+# truenas_disk_temp_temp simply stops arriving, a `> 47` rule sees nothing, and
+# it sits GREEN over a cooking array. #173 measured exactly that failure mode:
+# TrueNAS reports a reporting exporter as enabled and correct while netdata has
+# not loaded it, and no method reachable with REPORTING_WRITE forces it. A green
+# deploy is not evidence of delivery — so absence has to be somebody's alarm, and
+# here it is truenas-metrics-absent's.
+#
+# METRIC NAMES AND LABELS MEASURED off the live 26.0 stream on 2026-08-23 (#173),
+# not copied from the community graphite mapping, which is 23.10-era and already
+# wrong about the disk-temperature path on this box.
+#
+# ── TWO PROPERTIES OF truenas_disk_temp_temp THAT SHAPE EVERY RULE BELOW ──────
+#
+# 1. IT IS SPARSE. It updates every few MINUTES, not every 60s like the rest of
+#    the stream — a 5-minute window is legitimately empty on a perfectly healthy
+#    array. That is why every query below wraps the selector in
+#    last_over_time(...[30m]) instead of reading the instant value: without it
+#    the rules would flap between OK and NoData continuously in normal operation,
+#    and a flapping thermal alarm is one you learn to ignore. 30m is ~6x the
+#    observed update interval — wide enough to always contain a sample, narrow
+#    enough that a genuinely stale reading cannot masquerade as current for long.
+#
+# 2. THE BOOT DISK LIES. _devicename_sda is the 64G virtual scsi0 disk; it has no
+#    SMART and netdata reports its temperature as **0, not null**. A fabricated
+#    zero would drag any min/avg panel down and, worse, would make an "average
+#    array temperature" rule structurally incapable of firing. It is excluded by
+#    the serial-based selector below rather than by an explicit != — the selector
+#    is an allowlist, which fails closed.
+#
+# ── HDD SCOPING IS BY SERIAL, AND THAT IS INTERIM ────────────────────────────
+# 47C is a warning for a 7200rpm Exos and an ordinary Tuesday for an NVMe (those
+# run to 60-70C by design), so an unscoped threshold would either page for
+# healthy SSDs or be set so high it never protects the HDDs. The Graphite stream
+# keys temperature by serial+lunid and carries NO media type, so the five
+# spinning disks are named explicitly.
+#
+# >>> THIS LIST GOES STALE WHEN A DRIVE IS REPLACED. <<<
+# A swapped drive silently drops out of the allowlist and is monitored by nothing
+# — failing OPEN, which is the one direction that matters here. #174's API poller
+# exports a media-type label (disk.temperatures returns plain sdb/nvme0n1 plus
+# type); when it lands, replace the serial regex with that label and delete this
+# paragraph. Until then, a drive swap is a change to THIS file.
+#
+# Serials verified against the appliance 2026-08-23 (all ST26000NM000C, 26TB):
+#   ZXA07GGS ZXA02DNC ZXA19LRP ZXA1Q6VK ZXA02XYW
+#
+# ── NoData POLICY, PER RULE ──────────────────────────────────────────────────
+# Absence is owned EXACTLY ONCE, by truenas-metrics-absent — the same convention
+# vector-health.yaml follows. The two thermal rules are noDataState: OK because
+# their series is sparse by nature; making them Alerting would page on every
+# ordinary gap between samples AND duplicate the liveness rule three times over.
+groups:
+  - orgId: 1
+    name: truenas-health
+    folder: Observability
+    # 1m — the fastest useful cadence given a 60s push interval. The operator
+    # asked to be told immediately; this plus `for: 0s` puts notification within
+    # roughly one to two minutes of the sensor reading. Nothing in this chain can
+    # do better: netdata samples, then pushes on its own 60s schedule.
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      - uid: truenas-hdd-temp-warning
+        title: TrueNAS HDD temperature above 47C
+        condition: C
+        # for: 0s — report the first breach. The operator explicitly asked to be
+        # told immediately rather than after a sustained period.
+        for: 0s
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: >-
+            TrueNAS disk {{ $labels.disk }} is at {{ $values.B }}C (warning above 47C).
+          description: >-
+            A 26TB Exos drive is running warmer than its normal 38-41C band.
+            This is an EARLY WARNING, well inside the drive's rated operating
+            range — it means look, not act. Common benign causes: a scrub or
+            resilver driving sustained load, or high ambient temperature.
+            Check the NAS dashboard for whether the whole array rose together
+            (ambient/airflow) or one drive diverged (that drive, or its slot).
+            If several drives cross together, suspect chassis airflow before
+            suspecting the disks.
+            The critical companion rule fires at 52C.
+            NOTE: this rule watches five drives BY SERIAL
+            (ZXA07GGS ZXA02DNC ZXA19LRP ZXA1Q6VK ZXA02XYW). If a drive has been
+            replaced, it is not being watched — see the header of
+            files/data/grafana/provisioning/alerting/truenas-health.yaml.
+        labels:
+          severity: warning
+          # Routed to BOTH channels by the nas-thermal route in
+          # notification-policies. A warning that only reaches email would not
+          # meet "tell me immediately", and relabelling it `critical` to get
+          # Telegram would make severity meaningless.
+          component: nas-thermal
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # last_over_time, NOT an instant read — see property 1 in the header.
+              # `by (disk)` keeps one alert instance per drive so a notification
+              # names WHICH disk; the notification policy groups on `disk` for the
+              # same reason it groups on hostname and integration.
+              expr: >-
+                max by (disk) (last_over_time(truenas_disk_temp_temp{host="truenas",
+                disk=~"_serial_lunid_(ZXA07GGS|ZXA02DNC|ZXA19LRP|ZXA1Q6VK|ZXA02XYW)_.*"}[30m]))
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN: a null must never become 0 and read as a cold
+          # disk (#108's lesson). With no numeric value the rule falls through to
+          # noDataState, which is OK here deliberately.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 47
+      # ---------------------------------------------------------------------
+      - uid: truenas-hdd-temp-critical
+        title: TrueNAS HDD temperature above 52C
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: >-
+            TrueNAS disk {{ $labels.disk }} is at {{ $values.B }}C (CRITICAL above 52C).
+          description: >-
+            Act now. Sustained operation at this temperature shortens drive life
+            and, across an array, raises the chance of a second failure during a
+            resilver — the scenario that turns a degraded pool into a lost one.
+            Check chassis airflow and fans first; if a scrub or resilver is
+            running, consider pausing it until temperature returns to the normal
+            38-41C band.
+            The 47C warning rule will already have fired for this drive.
+        labels:
+          # critical routes to homelab-critical = both channels, unconditionally.
+          severity: critical
+          component: nas-thermal
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: >-
+                max by (disk) (last_over_time(truenas_disk_temp_temp{host="truenas",
+                disk=~"_serial_lunid_(ZXA07GGS|ZXA02DNC|ZXA19LRP|ZXA1Q6VK|ZXA02XYW)_.*"}[30m]))
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 52
+      # ---------------------------------------------------------------------
+      - uid: truenas-metrics-absent
+        title: TrueNAS metrics stopped arriving
+        condition: C
+        # 10m: three missed 60s pushes would be 3m, but the exporter buffers on
+        # failure (buffer_on_failures: 10) and a brief blip self-heals. 10m is
+        # long enough not to page on one, short enough that a genuinely dead
+        # stream is caught well before the thermal rules have been blind for an
+        # hour.
+        for: 10m
+        # THE ONE RULE THAT OWNS ABSENCE, and the only one here that may be
+        # Alerting on NoData. Its sentinel is deliberately NOT the disk
+        # temperature series: that one is sparse, so it cannot distinguish
+        # "quiet" from "dead". truenas_arcstats_size_size is exported
+        # CONTINUOUSLY for as long as the stream is alive (measured: every 60s),
+        # which is exactly the property #151 established a liveness sentinel must
+        # have — never a counter that only exists once it is non-zero.
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: TrueNAS has not delivered metrics for 10 minutes — the thermal alerts are BLIND.
+          description: >-
+            No samples from the TrueNAS Graphite exporter. While this fires, the
+            47C and 52C disk-temperature rules cannot fire at all: no data means
+            no breach detected, so treat this as a thermal-monitoring outage and
+            not merely a missing dashboard.
+            KNOWN CAUSE, measured in #173: TrueNAS reports the reporting exporter
+            as enabled and correct while netdata has NOT loaded it, and nothing
+            reachable with REPORTING_WRITE forces a reload. Reading the config
+            back therefore proves nothing. What worked was toggling it through
+            Ansible and waiting a few minutes:
+              ansible-playbook playbooks/truenas.yml -e truenas_exporter_enabled=false
+              ansible-playbook playbooks/truenas.yml
+            Also check, in order: the exporter still exists
+            (playbooks/truenas.yml is green), telegraf is up on eq12_docker and
+            listening on :2003, and the nftables allowlist still grants
+            192.168.30.20/32 — that grant is a source /32, so if the NAS ever
+            moves address its metrics are dropped silently with no
+            application-level error.
+            Runbook:
+            docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md
+        labels:
+          severity: critical
+          component: nas-thermal
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: 'count(last_over_time(truenas_arcstats_size_size{host="truenas"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # lt 1 rather than eq 0: if the series vanishes entirely the query
+          # returns NOTHING, not zero, and the rule reaches noDataState —
+          # Alerting, above. This threshold catches the partial case where the
+          # count collapses while something still reports.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
