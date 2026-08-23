@@ -13,3 +13,10 @@
 # treated as a mistake rather than a choice. 60 is what host_vars sets; anything
 # under this is refused.
 truenas_exporter_min_update_every: 10
+
+# Whether the exporter actually pushes. A variable rather than a literal because
+# disabling it is a real operation, not a hypothetical: #176's ingest-stalled
+# alert rule can only be trusted once it has been WATCHED to fire, and flipping
+# this off is how you make it fire — through Ansible, not by hand in the UI.
+#   ansible-playbook playbooks/truenas.yml -e truenas_exporter_enabled=false
+truenas_exporter_enabled: true

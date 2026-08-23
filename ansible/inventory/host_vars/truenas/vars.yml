@@ -55,7 +55,12 @@ truenas_exporter_destination_port: 2003
 # left to the appliance so the metric names do not change if the NAS is ever
 # renamed — the dashboards and alert rules are keyed off these.
 truenas_exporter_prefix: truenas
-truenas_exporter_namespace: nas
+# The namespace segment becomes the `host` LABEL on every series (the graphite
+# templates map it there). It is the appliance's identity in the TSDB, so it is
+# spelled the way you would name the machine — not "nas". Without this, TrueNAS
+# metrics inherit telegraf's own hostname and appear to originate from the
+# collector, making them indistinguishable from eq12_docker's own series.
+truenas_exporter_namespace: truenas
 
 # 60s, NOT the schema default of 1. One sample per second per dimension into a
 # 5-year-retention TSDB on an N100 would be an incident, not a tuning nit. This
@@ -75,7 +80,19 @@ truenas_exporter_update_every: 60
 # reporting.netdata_graphs, and the real IDs on 26.0 are only knowable by
 # looking at the stream. Narrow this once the capture has been read — the
 # telegraf allowlist is what bounds storage in the meantime.
-truenas_exporter_matching_charts: "system.* cpu.* disk.* disk_temp* net.* nvme* zfs* truenas*"
+# MEASURED chart IDs, read off the live stream on 2026-08-23 — this is no
+# longer the capture pattern. Nine families, and each one is here because it
+# actually appeared, not because a doc said it might.
+#
+# Deliberately ABSENT, both confirmed by their absence from the capture:
+#   nfsd.*      TrueNAS 26.0 exports no NFS chart at all. ens19 throughput
+#               (the host-only NFS bridge) is the proxy; see #175.
+#   pool health TRUENAS_pool_usage carries used/total/available but no state
+#               or scrub. Those come from pool.query in #174.
+truenas_exporter_matching_charts: >-
+  system.* net.* truenas_arcstats.* truenas_cpu_usage.*
+  truenas_disk_stats.* truenas_disk_stats_busy.* truenas_disk_temp.*
+  truenas_meminfo.* truenas_pool_usage.*
 
 # Schema defaults, declared explicitly so `attributes` is sent WHOLE on update
 # (its schema forbids additional properties and marks four fields required, so a

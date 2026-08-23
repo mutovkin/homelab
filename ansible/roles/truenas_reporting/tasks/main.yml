@@ -86,7 +86,7 @@
     api_key: "{{ vault_truenas_api_key }}"
     validate_certs: "{{ truenas_validate_certs | default(false) }}"
     name: "{{ truenas_exporter_name }}"
-    enabled: true
+    enabled: "{{ truenas_exporter_enabled | bool }}"
     attributes:
       exporter_type: GRAPHITE
       destination_ip: "{{ truenas_exporter_destination_ip }}"
@@ -123,7 +123,7 @@
     api_key: "{{ vault_truenas_api_key }}"
     validate_certs: "{{ truenas_validate_certs | default(false) }}"
     name: "{{ truenas_exporter_name }}"
-    enabled: true
+    enabled: "{{ truenas_exporter_enabled | bool }}"
     attributes:
       exporter_type: GRAPHITE
       destination_ip: "{{ truenas_exporter_destination_ip }}"
