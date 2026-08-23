@@ -31,6 +31,15 @@ nut_server:
 # managed (the role skips it). Loopback is always allowed implicitly. Set in
 # host_vars, e.g. nut_allowed_clients: ["192.168.25.5/32"] — entries must be
 # IPv4 CIDRs of prefix /1../32 (asserted by the shared nft_scoped_fw role).
+#
+# DELIBERATELY A FLAT LIST, and the one nft_scoped_fw consumer that is not
+# `<svc>_firewall.ports` (#150). The other four declare a port -> sources map
+# because they govern several ports; NUT governs exactly one, and that port is
+# already declared as nut_server.listen_port, which is what upsd actually binds.
+# Writing it a second time as a `ports:` key would create a second source of
+# truth that can silently drift from the port the daemon is listening on — the
+# role composes the map at the include_role boundary instead
+# (tasks/server.yml). Converged shape rejected for that reason, not overlooked.
 nut_allowed_clients: []
 
 # Client defaults (override in host_vars when nut_role == 'client')
