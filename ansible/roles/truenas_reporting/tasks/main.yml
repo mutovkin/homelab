@@ -97,7 +97,14 @@
       matching_charts: "{{ truenas_exporter_matching_charts }}"
       buffer_on_failures: "{{ truenas_exporter_buffer_on_failures | int }}"
       send_names_instead_of_ids: "{{ truenas_exporter_send_names_instead_of_ids | bool }}"
-  no_log: true
+  # NO `no_log: true` HERE, deliberately, and this was measured rather than
+  # reasoned: with it, a failing run returns only
+  #   {"censored": "the output has been hidden due to the fact that 'no_log'..."}
+  # and the module's own error message — wrong credential, unreachable appliance,
+  # rejected field — is unreadable. That is the trap CLAUDE.md names: no_log
+  # censors FAILURE output, which blinds the very guard you added it next to.
+  # The API key is protected by the module's argument_spec (`no_log=True` on
+  # api_key), which redacts that ONE value while leaving diagnostics intact.
   register: truenas_exporter_result
   tags: [truenas, truenas_reporting]
 
@@ -134,7 +141,8 @@
       matching_charts: "{{ truenas_exporter_matching_charts }}"
       buffer_on_failures: "{{ truenas_exporter_buffer_on_failures | int }}"
       send_names_instead_of_ids: "{{ truenas_exporter_send_names_instead_of_ids | bool }}"
-  no_log: true
+  # Same reasoning as the converge task above: argument_spec redacts the key,
+  # a task-level no_log would redact the evidence.
   check_mode: true
   changed_when: false
   register: truenas_exporter_verify
