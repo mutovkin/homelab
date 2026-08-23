@@ -286,6 +286,30 @@ hypervisor reports; only the other one actually builds anything. It follows that
 ordinary converged run says nothing about these fields, so their correctness cannot be
 inferred from the absence of drift — the opposite of how a Reconcile task is verified.
 
+### Frozen provisioned object
+A configuration object an application imports from a declarative file once, stores its
+own private copy of, and thereafter re-imports only when a counter inside that file
+advances — so the file stops governing the running object without ever ceasing to
+describe it.
+
+The trap is that the file stays valid, stays deployed, and stays the obvious source of
+truth, while every later edit to it — a changed endpoint, a rotated credential — has no
+effect for the object's whole life. It is the same boundary a Create-time-only field
+draws, inverted in the way that matters: a create-time-only field is a boundary the role
+declares and an operator can read in inventory, whereas this one lives inside the
+application and the deployment pipeline knows nothing about it. Content-addressed
+delivery cannot detect it either, because the file genuinely did change and genuinely
+did arrive.
+
+Two rules follow. The counter is part of every edit rather than metadata attached to one,
+so a change that does not advance it is incomplete by construction. And the only check
+that observes the object's real state is one that makes the application exercise it
+against its dependency using the stored copy — proving the process is alive, or that the
+file is present and correct on disk, proves nothing here. That makes it a Silent-green
+failure by construction, and the compensating control belongs in the deploy rather than
+in the monitoring, because monitoring that queries through the frozen object shares its
+fault and cannot report it.
+
 ### Inventory-name label
 The identity a per-host signal is tagged with, which is by convention the name the
 inventory uses for that host and not any name the host can discover about itself.
