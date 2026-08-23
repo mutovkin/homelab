@@ -1,0 +1,85 @@
+---
+# TrueNAS SCALE 26.0 (VM 200 on n5pro) — metrics export (#173).
+#
+# This host is reached over its JSON-RPC/WebSocket API from the CONTROL NODE,
+# never over SSH: `ansible_connection: local` in hosts.yml means every task in
+# the `nas` group runs locally and talks to 192.168.30.20 over the network. No
+# SSH trust path into the appliance is opened, and `ansible_host` below is
+# consumed only to build the API URL.
+ansible_host: 192.168.30.20
+
+truenas_api_url: "wss://{{ ansible_host }}/api/current"
+
+# The appliance serves its own self-signed certificate. Same posture as the PVE
+# nodes (community.proxmox `validate_certs: false` at every call site in
+# roles/proxmox_guests) — and unlike those, this session carries an API key that
+# is useless without the WebSocket already being established to the pinned LAN
+# address inside the scoped allowlist.
+truenas_validate_certs: false
+
+# Roles granted to the `ansible-ctrl` privilege on the appliance, mirrored here
+# so "what may Ansible do to the NAS" is reviewable in git rather than living
+# only in the TrueNAS UI. ONE LINE PER REASON — this is a manifest, not a
+# convenience list, and the temptation to collapse it into FULL_ADMIN is the
+# thing it exists to resist.
+#
+# Verified live 2026-08-23: with REPORTING_WRITE alone, pool.query, user.query,
+# privilege.query and system.reboot are ALL denied. Least privilege here is a
+# measured fact, not a configuration intention.
+truenas_granted_roles:
+  # Required by reporting.exporters.create/update. Includes REPORTING_READ
+  # (measured: reporting.exporters.query succeeds with WRITE alone), which is
+  # also what makes disk.temperatures readable for #174 at no extra grant.
+  - REPORTING_WRITE
+# NOT granted yet, each waiting on the change that needs it:
+#   POOL_READ  -> #174, pool health/capacity/scrub (the netdata stream has NO
+#                 pool graph at all, so this is the only source)
+#   DISK_READ  -> #174, optional model/slot labels
+
+# === Graphite reporting exporter ===
+#
+# TrueNAS pushes netdata metrics to telegraf's socket_listener on eq12_docker.
+# GRAPHITE is not a preference — it is the only exporter type the appliance
+# supports (measured: reporting.exporters.exporter_schemas -> ['GRAPHITE'], and
+# exporter_type is a schema `const`).
+truenas_exporter_name: victoriametrics
+
+# eq12_docker (CT 101) — the observability stack's telegraf. Pinned by IP rather
+# than name: this value is also what the nftables allowlist on the receiving end
+# is scoped to, and a name that resolves differently would silently be dropped
+# there with no application-level error.
+truenas_exporter_destination_ip: 192.168.25.15
+truenas_exporter_destination_port: 2003
+
+# Path shape is prefix.namespace.chart.dimension. Both are pinned rather than
+# left to the appliance so the metric names do not change if the NAS is ever
+# renamed — the dashboards and alert rules are keyed off these.
+truenas_exporter_prefix: truenas
+truenas_exporter_namespace: nas
+
+# 60s, NOT the schema default of 1. One sample per second per dimension into a
+# 5-year-retention TSDB on an N100 would be an incident, not a tuning nit. This
+# also matches telegraf's own agent interval, so nothing is resampled.
+truenas_exporter_update_every: 60
+
+# THE CARDINALITY GATE, and the cheaper of the two — it drops charts at the
+# appliance, before anything crosses the LAN. The second gate is the namepass
+# allowlist on telegraf's socket_listener.
+#
+# The schema default is "*" — the entire netdata firehose. The role REFUSES to
+# converge that value; see the assert in tasks/main.yml.
+#
+# This pattern is deliberately wider than the final target: it is the CAPTURE
+# value. The exporter's matching_charts matches raw netdata chart IDs, which are
+# a lower-level namespace than the 40 middleware graph names enumerated via
+# reporting.netdata_graphs, and the real IDs on 26.0 are only knowable by
+# looking at the stream. Narrow this once the capture has been read — the
+# telegraf allowlist is what bounds storage in the meantime.
+truenas_exporter_matching_charts: "system.* cpu.* disk.* disk_temp* net.* nvme* zfs* truenas*"
+
+# Schema defaults, declared explicitly so `attributes` is sent WHOLE on update
+# (its schema forbids additional properties and marks four fields required, so a
+# partial patch would drop them). Declaring every field also makes the module's
+# diff total rather than partial.
+truenas_exporter_buffer_on_failures: 10
+truenas_exporter_send_names_instead_of_ids: true

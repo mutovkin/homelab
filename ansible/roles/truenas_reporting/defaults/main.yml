@@ -1,0 +1,15 @@
+---
+# Deliberately NO defaults for the exporter's destination, prefix, namespace,
+# update_every or matching_charts.
+#
+# Same reasoning as observability_firewall (roles/services/observability): a host
+# that runs this role without defining those in host_vars must fail loudly. A
+# default here could only ever be a guess, and two of the five have appliance-side
+# defaults that are actively hazardous (update_every: 1, matching_charts: "*") —
+# so a role default that silently stood in for a missing host_var would be the
+# worst of both worlds. See inventory/host_vars/truenas/vars.yml.
+
+# The one genuinely safe default: the guard floor below which update_every is
+# treated as a mistake rather than a choice. 60 is what host_vars sets; anything
+# under this is refused.
+truenas_exporter_min_update_every: 10

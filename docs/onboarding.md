@@ -78,7 +78,8 @@ Install these on your control machine before starting:
 
 ```bash
 brew install go-task uv
-uv tool install ansible-core --with ansible --with proxmoxer --with requests
+uv tool install ansible-core --with ansible --with proxmoxer --with requests \
+  --with "truenas-api-client @ git+https://github.com/truenas/api_client.git@8d7e37383717aea15ce46167cfcd92325acbcd8a"
 ```
 
 **Arch Linux (Omarchy 3.6):**
@@ -86,8 +87,21 @@ uv tool install ansible-core --with ansible --with proxmoxer --with requests
 ```bash
 sudo pacman -S uv
 yay -S go-task-bin
-uv tool install ansible-core --with ansible --with proxmoxer --with requests
+uv tool install ansible-core --with ansible --with proxmoxer --with requests \
+  --with "truenas-api-client @ git+https://github.com/truenas/api_client.git@8d7e37383717aea15ce46167cfcd92325acbcd8a"
 ```
+
+> **Why `truenas-api-client` is pinned to a git SHA.** TrueNAS 26.0 removed the
+> REST API; the replacement speaks JSON-RPC 2.0 over a WebSocket, which
+> `ansible.builtin.uri` cannot do, so `roles/truenas_reporting` uses the official
+> client. That client is **not published on PyPI** — it installs only from git and
+> reports its version as `0.0.0`, so it cannot be pinned by version at all. Per
+> the pinning policy in `ansible/requirements.yml` (#137), an unpinned git `HEAD`
+> sitting in the deploy path would be worse than anything that policy currently
+> guards against: it would differ between the two operator machines and change
+> underneath both without a commit. Bump the SHA deliberately.
+
+
 
 **Verify on either platform:**
 

@@ -197,6 +197,19 @@ services:
     image: telegraf:latest
     container_name: telegraf
     restart: unless-stopped
+    ports:
+      # TrueNAS Graphite ingest (#173). TCP only — netdata's graphite exporter
+      # speaks plaintext TCP, and unlike :9428 there is no udp half to cover.
+      #
+      # This is a NEW UNAUTHENTICATED WRITE SURFACE on this host: graphite
+      # plaintext carries no auth and no encryption, and the LAN is one flat
+      # 192.168.0.0/18 with no segmentation. The nftables allowlist scoping it to
+      # 192.168.30.20/32 is the ONLY control on it — see observability_firewall in
+      # inventory/host_vars/eq12_docker/vars.yml. That is the same shape as the
+      # :8089 listener #133 retired, and it is accepted here only because it is
+      # scoped to a single source. Widening that source list is a security
+      # decision, not a config tweak.
+      - "2003:2003"
     security_opt:
       - "apparmor:unconfined"
       # DELIBERATELY NO `no-new-privileges:true` here — the other four services in
