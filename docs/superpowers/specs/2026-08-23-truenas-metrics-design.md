@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-23
 **Issues:** #173 (ingest path), #174 (API poller), #175 (dashboard), #176 (alerting)
-**Status:** approved; #173 implementing
+**Status:** #173 landed and verified live. #174/#175/#176 open. Also filed: #177 (UPS metrics), #178 (fleet-wide host labelling).
 
 ## Goal
 
@@ -172,14 +172,14 @@ mapping as the source of truth for what exists:
 | ARC / L2ARC | **Yes** — ~20 graphs (`arcsize`, `demand*hitpercentage`, `l2arc*`, ...) |
 | Network | **Yes** — `interface`: `ens18` (vmbr1 LAN), `ens19` (vmbr2 NFS) |
 | UPS | **Yes** — `upscharge`, `upsload`, `upsvoltage`, `upsruntime`, `upstemperature`, ... (out of scope here) |
-| **Pool state / capacity / scrub** | **NO** — no pool or zfs-pool graph exists |
+| **Pool capacity** | **YES** — `truenas_pool_usage` (`used`/`total`/`available`). CORRECTED after the capture: the middleware graph list does not mirror netdata's chart IDs. **State and scrub are still absent** and remain #174's job. |
 | **NFS op stats** | **NO** — no `nfsd` graph exists |
 
 Two consequences, both corrections to the earlier plan:
 
-1. **Pool health, capacity and scrub state are not in the stream at all.** They
-   move wholly to the API poller (#174) via `pool.query`, which makes `POOL_READ`
-   a hard requirement of that issue rather than an optional extra.
+1. **Pool health and scrub state are not in the stream** (capacity is — see the
+   correction above). They move to the API poller (#174) via `pool.query`, which
+   makes `POOL_READ` a hard requirement of that issue rather than an optional extra.
 2. **NFS operation statistics are unavailable** from this source. The practical
    substitute is `ens19` throughput — that interface exists only to carry NFS to
    CT 201 over the host-only bridge, so its traffic *is* the NFS traffic, minus
@@ -240,3 +240,27 @@ min/avg panel.
 - **#174** — API poller sidecar; adds `POOL_READ` (+ optional `DISK_READ`).
 - **#175** — NAS dashboard, on measured names.
 - **#176** — five alert rules, thresholds from observed series.
+
+## Post-implementation notes (#173, verified live 2026-08-23)
+
+Final shape, measured rather than planned:
+
+- `truenas_exporter_namespace` is **`truenas`**, not `nas`. The graphite templates
+  map that segment to the **`host` label**, which is what makes NAS series
+  attributable to the NAS — telegraf's `[agent] hostname` would otherwise stamp
+  them with the collector's name. Fleet-wide version: #178.
+- **42 metric names / 128 live series** — inside the 250–400 budget.
+- Example series:
+  `truenas_disk_temp_temp{host="truenas", disk="_serial_lunid_ZXA02DNC_5000c500ea1bdba8"}`
+- HDDs measured 38–41 °C, NVMe 33 °C.
+
+Three facts every consumer of these metrics must respect:
+
+1. **A green deploy does not mean data is flowing.** The exporter reads back
+   correct while netdata has not loaded it; delivery began only after minutes.
+   Verify with a VictoriaMetrics query; the durable control is #176's
+   ingest-stalled rule.
+2. **`truenas_disk_temp` is sparse** — minutes between samples. Rules need a
+   lookback wider than the update interval or they flap to NoData.
+3. **`_devicename_sda` reports 0, not null.** Exclude the virtual boot disk from
+   panels and alerts.
