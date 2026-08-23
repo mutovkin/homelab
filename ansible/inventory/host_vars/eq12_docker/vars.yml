@@ -117,15 +117,20 @@ observability_firewall:
     #    `http://victoriametrics:8428` over the observability compose network
     #    (172.20.0.0/24) — confirmed in the provisioned datasource, telegraf.conf
     #    and vector.yaml — so they never traverse eth0 and a grant would do nothing.
-    #  * the three native vector agents (eq12, n5pro, n5pro_docker) write LOGS to
-    #    :9428 only: roles/vector_agent has no internal_metrics source and no
-    #    prometheus_remote_write sink (#151). #160 WOULD CHANGE THAT — whoever
-    #    implements it must add those three IPs HERE, or the new metrics are dropped
-    #    at this firewall with no application-level error.
+    #  * (was: the three native vector agents write logs only. #160 CHANGED THAT
+    #    and added them below, which is what that note asked for.)
     8428:
       - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vm.moutovkin.com -> deb-docker.lan:8428 (verified 2026-08-22)
       - 192.168.25.10/32  # Home Assistant VM (VM 100) — influxdb push (#133)
       - 192.168.48.0/24   # operator workstation subnet — vmui
+      # The three native Vector agents, added by #160: roles/vector_agent now has an
+      # internal_metrics source and a prometheus_remote_write sink, so these hosts
+      # write to :8428/api/v1/write over the LAN. Without these grants the metrics
+      # are dropped at this firewall with NO application-level error — Vector stays
+      # up and reports nothing, which is the failure #160 exists to remove.
+      - 192.168.25.5/32   # eq12 hypervisor — native vector agent (#160)
+      - 192.168.30.5/32   # n5pro hypervisor — native vector agent (#160)
+      - 192.168.30.15/32  # n5pro_docker (CT 201) — native vector agent (#160)
     # VictoriaLogs HTTP API — governed since #134, which turned it from a port only
     # this host's own container wrote to into a FLEET INGEST ENDPOINT. The LAN is one
     # flat 192.168.0.0/18 with no segmentation, so nftables is the only thing

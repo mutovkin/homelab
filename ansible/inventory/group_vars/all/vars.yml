@@ -40,4 +40,10 @@ watchtower_timezone: "America/Los_Angeles"
 # compose service name. Plain HTTP with basic auth, like every other internal hop
 # in this homelab; TLS on the ingest path is a tracked follow-up, not an oversight.
 victorialogs_ingest_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:9428/insert"
+# Sibling of the above for the native agents' internal_metrics sink (#160). A LAN
+# address, not the `victoriametrics` compose name: the agents are not on the
+# observability docker network. The path is /api/v1/write (prometheus_remote_write),
+# not /insert. Reaching it requires an nftables grant — the :8428 manifest in
+# host_vars/eq12_docker/vars.yml lists each approved source.
+victoriametrics_ingest_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:8428/api/v1/write"
 victorialogs_query_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:9428/select/logsql/query"
