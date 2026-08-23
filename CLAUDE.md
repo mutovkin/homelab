@@ -348,6 +348,42 @@ Hard-won lessons — check here before debugging from scratch.
   `status=ERROR, got response code 401`), which `services/observability` now asserts for
   every uid read out of the provisioning file itself.
 
+- **A configured TrueNAS reporting exporter is not a DELIVERING one — and forwarded
+  metrics get stamped with the forwarder's identity.** `reporting.exporters.create`
+  returns success and the object reads back exactly right (`enabled: true`, correct
+  destination) while netdata never loads it: measured, no connection attempt for
+  minutes after a green apply, with the nftables drop counter at **0** — the proof it
+  was not the firewall, because the appliance never sent a packet to drop. Delivery
+  started only after minutes plus an `enabled` false→true cycle. So the evidence is a
+  VictoriaMetrics query, never the playbook recap, and the durable control is an
+  ingest-stalled alert rather than a once-per-deploy assert. Three more from the same
+  change. (1) **Graphite measurement names collide**: TrueNAS exports `net.ens18` and
+  `system.load`, and the receiving telegraf runs `inputs.net`/`system`/`cpu`/`disk`/`mem`
+  against its OWN host — an untemplated mapping merges two machines under identical
+  metric names, visible only as impossible dashboard values. Prefix every measurement
+  `truenas_` and re-assert with `namepass`. (2) **`host` is the collector's**: telegraf's
+  `[agent] hostname` is stamped on metrics it merely RECEIVED, so NAS series claimed to
+  come from the collector; map the exporter's `namespace` segment to the `host` label so
+  attribution comes from config, not from whoever forwarded it (fleet-wide version: #178).
+  (3) **`truenas_disk_temp` is SPARSE** (minutes, not 60s) so a 5-minute window is
+  legitimately empty on a healthy array — rules need a lookback wider than the update
+  interval — and `_devicename_sda` reports **0, not null**, a fabricated zero that drags
+  down min/avg panels while the API's `disk.temperatures` returns `null` for the same
+  disk. Also: 26.0 REMOVED the REST API (JSON-RPC over WebSocket only, so `uri` cannot
+  reach it), `truenas_api_client` is git-only and reports version `0.0.0` (pin the SHA),
+  and `privilege.local_groups`/`user.group` take database entry IDs, NOT GIDs.
+  See [docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md](docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md).
+- **`become = True` in `ansible.cfg` is fleet-wide and breaks every
+  `ansible_connection: local` play** — it sudoes on the OPERATOR'S machine and dies with
+  `sudo: a password is required`. Set `become: false` on the play. Its sibling: interpreter
+  discovery picks the system python rather than the `uv tool` env where the role's
+  dependencies live, so pin `ansible_python_interpreter: "{{ ansible_playbook_python }}"`
+  — never a literal path, which would work on exactly one of the two operator platforms.
+  Related, and already its own rule: `no_log: true` on a TASK censors the FAILURE output
+  too, so a module error reads `{"censored": ...}` and wrong-credential, unreachable-host
+  and rejected-field all look identical. Put `no_log=True` on the argument_spec PARAMETER
+  instead — one value redacted, diagnostics intact.
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.

@@ -8,7 +8,7 @@
 | -------- | -------- | ------------------------------------- | ----------------------------------------------- |
 | **8428** | HTTP     | **Primary HTTP API and Web UI** (`/vmui`), incl. the **InfluxDB v1 HTTP API** | Grafana queries, Telegraf writes, **Vector's `internal_metrics` remote-write (#151)**, Manual queries; the only working path for an InfluxDB HTTP client |
 | **8089** | TCP/UDP  | **InfluxDB line protocol, raw socket** — enabled, **unauthenticated**, and **no client has ever written to it** (#133) | nothing, today |
-| **2003** | TCP/UDP  | Graphite protocol — **not enabled in this deployment** | — |
+| **2003** | TCP/UDP  | Graphite protocol on **VictoriaMetrics** — still **not enabled**; TrueNAS ingest lands on *telegraf's* :2003 instead (#173), deliberately — see below | — |
 | **4242** | TCP      | OpenTSDB protocol — **not enabled in this deployment** | — |
 
 > `compose.yaml` passes only `--influxListenAddr=:8089`. There is no
@@ -530,3 +530,21 @@ ss -s
 **Last Updated**: August 20, 2026 — the Home Assistant / :8089 sections were
 corrected against measured evidence from the #133 diagnosis, and 2003/4242 were
 marked not-enabled. No runtime configuration was changed; #133 remains open.
+
+## Telegraf :2003 — TrueNAS Graphite ingest (#173)
+
+| Port     | Protocol | Purpose | Used By |
+| -------- | -------- | ------- | ------- |
+| **2003** | TCP      | Graphite plaintext ingest, **unauthenticated** | TrueNAS (VM 200, 192.168.30.20) netdata reporting exporter |
+
+Note the asymmetry with VictoriaMetrics' own :2003 row above: **VM's graphite
+listener is still off, and this port belongs to telegraf.** That is a deliberate
+choice, not a coincidence of numbering — routing TrueNAS through telegraf buys an
+authenticated hop to VM, per-source filtering, and graphite-path-to-label
+templating, none of which VM's raw listener offers. Enabling VM's listener as
+well would recreate the `:8089` shape #133 retired.
+
+This is the **only unauthenticated write surface in the stack**. Graphite
+plaintext carries no credential and no TLS, so its nftables allowlist
+(`observability_firewall.ports[2003]`, source `192.168.30.20/32`) is not defence
+in depth — it is the sole access control. One source, and it stays that way.
