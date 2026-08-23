@@ -38,7 +38,7 @@ The service provides:
 Because a read-write docker socket is root-equivalent on the host, access to the
 UI port is restricted by an Ansible-managed **fail-open nftables table**
 (`inet portainer_fw`, built by the shared `roles/nft_scoped_fw` from the per-port
-allowlist `portainer_fw_ports` — #114). That allowlist is **per-host** and lives in
+allowlist `portainer_firewall.ports` — #114). That allowlist is **per-host** and lives in
 `inventory/host_vars/<host>/vars.yml` (#140); the role default is `{}`, so a host
 that deploys this role without declaring one fails the `nft_scoped_fw` assert
 rather than silently inheriting another host's reverse-proxy IP. Allowed sources

@@ -67,7 +67,7 @@ These are the controls the role actually enforces, not aspirations:
   rule is *invisible* to docker-published ports; see
   [docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md](../../../../docs/solutions/integration-issues/nftables-input-hook-inert-for-docker-published-ports.md).
   The table is built by the shared `roles/nft_scoped_fw` (#114) from the per-port
-  allowlist `vaultwarden_fw_ports`, which is **per-host** and lives in
+  allowlist `vaultwarden_firewall.ports`, which is **per-host** and lives in
   `inventory/host_vars/<host>/vars.yml` (#140) — the role default is `{}`, so a host
   that deploys this role without declaring one fails the `nft_scoped_fw` assert rather
   than silently inheriting another host's reverse-proxy IP. Vaultwarden runs on

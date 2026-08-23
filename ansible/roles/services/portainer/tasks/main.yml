@@ -13,7 +13,7 @@
   vars:
     nft_fw_name: portainer
     nft_fw_description: Portainer UI firewall (Ansible-managed nftables table inet portainer_fw)
-    nft_fw_ports: "{{ portainer_fw_ports }}"
+    nft_fw_ports: "{{ portainer_firewall.ports }}"
 
 - name: Deploy Portainer via the shared service pipeline
   ansible.builtin.include_role:

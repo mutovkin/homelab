@@ -14,4 +14,5 @@
 #
 # Per-port shape ({port: [source, ...]}, #114): sources are approved for THIS
 # port only. Entries must be IPv4 CIDRs of prefix /1../32 (asserted).
-portainer_fw_ports: {}
+portainer_firewall:
+  ports: {}

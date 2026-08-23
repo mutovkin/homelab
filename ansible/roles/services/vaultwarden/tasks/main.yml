@@ -13,7 +13,7 @@
   vars:
     nft_fw_name: vaultwarden
     nft_fw_description: Vaultwarden HTTP firewall (Ansible-managed nftables table inet vaultwarden_fw)
-    nft_fw_ports: "{{ vaultwarden_fw_ports }}"
+    nft_fw_ports: "{{ vaultwarden_firewall.ports }}"
 
 # --- Admin token shape --------------------------------------------------------
 # Vaultwarden accepts a non-PHC ADMIN_TOKEN as a LITERAL plaintext token — it does not
