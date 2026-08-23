@@ -89,10 +89,43 @@ truenas_exporter_update_every: 60
 #               (the host-only NFS bridge) is the proxy; see #175.
 #   pool health TRUENAS_pool_usage carries used/total/available but no state
 #               or scrub. Those come from pool.query in #174.
+# PATTERNS ARE PREFIXES WITHOUT A TRAILING DOT, and that is load-bearing.
+# `truenas_pool_usage.*` matched NOTHING: netdata requires the dot to be present
+# in the chart ID, and that chart's ID has no sub-part (its graphite path is
+# truenas.truenas.truenas_pool_usage.used — four segments, not five). Measured:
+# with the dotted form, pool usage, net and system all silently stopped arriving
+# while the dot-suffixed families kept working. A pattern that matches nothing
+# fails SILENTLY — no error, no log, just a family missing from the TSDB — which
+# is why the deploy stayed green through it.
+# WHAT THIS PATTERN CAN AND CANNOT GET YOU — three controlled experiments,
+# 2026-08-23, all with the same outcome:
+#
+#   1. `system.* net.* truenas_pool_usage.* ...`  (dotted, per-family)
+#   2. `system* net* truenas*`                    (dotless prefixes)
+#   3. this pattern, restored verbatim from the run that first captured them
+#
+# Under ALL THREE, only the truenas_* families plus truenas_disk_temp arrive.
+# net, system and truenas_pool_usage do not. They appeared in the very first
+# capture and have not reproduced since, across several netdata reloads — which
+# matches TrueNAS having dropped most stock netdata collectors from 25.04
+# onward. So their absence is the APPLIANCE's doing, not this pattern's, and
+# widening it further will not bring them back.
+#
+# Consequence, and it is why #174 grew: pool capacity/health, system load and
+# uptime, and network throughput must come from the JSON-RPC API, not this
+# stream. Do not add panels or alert rules that depend on them arriving here.
+#
+# Kept deliberately wide rather than trimmed to the five families that do
+# arrive: the cost is measured at 128 series (budget 250-400), and a pattern
+# that already covers a family costs nothing if the appliance starts exporting
+# it again after an upgrade. Trimming would convert a future restoration into a
+# silent gap.
+#
+# EVERY pattern failure here is SILENT — no error, no log, just a family missing
+# from the TSDB while the deploy stays green. The only way to know what a pattern
+# yields is to query VictoriaMetrics per family after changing it.
 truenas_exporter_matching_charts: >-
-  system.* net.* truenas_arcstats.* truenas_cpu_usage.*
-  truenas_disk_stats.* truenas_disk_stats_busy.* truenas_disk_temp.*
-  truenas_meminfo.* truenas_pool_usage.*
+  system.* cpu.* disk.* disk_temp* net.* nvme* zfs* truenas*
 
 # Schema defaults, declared explicitly so `attributes` is sent WHOLE on update
 # (its schema forbids additional properties and marks four fields required, so a
