@@ -71,6 +71,12 @@ policies:
       - hostname
       - component_id
       - integration
+      # `disk` joins them for #176, on identical grounds: the TrueNAS thermal
+      # rules carry one instance per DRIVE, and the whole point of the
+      # notification is WHICH disk is hot. Without this key, two drives crossing
+      # 47C together — the airflow case, i.e. the one that matters most — merge
+      # into a single [FIRING:2] naming neither.
+      - disk
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s
@@ -115,6 +121,21 @@ policies:
         object_matchers:
           - ["heartbeat", "=", "true"]
         repeat_interval: 24h
+      # TrueNAS thermal warnings (#176) page on both channels DESPITE being
+      # severity=warning. The operator asked to be told immediately when a disk
+      # crosses 47C, and the root receiver is email-only — a warning that waits
+      # for someone to check mail does not meet that. The alternative was to
+      # label a 47C early-warning `critical`, which would have made severity
+      # stop meaning anything on the one dimension it is read for.
+      #
+      # Narrow BY DESIGN: it matches the component, not the severity, so it
+      # cannot quietly promote every future warning in the fleet to a page.
+      # Placed BEFORE the severity=critical route only for readability — the two
+      # cannot both match, since this one requires severity=warning.
+      - receiver: homelab-critical
+        object_matchers:
+          - ["component", "=", "nas-thermal"]
+          - ["severity", "=", "warning"]
       # Critical rules page on BOTH channels once Telegram exists. homelab-critical
       # degrades to email-only while it does not (see the contact-points
       # template), which is why this route renders unconditionally — a route to a
