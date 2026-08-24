@@ -20,10 +20,21 @@ header: an entity absent from VictoriaMetrics is evidence of death only if it wa
 expected to report inside that window. See docs/solutions/conventions/
 instant-query-cannot-prove-a-series-is-live.md.
 
+Reproducibility, stated precisely because the naive claim is false. Everything
+derived from VictoriaMetrics is a pure function of (--start, --end) and repeats
+byte-for-byte. HA's /api/states is NOT: it is a live source, and an entity that
+changes state now moves its `last_changed` past a pinned `end`, which shrinks the
+G3 positive-control set (measured 2026-08-24: ~11 entities/min, the only two lines
+that moved across four pinned re-runs). So --ha-states-json pins that side too:
+the first run captures the payload, later runs replay it, and only then is stdout
+byte-identical end to end. Snapshots carry personal home-state data -- keep them
+out of the repo (the script refuses a path inside it).
+
 Usage:
     export ANSIBLE_VAULT_PASSWORD_FILE=/path/to/.vault_password
     scripts/reconcile-ha-entities.py                     # widest available window
     scripts/reconcile-ha-entities.py --start 1787443200 --end 1787541146
+    scripts/reconcile-ha-entities.py --ha-states-json /tmp/ha-states.json
 
 Exit codes: 0 = all guards passed, 2 = a guard failed (do not publish the report).
 """
@@ -297,6 +308,50 @@ def fetch_ha_states(ha_url: str, token: str) -> list[dict]:
     return states
 
 
+def load_or_capture_ha_states(
+    ha_url: str, token: str, snapshot: Path | None, repo_root: Path
+) -> list[dict]:
+    """HA states, optionally pinned to a snapshot file so a re-run is reproducible.
+
+    Provenance goes to STDERR, never stdout: a "captured" vs "replayed" line on
+    stdout would make the capture run and the replay run differ, which is exactly
+    the property the snapshot exists to establish.
+    """
+    if snapshot is None:
+        return fetch_ha_states(ha_url, token)
+
+    snapshot = snapshot.expanduser().resolve()
+    # /api/states is a full readout of a home: occupancy, device names, presence.
+    # It must never land in the repo, where a stray `git add -A` would publish it.
+    if snapshot == repo_root or repo_root in snapshot.parents:
+        raise Failure(
+            f"refusing to use an HA snapshot inside the repo ({snapshot}): "
+            "/api/states carries personal home-state data. Put it in a scratch "
+            "directory outside the working tree."
+        )
+
+    if snapshot.is_file():
+        try:
+            states = json.loads(snapshot.read_text())
+        except json.JSONDecodeError as exc:
+            raise Failure(f"HA snapshot {snapshot} is not valid JSON: {exc.msg}") from None
+        if not isinstance(states, list) or not states:
+            raise Failure(f"HA snapshot {snapshot} does not hold a non-empty list")
+        print(f"HA states REPLAYED from snapshot {snapshot} ({len(states)} entities)",
+              file=sys.stderr)
+        return states
+
+    states = fetch_ha_states(ha_url, token)
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    # Written 0600: see the personal-data note above.
+    fd = os.open(str(snapshot), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(states, handle)
+    print(f"HA states CAPTURED to snapshot {snapshot} ({len(states)} entities)",
+          file=sys.stderr)
+    return states
+
+
 def fetch_vm_series(
     vm_url: str, auth: str, start: int, end: int, match: str
 ) -> list[dict]:
@@ -360,6 +415,11 @@ def main() -> int:
     parser.add_argument("--vm-url", default=DEFAULT_VM_URL)
     parser.add_argument("--ha-url", default=DEFAULT_HA_URL)
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
+    parser.add_argument("--ha-states-json", default=None,
+                        help="pin the HA side: capture /api/states here on first use, "
+                             "replay it afterwards. Required to make stdout "
+                             "byte-identical across runs, because HA is a live source. "
+                             "Must live OUTSIDE the repo -- it holds home-state data.")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -399,7 +459,12 @@ def main() -> int:
     emit()
 
     # -- HA side -------------------------------------------------------------
-    states = fetch_ha_states(args.ha_url, ha_token)
+    states = load_or_capture_ha_states(
+        args.ha_url,
+        ha_token,
+        Path(args.ha_states_json) if args.ha_states_json else None,
+        repo_root,
+    )
     del ha_token
 
     ha: dict[str, dict] = {}
@@ -456,6 +521,11 @@ def main() -> int:
     never_seen_numeric = [e for e in never_seen if numeric_capable(ha[e]["state"])]
     never_seen_string = [e for e in never_seen if not numeric_capable(ha[e]["state"])]
     vm_only = sorted(vm_seen - set(ha))
+    # VM has seen these, but HA now reports them unavailable/unknown -- the
+    # freshest-dead / flapping shape. Without a name they vanish into the gap
+    # between "VM distinct pairs" and "writable AND VM-seen".
+    seen_now_absent = sorted(vm_seen & set(absent_by_design))
+    seen_now_update = sorted(vm_seen & set(excluded_update))
 
     silence = {e: end - last_sample[e] for e in seen_writable if e in last_sample}
     seen_no_ts = sorted(e for e in seen_writable if e not in last_sample)
@@ -475,6 +545,10 @@ def main() -> int:
     for name in sorted(set(unjoinable))[:10]:
         emit(f"      {name}")
     emit(f"writable AND VM-seen                  {len(seen_writable):5d}")
+    emit(f"VM-seen, now unavailable/unknown       {len(seen_now_absent):5d}"
+         "   seen in-window, HA reports it gone now")
+    emit(f"VM-seen, domain=update                 {len(seen_now_update):5d}"
+         "   expected 0 (G4 subtraction)")
     emit(f"writable NEVER seen                   {len(never_seen):5d}")
     emit(f"  numeric-capable state (candidates)  {len(never_seen_numeric):5d}")
     emit(f"  string-only state (INCONCLUSIVE)    {len(never_seen_string):5d}")
@@ -552,6 +626,24 @@ def main() -> int:
     emit(f"   restore-burst indicator: {recent_all}/{len(ha)} "
          f"({recent_all / len(ha) * 100:.1f}%) of ALL entities report last_changed "
          f"inside the same {g3_window // 60}min -- a restore rewrites this to ~100%.")
+
+    # P1 -- structural invariant, added after the stop-point-1 review rather than
+    # pre-registered with G1-G5. Every VM-seen pair must land in exactly one
+    # bucket; an unexplained remainder means entities are being silently absorbed
+    # by the report instead of reported.
+    partition = (
+        len(seen_writable) + len(seen_now_absent) + len(seen_now_update) + len(vm_only)
+    )
+    p1_ok = partition == len(vm_seen)
+    emit(f"P1 VM-seen partition sums     {'PASS' if p1_ok else 'FAIL'}"
+         f"   {len(seen_writable)} writable + {len(seen_now_absent)} now-absent + "
+         f"{len(seen_now_update)} update + {len(vm_only)} vm_only = {partition} "
+         f"vs {len(vm_seen)} distinct pairs")
+    if not p1_ok:
+        failures.append(
+            f"P1: buckets sum to {partition} but VM holds {len(vm_seen)} distinct "
+            "pairs -- some VM-seen entities are unaccounted for"
+        )
 
     g4_domain_hits = len(update_domain_series)
     g4_name_hits = len(update_prefixed_names)
@@ -652,6 +744,21 @@ def main() -> int:
         else:
             emit(f"   {entity}")
     if not vm_only:
+        emit("   (none)")
+    emit()
+
+    emit(f"-- VM-SEEN BUT NOW UNAVAILABLE/UNKNOWN ({len(seen_now_absent)}) -- reported "
+         "in-window, gone now --")
+    emit("   The freshest-dead / flapping shape: VictoriaMetrics holds a sample inside "
+         "the window,")
+    emit("   yet HA currently reports a state it never writes. Not in the never-seen "
+         "list by construction.")
+    for entity in seen_now_absent:
+        quiet = (
+            fmt_silence(end - last_sample[entity]) if entity in last_sample else "?"
+        )
+        emit(f"   {quiet:>8}  {entity}  state={ha[entity]['state']!r}")
+    if not seen_now_absent:
         emit("   (none)")
     emit()
 
