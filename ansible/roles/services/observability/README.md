@@ -137,12 +137,20 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-**Fifteen** provisioned rules, all in the **Observability** folder. #151, #152 and
-#154 added eight of them (four Vector-health, one docker-ingest twin, three
+**Twenty-one** provisioned rules, all in the **Observability** folder. #151, #152
+and #154 added eight of them (four Vector-health, one docker-ingest twin, three
 delivery-path); #178 added the telegraf absence owner, which is the mirror of
 `obs-vector-metrics-absent` for the METRICS path — every other telegraf-fed rule
 here aggregates the `host` dimension away, so nothing else can see telegraf
-alive but stamping the wrong host. Routing is no longer "all by email" — see
+alive but stamping the wrong host.
+
+The table below itemises **fifteen** of them. The remaining six are the TrueNAS
+rules added by #174/#176 (`alerting/truenas-health.yaml`: two HDD-temperature
+thresholds, a stream-absence and a poller-absence owner, pool-degraded and
+scrub-overdue) — they are in the same folder and were never added here. Read the
+count and the table as separate facts until that is fixed: this table is what
+someone consults to answer "does this signal already have an absence owner?",
+which is exactly the question #178 got wrong once. Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
 
 | uid | rule | fires when | noData |
@@ -163,8 +171,8 @@ alive but stamping the wrong host. Routing is no longer "all by email" — see
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_alertmanager_receivers[24h]))` > 600, `for: 5m` | **Alerting** |
 
-`execErrState: Alerting` on all fifteen — a datasource that cannot be reached is
-not evidence of health.
+`execErrState: Alerting` on all twenty-one — a datasource that cannot be reached
+is not evidence of health.
 
 ### Why so many of the new rules are `noDataState: OK` (#151, #152)
 
