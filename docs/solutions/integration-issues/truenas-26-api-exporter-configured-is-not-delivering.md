@@ -12,6 +12,8 @@ symptoms:
   - "truenas_disk_temp appears empty over a 5-minute window while other TrueNAS series report every 60s"
   - "module failure returns only {\"censored\": \"the output has been hidden...\"}"
   - "sudo: a password is required, on a playbook that touches no remote host"
+  - "a query immediately after a successful push returns nothing, then the same query works a minute later"
+  - "disk.query reports type=HDD for a virtual disk that has no SMART"
 root_cause: api_behavior
 resolution_type: config_change
 severity: medium
@@ -125,3 +127,47 @@ Mac *and* an Arch box and a hardcoded path works on exactly one of them.
 - `REPORTING_WRITE` includes `REPORTING_READ`, and least privilege is real:
   `pool.query`, `user.query`, `privilege.query` and `system.reboot` are all denied
   to an account holding only it.
+
+## 7. `type` says HDD for a disk that is not one — classify by rotation rate
+
+`disk.query` on TrueNAS 26.0 reports the **QEMU virtual boot disk (`sda`) as
+`type: "HDD"`**, with `rotationrate: null` and no SMART. Any rule or panel that
+selects spinning disks on `type` therefore includes exactly the disk whose
+temperature is a fabricated `0` — the one it most needs to exclude.
+
+`rotationrate` is the honest discriminator. Measured 2026-08-23:
+
+| Device | `type` | `rotationrate` | correct class |
+| ------ | ------ | -------------- | ------------- |
+| `sdb`-`sdf` (ST26000NM000C) | HDD | 7200 | hdd |
+| `nvme0n1`, `nvme1n1` | SSD | null | ssd |
+| `sda` (QEMU_HARDDISK) | **HDD** | null | **virtual** |
+
+## 8. Moving a rule's data source orphans its liveness guard
+
+#176 shipped a thermal rule plus a liveness rule watching the Graphite stream —
+correct at the time, because the thermal rule read that stream. #174 then
+repointed the thermal rule at the API poller's series and *did not*, at first,
+add a second liveness rule.
+
+That combination is silently broken: the poller can die while the Graphite stream
+keeps flowing, so the stream's liveness rule stays GREEN while the temperature
+alerts go quiet with nothing to say so. **Two delivery paths need two liveness
+rules**, and the moment a rule changes which series it reads, its absence guard
+has to be re-derived rather than assumed to still apply.
+
+## 9. VictoriaMetrics ingestion is not immediately queryable
+
+A push returning HTTP 204 and a query returning nothing seconds later is
+**normal**, not a failure. Measured: a probe metric POSTed to
+`/api/v1/import/prometheus` returned 204, was invisible at +3s, and queried fine
+at +45s. This cost real debugging time on #174 — the poller was working the whole
+time. Wait at least a minute before concluding a push path is broken, and prefer
+`last_over_time(...[10m])` over instant queries when verifying a new writer.
+
+## 10. Handlers run under `--check`
+
+Gating the *notifying* tasks is not enough: a handler that touches a systemd unit
+the templates have not yet written still fails in check mode with "Could not find
+the requested service". The `when: not ansible_check_mode` has to go on the
+**handler** as well.
