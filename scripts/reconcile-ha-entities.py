@@ -28,22 +28,37 @@ first precise statement of it was still too strong. THREE sources move, not one.
    (measured 2026-08-24: ~11 entities/min, the only two lines that moved across
    four pinned re-runs). --ha-states-json pins that side: the first run captures
    the payload, later runs replay it.
-2. The QUERY-derived numbers -- tlast_over_time and count_over_time -- ARE pure
-   functions of (--start, --end). They are the numbers the dead list is built
-   from, and they repeat exactly.
+2. The two QUERY legs -- tlast_over_time and count_over_time -- ARE pure
+   functions of (--start, --end) and repeat exactly.
 3. /api/v1/series is NOT. It resolves against a per-UTC-DAY inverted index, so a
    window that ends mid-day picks up that day's whole bucket, which keeps growing
-   until the day closes. Everything the index contributes therefore depends on
-   WHEN the run happens: index_only, vm_only, the series and metric-name counts,
-   and G4's series counts. Measured on one pinned 28.1h window: 245 union pairs
-   at end+minutes, 300 at end+3.9h (index_only 0 -> 55, vm_only 0 -> 46), while
-   both query legs held steady at 245. A 60-second window returns the same answer
-   as the whole day -- that is the tell.
+   until the day closes. Measured on one pinned 28.1h window: 245 union pairs at
+   end+minutes, 300 at end+3.9h (index_only 0 -> 55, vm_only 0 -> 46), while both
+   query legs held steady at 245. A 60-second window returns the same answer as
+   the whole day -- that is the tell.
+
+Which numbers that touches is wider than it looks, and an earlier version of this
+note got it wrong by claiming the dead list was built from the query legs. It is
+not: never_seen = writable - vm_seen, and vm_seen is the UNION, so the DEAD LIST
+IS INDEX-DEPENDENT. Measured with a stub: identical query legs plus 55 extra
+index pairs moved the dead list by 55. So are index_only, vm_only, the series and
+metric-name counts, G4's series counts, G2's total, G3's hit rate, G6's
+VM-seen/string split, and the nine-device cross-check -- every one reads vm_seen
+or the raw series list.
+
+What IS sound is the DIRECTION, and it is sound by condition, not by
+construction:
+  * While the data is RETAINED, vm_seen only grows as the trailing day fills, so
+    a later re-run can only SHRINK the candidate list -- it never convicts anyone
+    new. Retention is the qualifier that matters: if samples age out, or a series
+    is deleted, vm_seen shrinks and the candidate list would GROW.
+  * The published 479 is window-pure BECAUSE index_only was 0 in that run, which
+    makes writable - vm_seen exactly equal to writable - query-seen. That is a
+    property of that run, verifiable from its own printed counts, not a guarantee
+    about every run.
 
 The practical rule: RUN PROMPTLY after the window ends, and expect byte-identity
-only across re-runs made against the same series-index state. The drift's
-direction is safe for a dead list -- a later sample is evidence of LIFE, so a
-later re-run can only shrink the candidate set, never convict anyone new.
+only across re-runs made against the same series-index state.
 
 Snapshots carry personal home-state data -- keep them out of the repo (the script
 refuses a path inside it).
@@ -226,11 +241,38 @@ def vault_key(plaintext: str, key: str, where: str) -> str:
         if line.startswith(prefix):
             rest = line[len(prefix) :]
             stripped = rest.strip()
-            if (len(stripped) >= 2 and stripped[0] == stripped[-1]
-                    and stripped[0] in "'\""):
-                # QUOTED: the content is exact, `#` inside it is data, not a
-                # comment. Strip the quotes and nothing else.
-                value = stripped[1:-1]
+            quoted = stripped[:1] in ("'", '"')
+            if quoted:
+                # QUOTED: find the CLOSING quote and take what is inside. The
+                # previous form required the LAST character of the line to be the
+                # closing quote, so `vault_x: 'secret'  # rotated 2026-08-01` fell
+                # into the unquoted branch and returned `'secret'` WITH the quotes
+                # -- a 401 blaming the credential. All three live vault keys are
+                # quoted, so that was one rotation comment away from happening.
+                quote = stripped[0]
+                close = stripped.find(quote, 1)
+                if close == -1:
+                    raise Failure(
+                        f"{key} in {where} opens with {quote!r} and never closes "
+                        "it on the same line -- this parser reads single-line "
+                        "scalars only"
+                    )
+                if stripped[close + 1 : close + 2] == quote:
+                    # `'it''s'` is a YAML-escaped quote; taking the first close
+                    # would silently truncate. Refuse rather than guess.
+                    raise Failure(
+                        f"{key} in {where} contains an escaped quote "
+                        f"({quote * 2!r}), which this single-line parser does not "
+                        "decode. Rewrite it without one."
+                    )
+                value = stripped[1:close]
+                trailer = stripped[close + 1 :].strip()
+                if trailer and not trailer.startswith("#"):
+                    raise Failure(
+                        f"{key} in {where} has unparseable text after the closing "
+                        f"quote ({trailer[:20]!r}...) -- refusing to guess where "
+                        "the value ends"
+                    )
             else:
                 # UNQUOTED: a YAML scalar ends at a whitespace-`#`. Without this
                 # cut, `vault_x: secret  # rotated 2026-08-01` hands the comment
@@ -245,7 +287,8 @@ def vault_key(plaintext: str, key: str, where: str) -> str:
             # indicator itself, which is non-empty and would sail through to an
             # Authorization header -- surfacing as a 401 that names the wrong
             # cause. Reject the shape instead.
-            if value in {">", "|", ">-", "|-", ">+", "|+", "{", "["}:
+            if not quoted and value in {">", "|", ">-", "|-", ">+", "|+",
+                                        "{", "["}:
                 raise Failure(
                     f"{key} in {where} looks like a YAML block/flow indicator "
                     f"({value!r}), not a value -- this parser reads scalars on one "
@@ -392,6 +435,12 @@ def numeric_capable(state: str) -> bool:
 
 
 def fmt_silence(seconds: float) -> str:
+    # Clamped at zero. tlast values inside the (end, end+60] slack that
+    # fetch_vm_last_samples deliberately tolerates produce a NEGATIVE silence,
+    # and divmod walks backwards on a negative int ("-1d23h"). The slack exists
+    # to absorb VictoriaMetrics' rounding, so the honest render of "sampled a few
+    # seconds after `end`" is 0h00m, not a negative figure.
+    seconds = max(0.0, seconds)
     days, rem = divmod(int(seconds), 86400)
     hours, rem = divmod(rem, 3600)
     minutes = rem // 60
@@ -460,9 +509,15 @@ def fetch_ha_states(ha_url: str, token: Secret) -> list[dict]:
     return states
 
 
+# Directories a snapshot MAY be written under, before anything else is checked.
+# See allow_roots() for why this list exists rather than a longer list of
+# forbidden shapes.
+DEFAULT_ALLOW_ROOTS = ("/tmp", "/private/tmp")
+
 # Environment that can make `git rev-parse` deny standing in a repository it is
-# in fact standing in. Stripped before every probe so the one remaining string
-# match is stable by construction, together with LC_ALL=C.
+# in fact standing in. Stripped before the SANITIZED probe so the one remaining
+# string match is stable by construction, together with LC_ALL=C. The second,
+# INHERITED-env probe deliberately keeps them -- see git_worktrees_containing.
 GIT_ENV_STRIP = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -470,6 +525,78 @@ GIT_ENV_STRIP = (
     "GIT_COMMON_DIR",
     "GIT_INDEX_FILE",
 )
+
+
+def allow_roots(extra: list[str] | None) -> list[Path]:
+    """Resolved roots under which an HA snapshot may be written.
+
+    AFFIRMATIVE ALLOW, and the inversion is the point. Four review rounds of this
+    guard were an ENUMERATION of ways to be inside a checkout, and each round
+    found one the last had missed. Round 4 found a shape with no `.git` anywhere
+    in the destination's ancestry at all: a BARE repo plus an exported
+    GIT_DIR/GIT_WORK_TREE (the dotfiles pattern -- and the exact environment git
+    exports into every hook, `rebase --exec`, `bisect run` and `submodule
+    foreach`), or `core.worktree` set in a bare repo's config. The filesystem walk
+    passes, and a `git add -A` then stages the snapshot.
+
+    An enumeration of forbidden shapes fails OPEN on the shape nobody enumerated.
+    An allow-list fails CLOSED on it: an unanticipated layout lands on "not under
+    an approved root", which is a refusal. Everything the enumeration checks is
+    still checked -- this is a gate in front of them, not a replacement.
+    """
+    raw: list[str] = [os.environ.get("TMPDIR") or "", *DEFAULT_ALLOW_ROOTS]
+    raw += list(extra or [])
+    roots: list[Path] = []
+    for item in raw:
+        if not item:
+            continue
+        # Resolved before comparison: on macOS $TMPDIR is /var/folders/... which
+        # is really /private/var/folders/..., and an unresolved root would never
+        # match a resolved destination.
+        try:
+            resolved = Path(item).expanduser().resolve()
+        except OSError:
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def real_path(path: Path) -> Path:
+    """The fully-resolved real path of a destination that may not exist yet.
+
+    Resolve BEFORE deciding anything: a symlink sitting in an allow-root and
+    pointing into a checkout must be judged by where it lands, not by where it
+    sits. `Path.resolve()` is non-strict and does this too, but the deepest
+    -existing-ancestor form is written out because the destination usually does
+    NOT exist yet and the interesting case is a symlinked PARENT.
+    """
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    tail: list[str] = []
+    probe = path
+    while probe != probe.parent:
+        try:
+            if probe.exists() or probe.is_symlink():
+                break
+        except OSError:
+            break
+        tail.append(probe.name)
+        probe = probe.parent
+    resolved = probe.resolve()
+    for name in reversed(tail):
+        resolved = resolved / name
+    return resolved
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    """Containment by PATH COMPONENTS, never by string prefix.
+
+    `"/tmpfoo/x".startswith("/tmp")` is True and is exactly the bug this avoids;
+    `Path("/tmpfoo/x").parents` contains `/tmpfoo` and `/`, not `/tmp`.
+    """
+    return path == root or root in path.parents
 
 
 def ancestor_holding_dot_git(path: Path) -> Path | None:
@@ -495,53 +622,36 @@ def ancestor_holding_dot_git(path: Path) -> Path | None:
             (parent / ".git").lstat()
         except FileNotFoundError:
             continue
+        except NotADirectoryError:
+            # A path component is a FILE. Reporting that as "inside a git work
+            # tree" would send the operator hunting for a checkout that does not
+            # exist; name the real cause instead. Still a refusal.
+            raise Failure(
+                f"cannot check {path} for a git work tree: {parent} is not a "
+                "directory, so the snapshot path cannot exist as written. "
+                "Refusing to write personal home-state data on an unchecked path."
+            ) from None
         except OSError:
             return parent
         return parent
     return None
 
 
-def git_worktrees_containing(path: Path) -> list[Path]:
-    """EXTRA git work trees that would track `path`, on top of the filesystem test.
-
-    This runs only to WIDEN the forbidden set (a sibling-worktree layout points
-    its `.git` file at a common dir elsewhere, and the toplevel may differ from
-    the nearest `.git`-holding ancestor). It can never shrink it: the caller has
-    already refused every path with a `.git` in an ancestor before asking git
-    anything, so a git answer of "not a repository" means only "git adds no extra
-    roots" -- never "safe".
-
-    Testing containment against the SCRIPT's repo root is not enough here: this
-    repo drives its agents from worktrees under `.claude/worktrees/<id>/`, which
-    are subdirectories of the main checkout. A snapshot written to the main
-    checkout's root is outside the worktree, passes a root-relative test, and
-    lands in a tracked tree anyway. Ask git about the destination too.
-    """
-    # Walk UP to the nearest EXISTING directory. `git -C <nonexistent>` exits 128,
-    # which used to make this return [] and quietly degrade the guard to the
-    # script's own root; `mkdir(parents=True)` then CREATED the missing directory
-    # inside the tracked tree and wrote a 590 KB home-state readout into it.
-    # Measured before this fix: /Users/surge/dev/homelab/scratch171/ha.json was
-    # accepted, and `git status` in the main checkout reported it untracked.
-    probe = path if path.is_dir() else path.parent
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
-
-    # Sanitized environment: inherited GIT_DIR / GIT_CEILING_DIRECTORIES make real
-    # git deny a real repository, and a localized git would break the one string
-    # match below. Neither can reach the probe now.
-    git_env = {k: v for k, v in os.environ.items() if k not in GIT_ENV_STRIP}
-    git_env["LC_ALL"] = "C"
-
+def _git_probe_roots(
+    path: Path, probe: Path, env: dict[str, str], strict: bool
+) -> list[Path]:
+    """Roots `git rev-parse` reports from `probe`. WIDEN-ONLY: never grants."""
     roots: list[Path] = []
     for flag in ("--show-toplevel", "--git-common-dir"):
         try:
             proc = subprocess.run(
                 ["git", "rev-parse", flag],
-                cwd=str(probe), env=git_env, capture_output=True, text=True,
+                cwd=str(probe), env=env, capture_output=True, text=True,
                 check=False,
             )
         except OSError as exc:
+            if not strict:
+                return roots
             # git missing or unrunnable. The guard cannot answer, so REFUSE: a
             # privacy guard that fails open silently is the exact shape the rest
             # of this script exists to refuse, and the pre-fix static test at
@@ -562,12 +672,19 @@ def git_worktrees_containing(path: Path) -> list[Path]:
             # It points at `<main checkout>/.git`; its parent is the tracking tree.
             roots.append(found.parent if found.name == ".git" else found)
             continue
+        if not strict:
+            # The INHERITED-env probe is allowed to fail silently, and ONLY
+            # because it can never be the thing that says yes: the allow-root
+            # test and the strict probe below still gate every write. Its whole
+            # job is to see the work tree that only the inherited environment
+            # defines.
+            continue
         stderr = (proc.stderr or "").strip()
         # ANCHORED to the start of git's canonical line, and it means only "git
-        # contributes no extra root" -- the filesystem test in the caller has
-        # already decided the safety question. The old substring form also
-        # accepted "no such file or directory", which is what a dangling worktree
-        # gitdir prints from INSIDE a tracked tree.
+        # contributes no extra root" -- the allow-root test and the filesystem
+        # test in the caller have already decided the safety question. The old
+        # substring form also accepted "no such file or directory", which is what
+        # a dangling worktree gitdir prints from INSIDE a tracked tree.
         if stderr.startswith("fatal: not a git repository"):
             continue
         raise Failure(
@@ -578,8 +695,69 @@ def git_worktrees_containing(path: Path) -> list[Path]:
     return roots
 
 
+def git_worktrees_containing(path: Path) -> list[Path]:
+    """EXTRA git work trees that would track `path`, on top of the filesystem test.
+
+    This runs only to WIDEN the forbidden set (a sibling-worktree layout points
+    its `.git` file at a common dir elsewhere, and the toplevel may differ from
+    the nearest `.git`-holding ancestor). It can never shrink it: the caller has
+    already required the path to sit under an approved root and refused every
+    path with a `.git` in an ancestor before asking git anything, so a git answer
+    of "not a repository" means only "git adds no extra roots" -- never "safe".
+
+    Testing containment against the SCRIPT's repo root is not enough here: this
+    repo drives its agents from worktrees under `.claude/worktrees/<id>/`, which
+    are subdirectories of the main checkout. A snapshot written to the main
+    checkout's root is outside the worktree, passes a root-relative test, and
+    lands in a tracked tree anyway. Ask git about the destination too.
+
+    TWO probes, and neither is redundant -- do not delete one.
+      * SANITIZED env: an inherited GIT_DIR / GIT_CEILING_DIRECTORIES makes real
+        git DENY a real repository, so a probe that inherits them can be blinded
+        into reporting "not a git repository" from inside a tracked tree. Strict:
+        any failure other than the canonical line refuses.
+      * INHERITED env: an EXTRINSICALLY defined work tree (bare repo plus
+        exported GIT_DIR/GIT_WORK_TREE -- dotfiles, hooks, `rebase --exec`,
+        `bisect run`, `submodule foreach`) exists ONLY in that environment. There
+        is no `.git` in the destination's ancestry to find, and sanitizing the
+        env deletes the only evidence. An earlier revision detected this shape by
+        accident and a later "cleanup" removed the detection; this probe restores
+        it deliberately.
+
+    RESIDUALS, named so nobody mistakes this for exhaustive: (a) `core.worktree`
+    set in a bare repo's config, pointing INTO an allow-root, is not detected
+    here; (b) PATH or GIT_CONFIG_* manipulation can suppress the widening. The
+    inversion is what makes those non-deciding: an unanticipated shape has to get
+    past the ALLOW-ROOT test first, and an unlisted root is a refusal by default.
+    """
+    # Walk UP to the nearest EXISTING directory. `git -C <nonexistent>` exits 128,
+    # which used to make this return [] and quietly degrade the guard to the
+    # script's own root; `mkdir(parents=True)` then CREATED the missing directory
+    # inside the tracked tree and wrote a 590 KB home-state readout into it.
+    # Measured before this fix: /Users/surge/dev/homelab/scratch171/ha.json was
+    # accepted, and `git status` in the main checkout reported it untracked.
+    probe = path if path.is_dir() else path.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+
+    sanitized = {k: v for k, v in os.environ.items() if k not in GIT_ENV_STRIP}
+    sanitized["LC_ALL"] = "C"
+    inherited = dict(os.environ)
+    inherited["LC_ALL"] = "C"
+
+    roots = _git_probe_roots(path, probe, sanitized, strict=True)
+    for root in _git_probe_roots(path, probe, inherited, strict=False):
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 def load_or_capture_ha_states(
-    ha_url: str, token: Secret, snapshot: Path | None, repo_root: Path
+    ha_url: str,
+    token: Secret,
+    snapshot: Path | None,
+    repo_root: Path,
+    approved_roots: list[Path],
 ) -> tuple[list[dict], float]:
     """HA states, optionally pinned to a snapshot file so a re-run is reproducible.
 
@@ -590,7 +768,13 @@ def load_or_capture_ha_states(
     if snapshot is None:
         return fetch_ha_states(ha_url, token), time.time()
 
-    snapshot = snapshot.expanduser().resolve()
+    # RESOLVE FIRST, then decide. Everything below judges the real path, so a
+    # symlink sitting in an approved root and pointing into a checkout is refused
+    # for where it LANDS. (TOCTOU residual, accepted for this single-operator
+    # threat model: the checks run on the resolved path and O_EXCL protects only
+    # the final component, so a parent-directory symlink swapped between the check
+    # and the open is not covered.)
+    snapshot = real_path(snapshot)
     # The .gitignore backstop matches `ha-states*.json` by basename, so a snapshot
     # called anything else is NOT covered by it. Enforce the name the backstop
     # knows, so the two halves of the defence line up instead of only appearing to.
@@ -602,11 +786,24 @@ def load_or_capture_ha_states(
     # /api/states is a full readout of a home: occupancy, device names, presence.
     # It must never land in a tracked tree, where a stray `git add -A` publishes it.
     #
-    # PRIMARY test first, and it is pure filesystem: any ancestor holding a `.git`
-    # entry is a refusal, readable or not. Git is asked only afterwards, and only
-    # to ADD roots -- three review rounds in a row found a way to make `git
-    # rev-parse` report "not a git repository" from inside a tracked tree, so the
-    # subprocess is not allowed to be the thing that says yes.
+    # AFFIRMATIVE ALLOW, checked FIRST: the path must lie under a root the
+    # operator approved. Four rounds of enumerating forbidden shapes each missed
+    # the next one; an unlisted root is a refusal, so an unanticipated layout
+    # fails closed instead of open. See allow_roots().
+    if not any(path_is_under(snapshot, root) for root in approved_roots):
+        raise Failure(
+            f"refusing to write an HA snapshot at {snapshot}: it is not under any "
+            "approved root "
+            f"({', '.join(str(r) for r in approved_roots) or 'none'}). "
+            "/api/states carries personal home-state data, so this guard allows "
+            "only paths that are positively approved -- pass "
+            "--snapshot-allow-root DIR to add one."
+        )
+    # Then every earlier layer, unchanged. Pure filesystem next: any ancestor
+    # holding a `.git` entry is a refusal, readable or not. Git is asked only
+    # afterwards, and only to ADD roots -- four review rounds found a way to make
+    # `git rev-parse` report "not a git repository" from inside a tracked tree, so
+    # the subprocess is not allowed to be the thing that says yes.
     tracked_ancestor = ancestor_holding_dot_git(snapshot)
     if tracked_ancestor is not None:
         raise Failure(
@@ -649,16 +846,29 @@ def load_or_capture_ha_states(
         captured_at = payload.get("captured_at")
         if not isinstance(states, list) or not states:
             raise Failure(f"HA snapshot {snapshot} does not hold a non-empty list")
-        if not isinstance(captured_at, (int, float)) or not math.isfinite(
-            float(captured_at)
-        ):
+        if not isinstance(captured_at, (int, float)):
+            raise Failure(
+                f"HA snapshot {snapshot} has no usable captured_at stamp "
+                "(missing or non-numeric)"
+            )
+        try:
+            # A JSON integer has no size limit, so `10**400` arrives as a Python
+            # int and float() raises OverflowError -- an uncaught traceback where
+            # every other malformed-payload case is a named Failure.
+            captured_float = float(captured_at)
+        except OverflowError:
+            raise Failure(
+                f"HA snapshot {snapshot} has a captured_at stamp too large to "
+                "represent as a float -- refusing to read it as a timestamp"
+            ) from None
+        if not math.isfinite(captured_float):
             # json.loads accepts a BARE NaN, and NaN switches the freshness check
             # off rather than failing it: `nan > tolerance` is False, so a
             # snapshot captured at any distance from `end` would sail through and
             # the run would exit 0 on a different instance's entity list.
             raise Failure(
                 f"HA snapshot {snapshot} has no usable captured_at stamp "
-                "(missing, non-numeric, or not finite)"
+                "(not finite)"
             )
         # A snapshot taken far from `end` describes a different instance than the
         # VictoriaMetrics window does: entities created, renamed or deleted in
@@ -667,7 +877,7 @@ def load_or_capture_ha_states(
         # accidental and does not cover the near-stale regime.
         print(f"HA states REPLAYED from snapshot {snapshot} ({len(states)} "
               f"entities, captured_at {captured_at})", file=sys.stderr)
-        return states, float(captured_at)
+        return states, captured_float
 
     states = fetch_ha_states(ha_url, token)
     try:
@@ -795,11 +1005,13 @@ def fetch_vm_last_samples(
         if not math.isfinite(ts):
             dropped += 1
             continue
-        # A sample timestamp AFTER the window end is instrument breakage, not
-        # data: `end - ts` is negative and fmt_silence renders it as garbage
-        # (divmod walks backwards on a negative int). 60s of slack absorbs
-        # VictoriaMetrics' own rounding; anything beyond it is refused, the same
-        # way every other malformed payload here is refused.
+        # A sample timestamp well AFTER the window end is instrument breakage,
+        # not data. 60s of slack absorbs VictoriaMetrics' own rounding; anything
+        # beyond it is refused, the same way every other malformed payload here
+        # is refused. Note what this does NOT do: a value INSIDE the slack still
+        # yields a negative `end - ts`, so the render is clamped at zero in
+        # fmt_silence -- the refusal bounds the damage, the clamp handles the
+        # tolerated remainder.
         if ts > end + 60:
             raise Failure(
                 f"VM POST /api/v1/query: tlast_over_time returned {ts:.0f} for "
@@ -837,7 +1049,16 @@ def main() -> int:
                         help="pin the HA side: capture /api/states here on first use, "
                              "replay it afterwards. Required to make stdout "
                              "byte-identical across runs, because HA is a live source. "
-                             "Must live OUTSIDE the repo -- it holds home-state data.")
+                             "It holds home-state data, so the path must lie under an "
+                             "APPROVED ROOT: $TMPDIR, /tmp, /private/tmp, or a "
+                             "directory named with --snapshot-allow-root. Anything "
+                             "else is refused.")
+    parser.add_argument("--snapshot-allow-root", action="append", default=None,
+                        metavar="DIR",
+                        help="add a directory an HA snapshot may be written under "
+                             "(repeatable). The guard is affirmative-allow: a path "
+                             "outside every approved root is refused, whether or not "
+                             "it looks like a checkout.")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -856,8 +1077,11 @@ def main() -> int:
     del vm_pass
 
     # -- window --------------------------------------------------------------
-    # The ONLY wallclock read in the script; everything downstream is a function
-    # of (start, end), which is what makes a pinned re-run reproducible.
+    # The only wallclock read that REACHES THE REPORT: with --start/--end pinned,
+    # every printed number is a function of (start, end) and of the series-index
+    # state (see the docstring). It is not the only time.time() in the script --
+    # the live-fetch and capture paths stamp the HA readout with the clock too --
+    # so this comment scopes the claim rather than making it absolute.
     now = int(time.time())
     end = args.end if args.end is not None else now
     if end > now + 300:
@@ -898,7 +1122,9 @@ def main() -> int:
         emit("           HA input pinned, WINDOW IS NOT: --start/--end were not "
              "both given, so `end` moved with the clock and")
         emit("           every silence figure moves with it. Pin BOTH to "
-             "reproduce byte-for-byte.")
+             "reproduce byte-for-byte -- and even then only against")
+        emit("           an unchanged series index, which is per-UTC-day and "
+             "grows until the trailing day closes.")
     else:
         emit("           NOT byte-reproducible: HA /api/states is live and its "
              "last_changed drifts (~11 entities/min),")
@@ -920,6 +1146,7 @@ def main() -> int:
         ha_token,
         Path(args.ha_states_json) if args.ha_states_json else None,
         repo_root,
+        allow_roots(args.snapshot_allow_root),
     )
     del ha_token
 
@@ -1257,12 +1484,17 @@ def main() -> int:
     # an end-lag would trade a rare loud false alarm for a permanent silent blind
     # spot at the fresh edge, so the gap is documented rather than papered over.
     #
-    # BOUNDEDNESS of the two drop counters: a row dropped from EITHER query leg
-    # cannot put an entity into the dead list. A dropped row that carries labels
-    # is still in `vm_seen` through the /api/v1/series index leg of the union, and
-    # a row without usable labels never identified an entity at all -- its index
-    # twin is already counted in `unjoinable`. So the counters exist to ATTRIBUTE
-    # a P3 disagreement, not to bound the finding.
+    # WHAT THE DROP COUNTERS DO AND DO NOT BOUND. An earlier version of this
+    # comment named the wrong enforcer: it claimed a labelled row dropped from the
+    # tlast leg is still carried by the /api/v1/series index leg of the union.
+    # That is not guaranteed -- this script prints a `query_only` category
+    # precisely because the index does not always list a pair the query dates.
+    # The actual enforcer is the OTHER QUERY LEG: count_over_time still returns
+    # that series, so a value-dropped row shows up as a P3 DISAGREEMENT and the
+    # run refuses to publish a dead list at all. A row with no usable labels never
+    # identified an entity in the first place; its index twin is counted in
+    # `unjoinable`. So the counters ATTRIBUTE a P3 failure, and P3 is what bounds
+    # the finding.
     tlast_set = set(last_sample)
     only_counted = sorted(counted_seen - tlast_set)
     only_tlast = sorted(tlast_set - counted_seen)
@@ -1319,9 +1551,26 @@ def main() -> int:
     emit("   Both pinned is NECESSARY, not sufficient: the series index is "
          "per-UTC-day and its trailing bucket grows")
     emit("   until that day closes, so byte-identity holds against an UNCHANGED "
-         "index state. Query-derived numbers")
-    emit("   (tlast/count_over_time, and the dead list built from them) are pure "
-         "functions of the window.")
+         "index state. The two query legs are pure")
+    emit("   functions of the window; the DEAD LIST IS NOT, because never-seen = "
+         "writable - vm_seen and vm_seen is the")
+    emit("   union, index leg included. The direction is still safe while the data "
+         "is RETAINED: a growing index only")
+    emit("   shrinks the candidate list. (Retention is the qualifier -- if samples "
+         "age out or a series is deleted,")
+    emit("   vm_seen SHRINKS and the list would grow.)")
+    # Right by condition, and the condition is printed above so a reader can check
+    # it: the dead list equals `writable - query-seen` exactly when the index
+    # contributed nothing of its own.
+    if index_only:
+        emit(f"   THIS run's candidate list is NOT window-pure: index_only reads "
+             f"{len(index_only)}, so vm_seen exceeds the query-seen set and the")
+        emit("   list is SMALLER than a query-only reading would give -- the safe "
+             "direction, but not purity.")
+    else:
+        emit("   THIS run's candidate list IS window-pure: index_only reads 0, so "
+             "writable - vm_seen equals")
+        emit("   writable - query-seen exactly.")
     emit()
 
     if failures:
@@ -1503,18 +1752,38 @@ def main() -> int:
             # well have samples in VictoriaMetrics, which is the one question
             # this script is uniquely able to settle.
             vm_matches = device_matches(vm_seen, device)
-            if vm_matches:
+            dated_matches = [e for e in vm_matches if e in last_sample]
+            undated_matches = [e for e in vm_matches if e not in last_sample]
+            # "holds in-window samples" may only be claimed for a DATED pair. An
+            # index-only listing is not a sample timestamp: the per-day index can
+            # name a series whose samples fall outside the window entirely.
+            if dated_matches:
                 emit("            VERDICT: ABSENT-FROM-HA, PRESENT IN VM -- deleted "
                      "from HA, yet VictoriaMetrics holds in-window samples:")
-                for entity in vm_matches:
-                    quiet = (fmt_silence(end - last_sample[entity])
-                             if entity in last_sample else "undated")
+                for entity in dated_matches:
+                    quiet = fmt_silence(end - last_sample[entity])
                     emit(f"                     {entity}  silence={quiet}")
+                for entity in undated_matches:
+                    emit(f"                     {entity}  index-listed, undated")
+            elif undated_matches:
+                emit("            VERDICT: ABSENT-FROM-HA, INDEX-LISTED (undated) "
+                     "-- deleted from HA; the per-day series index names it but no")
+                emit("                     in-window sample timestamp exists, so "
+                     "this is NOT evidence of an in-window sample:")
+                for entity in undated_matches:
+                    emit(f"                     {entity}  index-listed, undated")
             else:
                 emit("            VERDICT: ABSENT-FROM-HA -- no entity's object_id "
                      "matches this name in HA or in VM (deleted)")
             continue
-        any_seen = False
+        # DISAGREE is this report's most consequential verdict, so it is gated on
+        # a DATED in-window sample, never on membership of vm_seen. vm_seen is the
+        # union and includes the per-day index leg, which grows all day: a re-run
+        # made hours later could otherwise MANUFACTURE a DISAGREE out of an
+        # after-window index listing, while the verdict text claims "a sample
+        # inside the window". An index-only hit gets its own, weaker verdict.
+        any_dated = False
+        any_index_only = False
         for entity in matches:
             if entity in excluded_update:
                 category = "excluded(update)"
@@ -1522,22 +1791,28 @@ def main() -> int:
                 category = "absent-by-design"
             else:
                 category = "writable"
-            if entity in vm_seen:
-                any_seen = True
-                quiet = (
-                    fmt_silence(end - last_sample[entity])
-                    if entity in last_sample
-                    else "?"
+            if entity in last_sample:
+                any_dated = True
+                vm_status = (
+                    f"VM-SEEN(dated) silence="
+                    f"{fmt_silence(end - last_sample[entity])}"
                 )
-                vm_status = f"VM-SEEN silence={quiet}"
+            elif entity in vm_seen:
+                any_index_only = True
+                vm_status = "INDEX-LISTED (undated)"
             else:
                 vm_status = "never-seen"
             emit(f"            {entity}  [{category}]  {vm_status}  "
                  f"state={ha[entity]['state']!r}")
-        if any_seen:
+        if any_dated:
             emit("            VERDICT: DISAGREE -- VictoriaMetrics holds a sample "
                  f"inside the {window / 3600:.1f}h window for a device `last_seen` "
                  "calls dead")
+        elif any_index_only:
+            emit("            VERDICT: INDEX-LISTED (undated) -- the per-day series "
+                 "index names a matching series but no in-window")
+            emit("                     sample timestamp exists; the sample may fall "
+                 "outside the window entirely. NOT counted as DISAGREE.")
         else:
             all_absent = all(e in absent_by_design for e in matches)
             writable_never = [
