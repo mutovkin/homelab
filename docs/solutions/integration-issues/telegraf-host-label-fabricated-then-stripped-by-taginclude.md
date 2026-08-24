@@ -251,6 +251,52 @@ produced the transient. Precedent for a pinned host in a static alert file:
 exactly one name, so a second host is unmonitored until it is added to the
 selector. That is a silent gap, and it belongs in the rule's own comment.
 
+### The break-drill left a series behind, on purpose
+
+Proving `obs-docker-metrics-unlabelled` can actually fire meant creating the
+defect it watches for. The drill injected a synthetic series into live
+VictoriaMetrics — `docker_breaktest_unlabelled`, one sample per 60s for 16
+minutes, roughly **2026-08-24T08:02:44Z to 08:18:44Z** — chosen to match
+`docker_.+` while carrying no `host` label, which is exactly the defect shape.
+It drove the rule Pending (08:03:50Z) → Alerting (08:08:50Z) → recovered
+(08:28:50Z), 6m06s from first sample to firing.
+
+**That series is still in the TSDB and will be for a while.** VictoriaMetrics
+here runs `--retentionPeriod=5y`, so the samples age out on that schedule, not
+soon. This is deliberate — documented rather than deleted, because deleting live
+TSDB data for tidiness is the worse trade — but it has to be written down
+somewhere, because the name appears **nowhere in this repository** and a future
+series audit will surface a `docker_*` metric that matches no telegraf input:
+
+- It is **current-empty**. `docker_breaktest_unlabelled` returns nothing on an
+  instant query, so `count({__name__=~"docker_.+", host=""})` is empty and the
+  rule sits Normal. It fires nothing and skews no dashboard.
+- It is **historically present**: `count_over_time(docker_breaktest_unlabelled[24h])`
+  returned **16** — one per injection — which is how to tell it apart from a real
+  regression. A real one would still be arriving.
+- The name is self-documenting on purpose. Anything matching `*_breaktest_*` in
+  this stack is drill residue, not a metric.
+
+To remove it, VictoriaMetrics' delete API takes the selector:
+
+```
+POST /api/v1/admin/tsdb/delete_series?match[]={__name__="docker_breaktest_unlabelled"}
+```
+
+Two things measured rather than assumed, because both would waste a debugging
+session: it is **POST — a GET returns 405**, and it is behind the same
+`--httpAuth` credentials as every other endpoint here (probed with a selector
+matching nothing: `204`). Deletion is not free — it forces a merge — so it is
+worth doing only if the series is genuinely in the way.
+
+**The drill also paged the operator, and that is expected.** A real critical
+notification went to the configured channels at 08:08:50Z with its resolve at
+08:28:50Z; Grafana dispatched at each 5-minute tick in between. Any deliberate
+break-and-observe on a rule wired to a live contact point does this. Say so in
+advance if someone else is on call, and note it in the report afterwards — an
+unexplained critical page is exactly the kind of noise that trains people to
+ignore the channel.
+
 ## Prevention
 
 - **Any `*include`/`*exclude` filter on a telegraf plugin is a filter over the
