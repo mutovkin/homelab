@@ -384,6 +384,23 @@ Hard-won lessons — check here before debugging from scratch.
   and rejected-field all look identical. Put `no_log=True` on the argument_spec PARAMETER
   instead — one value redacted, diagnostics intact.
 
+- **Classify disks by ROTATION RATE, not by `type` — and re-derive a rule's liveness
+  guard whenever you change what it queries.** TrueNAS `disk.query` reports the QEMU
+  virtual boot disk as `type: "HDD"` with `rotationrate: null` and no SMART, so a
+  thermal rule scoped on `type` includes the one disk whose temperature is a
+  fabricated 0 (measured: sdb-sdf rotationrate 7200 = real HDDs, nvme = ssd, sda =
+  virtual). Second, sharper trap from the same change: #176's thermal rule was paired
+  with a liveness rule watching the GRAPHITE stream; #174 repointed the thermal rule
+  at the API poller and that pairing silently broke — the poller can die while the
+  stream keeps flowing, leaving the liveness rule green and the thermal rule mute.
+  Two delivery paths need two liveness rules. Also measured here: **VictoriaMetrics
+  ingestion is not immediately queryable** — a probe POSTed to
+  `/api/v1/import/prometheus` returned 204, was invisible at +3s and fine at +45s, so
+  "pushed but not queryable" is not evidence of a broken writer for at least a minute.
+  And **handlers run under `--check`**, so gating the notifying tasks does not stop a
+  handler from failing on a systemd unit the templates have not written yet.
+  See [docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md](docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md).
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.
