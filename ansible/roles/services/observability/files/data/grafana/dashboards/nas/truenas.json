@@ -1,7 +1,7 @@
 {
   "uid": "nas-truenas",
   "title": "NAS \u2014 TrueNAS",
-  "description": "TrueNAS (VM 200) storage and system health. PROVISIONAL (#175): built only on metrics the Graphite stream actually delivers. Pool capacity, pool HEALTH, scrub state, SMART counters, network throughput and system load are all absent from this source on TrueNAS 26.0 \u2014 measured, not assumed \u2014 and arrive with #174's API poller. Drives are identified by SERIAL here; #174 adds real device names.",
+  "description": "TrueNAS (VM 200) storage and system health. Disk temperatures, pool health, capacity and scrub state come from the JSON-RPC API poller (#174); ARC, CPU, memory and disk I/O from the netdata Graphite stream (#173). SMART attribute counters are not yet collected.",
   "tags": [
     "nas",
     "truenas",
@@ -10,7 +10,7 @@
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "1m",
   "time": {
     "from": "now-6h",
@@ -39,7 +39,7 @@
     {
       "type": "stat",
       "title": "Hottest HDD",
-      "description": "Maximum temperature across the five 26TB Exos drives. The NVMe are excluded deliberately \u2014 they run to 60-70C by design, so including them would either hide a hot HDD or make the thresholds meaningless. Thresholds match the #176 alert rules exactly: 47C warning, 52C critical. last_over_time is required: this series updates every few MINUTES, so an instant read shows No data between samples.",
+      "description": "Maximum temperature across the spinning disks. Scoped by media=\"hdd\", which #174's poller derives from ROTATION RATE rather than the API's `type` field \u2014 the QEMU virtual boot disk reports type=HDD with no rotation rate and no SMART, and its temperature reads as a fabricated 0. Thresholds are the #176 alert thresholds exactly, so panel and alert can never disagree.",
       "datasource": {
         "type": "victoriametrics-metrics-datasource",
         "uid": "P4169E866C3094E38"
@@ -57,7 +57,7 @@
             "uid": "P4169E866C3094E38"
           },
           "editorMode": "code",
-          "expr": "max(last_over_time(truenas_disk_temp_temp{host=\"truenas\", disk=~\"_serial_lunid_(ZXA07GGS|ZXA02DNC|ZXA19LRP|ZXA1Q6VK|ZXA02XYW)_.*\"}[30m]))",
+          "expr": "max(truenas_disk_temperature_celsius{host=\"truenas\", media=\"hdd\"})",
           "legendFormat": "hottest",
           "range": false,
           "instant": true,
@@ -103,7 +103,7 @@
     {
       "type": "timeseries",
       "title": "Disk temperature",
-      "description": "Per-drive temperature. Serials ZXA* are the five 26TB Exos HDDs; 25370Y8* are the two SN850X NVMe. _devicename_sda is EXCLUDED by the selector: the virtual boot disk has no SMART and netdata reports its temperature as 0, not null \u2014 a fabricated zero that would drag this panel's floor down and make the array look colder than it is. spanNulls is set to 1h because the series is sparse (minutes between samples); without it every line would be drawn as disconnected dots.",
+      "description": "Per-device temperature from the TrueNAS API (#174), keyed by real device name and polled every 60s \u2014 dense, unlike the Graphite stream's sparse, serial-keyed series. Disks with no SMART (the virtual boot disk) are absent rather than reported as 0: the poller skips unknown gauges instead of zeroing them, because a fabricated reading is worse than a gap.",
       "datasource": {
         "type": "victoriametrics-metrics-datasource",
         "uid": "P4169E866C3094E38"
@@ -121,8 +121,8 @@
             "uid": "P4169E866C3094E38"
           },
           "editorMode": "code",
-          "expr": "label_replace(last_over_time(truenas_disk_temp_temp{host=\"truenas\", disk=~\"_serial_lunid_.*\"}[30m]), \"drive\", \"$1\", \"disk\", \"_serial_lunid_([^_]+)_.*\")",
-          "legendFormat": "{{drive}}",
+          "expr": "truenas_disk_temperature_celsius{host=\"truenas\"}",
+          "legendFormat": "{{devname}} ({{media}})",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -136,7 +136,7 @@
             "lineWidth": 2,
             "fillOpacity": 8,
             "showPoints": "auto",
-            "spanNulls": 3600000
+            "spanNulls": 600000
           },
           "color": {
             "mode": "palette-classic"
@@ -162,11 +162,275 @@
     },
     {
       "type": "row",
-      "title": "Disk I/O",
+      "title": "Pool",
       "collapsed": false,
       "gridPos": {
         "x": 0,
         "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Pool status",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 5,
+        "h": 5
+      },
+      "description": "ONLINE / DEGRADED / FAULTED, carried as a LABEL on a constant series so the text is shown verbatim rather than through a numeric encoding both ends would have to agree about.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "truenas_pool_status{host=\"truenas\"}",
+          "legendFormat": "{{status}}",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Pool used",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 8,
+        "w": 5,
+        "h": 5
+      },
+      "description": "Allocated as a percentage of pool size. ZFS performance degrades as a pool approaches full; 80% is the conventional point to start planning, 90% to act.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "truenas_pool_allocated_bytes{host=\"truenas\"} / truenas_pool_size_bytes{host=\"truenas\"} * 100",
+          "legendFormat": "{{pool}}",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Days since scrub",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 8,
+        "w": 5,
+        "h": 5
+      },
+      "description": "A scrub is what detects silent corruption before it is read back. Thresholds match #176's overdue rule (35 days), which is set above the monthly schedule so ordinary jitter does not fire it.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "max(truenas_pool_scrub_age_seconds{host=\"truenas\"}) / 86400",
+          "legendFormat": "days",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 35
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pool capacity",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 8,
+        "w": 9,
+        "h": 5
+      },
+      "description": "Allocated vs free over time \u2014 the panel to read before buying disks.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "truenas_pool_allocated_bytes{host=\"truenas\"}",
+          "legendFormat": "allocated",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "truenas_pool_free_bytes{host=\"truenas\"}",
+          "legendFormat": "free",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": 600000
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Disk I/O",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 13,
         "w": 24,
         "h": 1
       },
@@ -182,7 +446,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 14,
         "w": 12,
         "h": 7
       },
@@ -241,7 +505,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 8,
+        "y": 14,
         "w": 12,
         "h": 7
       },
@@ -296,7 +560,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 21,
         "w": 24,
         "h": 1
       },
@@ -312,7 +576,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 16,
+        "y": 22,
         "w": 12,
         "h": 7
       },
@@ -395,7 +659,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 16,
+        "y": 22,
         "w": 12,
         "h": 7
       },
@@ -476,7 +740,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 29,
         "w": 24,
         "h": 1
       },
@@ -492,7 +756,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 30,
         "w": 12,
         "h": 7
       },
@@ -600,7 +864,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 30,
         "w": 12,
         "h": 7
       },
