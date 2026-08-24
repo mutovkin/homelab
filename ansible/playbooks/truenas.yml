@@ -18,3 +18,16 @@
   become: false
   roles:
     - truenas_reporting
+
+# The poller runs ON THE OBSERVABILITY HOST, not on the appliance: it needs a
+# loopback path to VictoriaMetrics' import endpoint (so the credential never
+# crosses the LAN and no firewall grant is needed) and a systemd to schedule it.
+# Gated on the host actually running the observability stack rather than
+# hard-coded to eq12_docker, so moving that stack moves its poller with it.
+- name: Deploy the TrueNAS metrics poller
+  hosts: docker_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - role: truenas_poller
+      when: "'observability' in (services | default([]))"

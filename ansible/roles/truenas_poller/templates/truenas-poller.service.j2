@@ -1,0 +1,18 @@
+[Unit]
+Description=TrueNAS API metrics poller (#174)
+Documentation=https://github.com/mutovkin/homelab/issues/174
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ truenas_poller_user }}
+EnvironmentFile={{ truenas_poller_dir }}/truenas-poller.env
+ExecStart={{ truenas_poller_dir }}/venv/bin/python {{ truenas_poller_dir }}/truenas_poller.py
+# No Restart=: this is a oneshot driven by a timer. A failed cycle must simply
+# not push, so that truenas_poller_up goes stale and the liveness rule notices —
+# retrying inside the unit would only blur how long the data has been missing.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

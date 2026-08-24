@@ -17,8 +17,10 @@ apiVersion: 1
 #
 # ── TWO PROPERTIES OF truenas_disk_temp_temp THAT SHAPE EVERY RULE BELOW ──────
 #
-# 1. IT IS SPARSE. It updates every few MINUTES, not every 60s like the rest of
-#    the stream — a 5-minute window is legitimately empty on a perfectly healthy
+# 1. THE GRAPHITE SERIES IS SPARSE (it updates every few MINUTES, not every 60s).
+#    The rules below no longer use it — #174's poller supplies a dense, 60s
+#    per-device series instead — but the property is recorded because anything
+#    querying truenas_disk_temp_temp directly still has to cope with it — a 5-minute window is legitimately empty on a perfectly healthy
 #    array. That is why every query below wraps the selector in
 #    last_over_time(...[30m]) instead of reading the instant value: without it
 #    the rules would flap between OK and NoData continuously in normal operation,
@@ -33,22 +35,25 @@ apiVersion: 1
 #    the serial-based selector below rather than by an explicit != — the selector
 #    is an allowlist, which fails closed.
 #
-# ── HDD SCOPING IS BY SERIAL, AND THAT IS INTERIM ────────────────────────────
+# ── HDD SCOPING IS BY MEDIA TYPE (#174 resolved the interim by-serial list) ──
 # 47C is a warning for a 7200rpm Exos and an ordinary Tuesday for an NVMe (those
-# run to 60-70C by design), so an unscoped threshold would either page for
-# healthy SSDs or be set so high it never protects the HDDs. The Graphite stream
-# keys temperature by serial+lunid and carries NO media type, so the five
-# spinning disks are named explicitly.
+# run to 60-70C by design), so the threshold has to be scoped to spinning disks.
 #
-# >>> THIS LIST GOES STALE WHEN A DRIVE IS REPLACED. <<<
-# A swapped drive silently drops out of the allowlist and is monitored by nothing
-# — failing OPEN, which is the one direction that matters here. #174's API poller
-# exports a media-type label (disk.temperatures returns plain sdb/nvme0n1 plus
-# type); when it lands, replace the serial regex with that label and delete this
-# paragraph. Until then, a drive swap is a change to THIS file.
+# This originally hard-coded five drive serials, because the Graphite stream
+# carries no media type — and that list went stale the moment a drive was
+# replaced, failing OPEN. #174's poller removed it: truenas_disk_temperature_celsius
+# is keyed by real DEVICE NAME and carries media="hdd"/"ssd"/"virtual".
 #
-# Serials verified against the appliance 2026-08-23 (all ST26000NM000C, 26TB):
-#   ZXA07GGS ZXA02DNC ZXA19LRP ZXA1Q6VK ZXA02XYW
+# THE CLASSIFICATION IS BY ROTATION RATE, NOT BY `type`, and that distinction is
+# load-bearing: the QEMU virtual boot disk (sda) reports type="HDD" from the API
+# with rotationrate=None. Selecting on type would therefore include a disk with no
+# SMART whose temperature reads as a fabricated 0 — the exact series this rule
+# must never see. Measured 2026-08-23: sdb-sdf media=hdd (rotationrate 7200),
+# nvme0n1/nvme1n1 media=ssd, sda media=virtual.
+#
+# The window is [10m], not the [30m] the Graphite series needed: the poller runs
+# every 60s, so this series is DENSE. 10m still tolerates a few missed cycles
+# without flapping.
 #
 # ── NoData POLICY, PER RULE ──────────────────────────────────────────────────
 # Absence is owned EXACTLY ONCE, by truenas-metrics-absent — the same convention
@@ -77,7 +82,7 @@ groups:
         isPaused: false
         annotations:
           summary: >-
-            TrueNAS disk {{ $labels.disk }} is at {{ $values.B }}C (warning above 47C).
+            TrueNAS disk {{ $labels.devname }} is at {{ $values.B }}C (warning above 47C).
           description: >-
             A 26TB Exos drive is running warmer than its normal 38-41C band.
             This is an EARLY WARNING, well inside the drive's rated operating
@@ -88,10 +93,9 @@ groups:
             If several drives cross together, suspect chassis airflow before
             suspecting the disks.
             The critical companion rule fires at 52C.
-            NOTE: this rule watches five drives BY SERIAL
-            (ZXA07GGS ZXA02DNC ZXA19LRP ZXA1Q6VK ZXA02XYW). If a drive has been
-            replaced, it is not being watched — see the header of
-            files/data/grafana/provisioning/alerting/truenas-health.yaml.
+            Drives are selected by media="hdd", which #174's poller derives from
+            the disk's rotation rate — so a replaced drive is picked up
+            automatically and needs no change here.
         labels:
           severity: warning
           # Routed to BOTH channels by the nas-thermal route in
@@ -115,8 +119,8 @@ groups:
               # names WHICH disk; the notification policy groups on `disk` for the
               # same reason it groups on hostname and integration.
               expr: >-
-                max by (disk) (last_over_time(truenas_disk_temp_temp{host="truenas",
-                disk=~"_serial_lunid_(ZXA07GGS|ZXA02DNC|ZXA19LRP|ZXA1Q6VK|ZXA02XYW)_.*"}[30m]))
+                max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas",
+                media="hdd"}[10m]))
               instant: true
               range: false
               intervalMs: 60000
@@ -166,7 +170,7 @@ groups:
         isPaused: false
         annotations:
           summary: >-
-            TrueNAS disk {{ $labels.disk }} is at {{ $values.B }}C (CRITICAL above 52C).
+            TrueNAS disk {{ $labels.devname }} is at {{ $values.B }}C (CRITICAL above 52C).
           description: >-
             Act now. Sustained operation at this temperature shortens drive life
             and, across an array, raises the chance of a second failure during a
@@ -191,8 +195,8 @@ groups:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
               expr: >-
-                max by (disk) (last_over_time(truenas_disk_temp_temp{host="truenas",
-                disk=~"_serial_lunid_(ZXA07GGS|ZXA02DNC|ZXA19LRP|ZXA1Q6VK|ZXA02XYW)_.*"}[30m]))
+                max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas",
+                media="hdd"}[10m]))
               instant: true
               range: false
               intervalMs: 60000
@@ -326,3 +330,224 @@ groups:
                     type: lt
                     params:
                       - 1
+      # ---------------------------------------------------------------------
+      - uid: truenas-poller-absent
+        title: TrueNAS API poller has stopped
+        condition: C
+        for: 10m
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: The TrueNAS API poller has not reported for 10 minutes — the disk temperature alerts are BLIND.
+          description: >-
+            THIS IS THE LIVENESS RULE FOR THE TEMPERATURE ALERTS, and it is separate
+            from truenas-metrics-absent on purpose. Since #174 the 47C and 52C rules
+            query truenas_disk_temperature_celsius, which the POLLER supplies — not
+            the Graphite stream. So the poller can die while the stream keeps
+            flowing: truenas-metrics-absent would stay green and the thermal rules
+            would go quiet with nothing to say so. Two delivery paths, two liveness
+            rules.
+            The poller pushes NOTHING on a failed cycle, deliberately — a partial
+            scrape pushed as if complete would look like a healthy pool with missing
+            disks. So absence, not a zero, is the failure signal.
+            Check: `systemctl status truenas-poller.timer` and
+            `journalctl -u truenas-poller.service -n 30` on eq12_docker. Usual causes
+            are a revoked API key, or a role missing from the ansible-ctrl privilege
+            (pool.query needs POOL_READ, disk.query needs DISK_READ).
+        labels:
+          severity: critical
+          component: nas-thermal
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: 'count(last_over_time(truenas_poller_up{host="truenas"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+      # ---------------------------------------------------------------------
+      - uid: truenas-pool-degraded
+        title: TrueNAS pool is not healthy
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: TrueNAS pool {{ $labels.pool }} is not reporting healthy.
+          description: >-
+            ZFS considers the pool unhealthy — DEGRADED, FAULTED, or carrying errors.
+            Act on this before anything else on the NAS: a degraded pool has already
+            lost redundancy, and a second failure during the resilver is what turns
+            it into data loss. Check `zpool status -v` on the appliance.
+            noDataState is OK because absence is owned by the two liveness rules
+            (truenas-poller-absent and truenas-metrics-absent); duplicating it here
+            would page three times for one outage.
+        labels:
+          severity: critical
+          component: nas-thermal
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: 'min by (pool) (truenas_pool_healthy{host="truenas"})'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+      # ---------------------------------------------------------------------
+      - uid: truenas-scrub-overdue
+        title: TrueNAS pool scrub is overdue
+        condition: C
+        for: 1h
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: TrueNAS pool {{ $labels.pool }} has not completed a scrub in over 35 days.
+          description: >-
+            A scrub is what detects silent corruption before it is read back. TrueNAS
+            schedules them, so this firing usually means the schedule was disabled or
+            has been failing rather than that a single run was missed.
+            35 days, not 30: the default schedule is monthly, and a 30-day threshold
+            would fire every month on ordinary scheduling jitter — an alert that
+            cries wolf on its own cadence is one nobody reads. Measured at the time
+            of writing: last scrub finished 14.3 days ago, 0 errors.
+            for: 1h because this is a slow-moving condition; there is nothing to
+            gain from reacting inside the hour and something to lose from flapping
+            around the boundary.
+        labels:
+          severity: warning
+          # NOT nas-thermal: that component label is what routes a warning to
+          # BOTH channels (see notification-policies). An overdue scrub is a
+          # slow, non-urgent condition — paging Telegram for it would devalue
+          # the thermal route that exists to be noticed immediately.
+          component: nas-pool
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: 'max by (pool) (truenas_pool_scrub_age_seconds{host="truenas"})'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 3024000

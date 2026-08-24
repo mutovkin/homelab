@@ -1,0 +1,12 @@
+---
+# `when: not ansible_check_mode` for the same reason as the enable task: in check
+# mode the unit files were never written, so restarting the timer fails with
+# "Could not find the requested service" — a check-only failure that would break
+# the dry-run-before-apply workflow. Handlers DO run under --check, so gating the
+# notifying tasks would not have been enough; the gate has to be here.
+- name: Restart truenas poller timer
+  ansible.builtin.systemd_service:
+    name: truenas-poller.timer
+    state: restarted
+    daemon_reload: true
+  when: not ansible_check_mode

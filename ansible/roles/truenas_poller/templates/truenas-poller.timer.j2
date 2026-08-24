@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the TrueNAS API metrics poller every {{ truenas_poller_interval }}s (#174)
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec={{ truenas_poller_interval }}s
+# Persistent=false on purpose: a missed run while the host was down is not worth
+# catching up. The metrics are a current-state snapshot, and backfilling a stale
+# one would put a wrong value at the wrong timestamp.
+Persistent=false
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,197 @@
+---
+# The TrueNAS API key lives in the APPLIANCE's own host vault
+# (inventory/host_vars/truenas/vault.yml), following the Proxmox precedent —
+# but this role runs on the observability host, not on the appliance. Reading it
+# through hostvars keeps ONE copy of the secret; duplicating it into this host's
+# vault would create two things to rotate and one to forget.
+- name: Resolve the TrueNAS API credentials from the appliance's host vars
+  ansible.builtin.set_fact:
+    truenas_poller_api_url: "{{ hostvars['truenas']['truenas_api_url'] }}"
+    truenas_poller_api_key: "{{ hostvars['truenas']['vault_truenas_api_key'] }}"
+    truenas_poller_host_label: "{{ hostvars['truenas']['truenas_exporter_namespace'] }}"
+  no_log: true
+  tags: [truenas_poller]
+
+# By NAME, before anything touches state, and under --check (#88). no_log stays
+# OFF here for the same reason as roles/truenas_reporting: an assert whose job is
+# to name the missing variable must not have its output censored.
+- name: Assert the poller's credentials are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined — the TrueNAS poller cannot run without it.
+      The TrueNAS key lives in inventory/host_vars/truenas/vault.yml and the
+      VictoriaMetrics credentials in group_vars/all/vault.yml.
+    quiet: true
+  loop:
+    - truenas_poller_api_url
+    - truenas_poller_api_key
+    - truenas_poller_host_label
+    - vault_vm_auth_username
+    - vault_vm_auth_password
+  tags: [truenas_poller]
+
+- name: Install the poller's python runtime
+  ansible.builtin.apt:
+    name:
+      - python3-venv
+      - git
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags: [truenas_poller]
+
+- name: Create the poller directory
+  ansible.builtin.file:
+    path: "{{ truenas_poller_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags: [truenas_poller]
+
+- name: Create the poller virtualenv
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ truenas_poller_dir }}/venv
+    creates: "{{ truenas_poller_dir }}/venv/bin/python"
+  tags: [truenas_poller]
+
+# Pinned to the same SHA as the control node. `pip install` of a git ref is NOT
+# idempotent by inspection — pip re-clones to compare — so this is gated on a
+# stamp file that records the ref actually installed. Changing the ref in
+# defaults re-runs it; an unchanged ref is a no-op, which is what keeps the
+# second run of this role green (the run that actually tests idempotency).
+- name: Read the installed client ref
+  ansible.builtin.slurp:
+    src: "{{ truenas_poller_dir }}/.client-ref"
+  register: truenas_poller_installed_ref
+  failed_when: false
+  changed_when: false
+  tags: [truenas_poller]
+
+- name: Determine whether the pinned client is already installed
+  ansible.builtin.set_fact:
+    truenas_poller_client_current: >-
+      {{ (truenas_poller_installed_ref.content | default('') | b64decode | trim)
+         == truenas_poller_client_ref }}
+  tags: [truenas_poller]
+
+- name: Install the TrueNAS API client at the pinned commit
+  ansible.builtin.pip:
+    name: "git+https://github.com/truenas/api_client.git@{{ truenas_poller_client_ref }}"
+    virtualenv: "{{ truenas_poller_dir }}/venv"
+    state: forcereinstall
+  when: not truenas_poller_client_current | bool
+  tags: [truenas_poller]
+
+- name: Record the installed client ref
+  ansible.builtin.copy:
+    content: "{{ truenas_poller_client_ref }}\n"
+    dest: "{{ truenas_poller_dir }}/.client-ref"
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [truenas_poller]
+
+- name: Deploy the poller script
+  ansible.builtin.copy:
+    src: truenas_poller.py
+    dest: "{{ truenas_poller_dir }}/truenas_poller.py"
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Restart truenas poller timer
+  tags: [truenas_poller]
+
+# diff: false — this renders the TrueNAS API key and the VictoriaMetrics
+# credential. The task still reports changed; its content never reaches the log
+# (#88, same treatment as the observability .env and the NUT configs).
+- name: Deploy the poller environment file
+  ansible.builtin.template:
+    src: truenas-poller.env.j2
+    dest: "{{ truenas_poller_dir }}/truenas-poller.env"
+    owner: root
+    group: root
+    mode: "0600"
+  diff: false
+  notify: Restart truenas poller timer
+  tags: [truenas_poller]
+
+- name: Deploy the poller systemd unit
+  ansible.builtin.template:
+    src: truenas-poller.service.j2
+    dest: /etc/systemd/system/truenas-poller.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart truenas poller timer
+  tags: [truenas_poller]
+
+- name: Deploy the poller systemd timer
+  ansible.builtin.template:
+    src: truenas-poller.timer.j2
+    dest: /etc/systemd/system/truenas-poller.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart truenas poller timer
+  tags: [truenas_poller]
+
+# `when: not ansible_check_mode`, and the reason is the documented one rather
+# than convenience: in check mode the template tasks above have not written
+# /etc/systemd/system/truenas-poller.timer, so systemd genuinely does not know
+# the unit and this fails with "Could not find the requested service" — a
+# check-only failure that would break the dry-run-before-apply workflow this
+# repo requires. CLAUDE.md's corollary applies: a task whose inputs only exist
+# after a real apply is invisible to --check, so its first execution is its first
+# test, and it must be verified against a host rather than a dry run. It is —
+# the synchronous poll cycle and its assert below do exactly that.
+- name: Enable the poller timer
+  ansible.builtin.systemd_service:
+    name: truenas-poller.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: not ansible_check_mode
+  tags: [truenas_poller]
+
+- name: Apply any pending unit changes before proving delivery
+  ansible.builtin.meta: flush_handlers
+  tags: [truenas_poller]
+
+# PROVE DELIVERY, NOT CONFIGURATION. #173 measured a green deploy that shipped no
+# data at all, so "the timer is enabled" is not evidence of anything. Running the
+# unit once synchronously and reading its exit status turns the first apply into
+# a real test — and `ignore_errors` rather than `failed_when: false`, because the
+# assert below must be able to read `failed` (CLAUDE.md: failed_when:false
+# ASSIGNS failed=False and makes a paired assert vacuous).
+- name: Run one poll cycle synchronously
+  ansible.builtin.systemd_service:
+    name: truenas-poller.service
+    state: started
+  register: truenas_poller_run
+  changed_when: false
+  # ignore_errors, NOT failed_when: false. The latter ASSIGNS failed=False, which
+  # would make the assert below literally `assert: true` — a guard that can never
+  # fire (CLAUDE.md). Measured precedent, not theory.
+  ignore_errors: true
+  when: not ansible_check_mode
+  tags: [truenas_poller]
+
+- name: Assert the poll cycle succeeded
+  ansible.builtin.assert:
+    that:
+      - truenas_poller_run is not failed
+      - truenas_poller_run.status.ExecMainStatus | default(1) | int == 0
+    fail_msg: >-
+      The TrueNAS poller ran but did not succeed (ExecMainStatus
+      {{ truenas_poller_run.status.ExecMainStatus | default('?') }}). It pushes
+      NOTHING on failure by design, so metrics are simply absent rather than
+      wrong. Read `journalctl -u truenas-poller.service -n 30`; the usual causes
+      are a revoked API key, or a missing role on the ansible-ctrl privilege
+      (pool.query needs POOL_READ and disk.query needs DISK_READ).
+    success_msg: The TrueNAS poller completed a full cycle and pushed its metrics.
+    quiet: true
+  when: not ansible_check_mode
+  tags: [truenas_poller]

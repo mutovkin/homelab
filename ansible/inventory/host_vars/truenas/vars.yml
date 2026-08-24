@@ -29,12 +29,17 @@ truenas_validate_certs: false
 truenas_granted_roles:
   # Required by reporting.exporters.create/update. Includes REPORTING_READ
   # (measured: reporting.exporters.query succeeds with WRITE alone), which is
-  # also what makes disk.temperatures readable for #174 at no extra grant.
+  # also what makes disk.temperatures readable at no extra grant.
   - REPORTING_WRITE
-# NOT granted yet, each waiting on the change that needs it:
-#   POOL_READ  -> #174, pool health/capacity/scrub (the netdata stream has NO
-#                 pool graph at all, so this is the only source)
-#   DISK_READ  -> #174, optional model/slot labels
+  # #174's poller. pool.query is the ONLY source of pool health, capacity and
+  # scrub state — TrueNAS 26.0's netdata exports no pool chart at all.
+  - POOL_READ
+  # #174's poller. disk.query supplies devname/serial/model and, critically,
+  # ROTATION RATE — the only honest way to tell a real spinning disk from the
+  # QEMU virtual boot disk, which reports type="HDD" with no SMART.
+  - DISK_READ
+# Still NOT granted, and each absence is deliberate — verified 2026-08-23 that
+# privilege.query, user.query and system.reboot are all denied to this account.
 
 # === Graphite reporting exporter ===
 #
