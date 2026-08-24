@@ -92,6 +92,53 @@
     quiet: true
   when: observability_ha_scrape | default(false) | bool
 
+# #178: obs-telegraf-metrics-absent is scoped to ONE host name, written into the
+# rule file as `system_uptime{host="eq12_docker"}` (that file's own comment argues
+# why pinning beats the host-agnostic form, and states the cost). The cost is that
+# the rule cannot follow the stack: move this role to another host, or rename
+# eq12_docker, and the rule keeps watching a name nothing exports — it goes
+# permanently NoData -> Alerting on the old name while the NEW host's telegraf
+# stream has no absence owner at all. Silence, not a page, and every deploy stays
+# green. That is exactly the class of defect #178 exists to end.
+#
+# THIS ASSERT IS WHAT A FUTURE OPERATOR TRIPS INSTEAD OF DISCOVERING THAT
+# SILENCE — it forces the selector edit into the same change that moves or
+# renames the host. Static (control-machine lookup + inventory_hostname only), so
+# it runs under --check and fails before anything touches state.
+#
+# The value is parsed OUT OF the deployed rule file, like the datasource-uid check
+# further down, so the guard cannot drift from what is actually provisioned. The
+# anchor `system_uptime{host="` appears exactly once in that file (the expr; the
+# narrative comments spell the name without it). A restructured file that no
+# longer matches yields '' and FAILS on the length check — never a silent pass.
+- name: Assert the telegraf alert rule's pinned host selector matches this host
+  vars:
+    _telegraf_rule_host: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+          | regex_search('system_uptime\{host="([^"]+)"', '\1')
+          | default([], true) | first | default('', true)) }}
+  ansible.builtin.assert:
+    that:
+      - _telegraf_rule_host | length > 0
+      - _telegraf_rule_host == inventory_hostname
+    fail_msg: >-
+      The alert rule obs-telegraf-metrics-absent is scoped to the host selector
+      "{{ _telegraf_rule_host }}" (an EMPTY value here means the expr in
+      files/data/grafana/provisioning/alerting/telegraf-health.yaml no longer
+      contains system_uptime{host="..." at all — the file was restructured and
+      this guard could not read it), but this play is deploying the observability
+      stack to inventory_hostname={{ inventory_hostname }}. That rule is the ONLY absence
+      owner for telegraf's metric stream, and unlike obs-vector-metrics-absent it
+      is NOT host-agnostic — it never picks up a new or renamed host on its own.
+      Left as-is, {{ inventory_hostname }}'s telegraf can die, or start stamping a
+      container id / the literal ${TELEGRAF_HOSTNAME} as its host label, and
+      nothing pages: every other telegraf-fed rule aggregates the host dimension
+      away. You get silence, not an alert. Fix by editing the `expr` in
+      files/data/grafana/provisioning/alerting/telegraf-health.yaml in THIS change
+      — to {{ inventory_hostname }} for a rename, or to a selector naming both
+      hosts (host=~"a|b") if the stack now runs in two places.
+    quiet: true
+
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
 # Governed ports and why each is on the list:
 #
