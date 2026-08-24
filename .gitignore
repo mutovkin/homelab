@@ -29,3 +29,9 @@
 # as .sql.j2, so plain .sql in the tree is always a secret-bearing dump)
 backups/
 *.sql
+
+__pycache__/
+# HA /api/states snapshots carry personal home-state data (#171).
+# scripts/reconcile-ha-entities.py refuses to write one inside a git
+# work tree; this is the second line of defence.
+ha-states*.json

@@ -36,7 +36,9 @@ Usage:
     scripts/reconcile-ha-entities.py --start 1787443200 --end 1787541146
     scripts/reconcile-ha-entities.py --ha-states-json /tmp/ha-states.json
 
-Exit codes: 0 = all guards passed, 2 = a guard failed (do not publish the report).
+Exit codes: 0 = all guards passed; 1 = a fatal error before the verdict (bad
+credentials, unreachable endpoint, malformed payload, unusable snapshot);
+2 = a guard failed, and no dead list was printed.
 """
 
 from __future__ import annotations
@@ -113,12 +115,42 @@ G3_MIN_CONTROL = 10
 G3_MIN_HIT_RATE = 0.90
 G3_WINDOW_S = 1800
 G3_WIDENED_WINDOW_S = 7200
+# How far back the start auto-detection probes. Data older than this is invisible
+# to it, so `saturated` reports the cap rather than presenting it as the answer.
+DETECT_LOOKBACK_S = 8 * 86400
+# How far an HA snapshot may sit from --end before it describes a different
+# instance than the VictoriaMetrics window does.
+SNAPSHOT_SKEW_TOLERANCE_S = 900
 
 HTTP_TIMEOUT = 120
 
 
 class Failure(RuntimeError):
     """Fatal, operator-readable error. Never carries a credential."""
+
+
+class Secret:
+    """A credential that cannot be printed by accident.
+
+    CPython's default excepthook does not dump locals, so a bare string was
+    already safe on every path here -- but a credential travelling as a plain
+    positional argument through four stack frames is one `capture_locals=True`
+    (pytest, rich, cgitb) away from being echoed verbatim. The redacting repr
+    closes that off permanently.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:  # noqa: D105 - the whole point
+        return "<Secret redacted>"
+
+    __str__ = __repr__
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +202,17 @@ def vault_key(plaintext: str, key: str, where: str) -> str:
                 value = value[1:-1]
             if not value:
                 raise Failure(f"{key} is empty in {where}")
+            # `key: >` / `key: |` is a BLOCK SCALAR whose value lives on the
+            # following indented lines. A line-based parser would hand back the
+            # indicator itself, which is non-empty and would sail through to an
+            # Authorization header -- surfacing as a 401 that names the wrong
+            # cause. Reject the shape instead.
+            if value in {">", "|", ">-", "|-", ">+", "|+", "{", "["}:
+                raise Failure(
+                    f"{key} in {where} looks like a YAML block/flow indicator "
+                    f"({value!r}), not a value -- this parser reads scalars on one "
+                    "line only. Rewrite it as a single-line quoted scalar."
+                )
             return value
     raise Failure(f"{key} not found in {where}")
 
@@ -181,7 +224,7 @@ def vault_key(plaintext: str, key: str, where: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _request(req: urllib.request.Request, what: str) -> dict:
+def _request(req: urllib.request.Request, what: str) -> dict | list:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             payload = resp.read()
@@ -191,37 +234,78 @@ def _request(req: urllib.request.Request, what: str) -> dict:
         raise Failure(f"{what}: unreachable ({exc.reason})") from None
     except TimeoutError:
         raise Failure(f"{what}: timed out after {HTTP_TIMEOUT}s") from None
+    except OSError as exc:
+        # A reset or short read mid-body lands here rather than as a traceback.
+        raise Failure(f"{what}: connection failed ({type(exc).__name__})") from None
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
         raise Failure(f"{what}: response was not JSON ({len(payload)} bytes)") from None
 
 
-def ha_get(ha_url: str, path: str, token: str) -> list | dict:
-    req = urllib.request.Request(
-        ha_url.rstrip("/") + path,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        method="GET",
-    )
+def ha_get(ha_url: str, path: str, token: Secret) -> list | dict:
+    try:
+        req = urllib.request.Request(
+            ha_url.rstrip("/") + path,
+            headers={"Authorization": f"Bearer {token.reveal()}",
+                     "Accept": "application/json"},
+            method="GET",
+        )
+    except ValueError as exc:
+        raise Failure(f"HA GET {path}: bad --ha-url ({exc})") from None
     return _request(req, f"HA GET {path}")
 
 
-def vm_post(vm_url: str, path: str, params: list[tuple[str, str]], auth: str) -> dict:
+def vm_post(
+    vm_url: str, path: str, params: list[tuple[str, str]], auth: Secret
+) -> dict:
     """POST to a VictoriaMetrics READ endpoint (query / query_range / series)."""
     body = urllib.parse.urlencode(params).encode()
-    req = urllib.request.Request(
-        vm_url.rstrip("/") + path,
-        data=body,
-        headers={
-            "Authorization": f"Basic {auth}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        method="POST",
-    )
+    try:
+        req = urllib.request.Request(
+            vm_url.rstrip("/") + path,
+            data=body,
+            headers={
+                "Authorization": f"Basic {auth.reveal()}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+    except ValueError as exc:
+        raise Failure(f"VM POST {path}: bad --vm-url ({exc})") from None
     doc = _request(req, f"VM POST {path}")
+    if not isinstance(doc, dict):
+        raise Failure(f"VM POST {path}: response was not a JSON object")
     if doc.get("status") != "success":
         raise Failure(f"VM POST {path}: status={doc.get('status')!r}")
+    # A single-node VictoriaMetrics never sets isPartial, but a 200 carrying a
+    # partial body is exactly the "looks fine, measured less than it should"
+    # shape this whole script exists to refuse. One line, checked anyway.
+    if doc.get("isPartial"):
+        raise Failure(
+            f"VM POST {path}: response is marked isPartial -- a partial answer "
+            "cannot support an absence finding"
+        )
     return doc
+
+
+def vm_result(doc: dict, path: str) -> list:
+    """`data.result` from a VictoriaMetrics response, or a named Failure.
+
+    Without this, a malformed-but-"success" payload was a silent empty list in
+    one helper and a raw KeyError (exit 1, traceback) in two others -- the same
+    server condition reported three different ways, one of them invisibly.
+    """
+    data = doc.get("data")
+    if not isinstance(data, dict) or "result" not in data:
+        raise Failure(
+            f"VM POST {path}: response has status=success but no data.result -- "
+            "refusing to read a malformed payload as an empty measurement"
+        )
+    result = data["result"]
+    if not isinstance(result, list):
+        raise Failure(f"VM POST {path}: data.result is not a list")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -252,12 +336,15 @@ def numeric_capable(state: str) -> bool:
     passes neither can only be stored as a string field -- so its entity may be
     STRUCTURALLY INVISIBLE to a numeric-only reconciliation even while alive.
     """
+    if not isinstance(state, str):
+        # HA can serve "state": null; .lower() would raise on it.
+        return False
     try:
-        float(state)
-        return True
+        value = float(state)
     except (TypeError, ValueError):
-        pass
-    return state.lower() in BINARY_STATE_VOCABULARY
+        return state.lower() in BINARY_STATE_VOCABULARY
+    # NaN/inf are float()-able and would poison max() and the silence formatter.
+    return value == value and value not in (float("inf"), float("-inf"))
 
 
 def fmt_silence(seconds: float) -> str:
@@ -274,42 +361,83 @@ def fmt_silence(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def detect_start(vm_url: str, auth: str, end: int) -> int:
-    """Widest window with data: the first 30-min bucket of {db="ha"} that has a
-    value, minus one bucket for alignment slop. Fails loudly on an empty range --
-    an auto-detected start must never silently become "8 days ago"."""
+def detect_start(vm_url: str, auth: Secret, end: int) -> tuple[int, bool]:
+    """First 30-min bucket of {db="ha"} that has a value, minus one bucket of
+    alignment slop. Returns (start, saturated).
+
+    The probe only looks back DETECT_LOOKBACK_S. Once the data outlives that, the
+    first populated bucket IS the probe's own left edge, and "widest available
+    window" silently becomes "the probe's lookback" -- a cap presented as a
+    measurement. `saturated` says so, and the caller prints it.
+    """
+    probe_start = end - DETECT_LOOKBACK_S
     doc = vm_post(
         vm_url,
         "/api/v1/query_range",
         [
             ("query", 'count({db="ha"})'),
-            ("start", str(end - 8 * 86400)),
+            ("start", str(probe_start)),
             ("end", str(end)),
             ("step", "1800"),
         ],
         auth,
     )
-    result = doc["data"]["result"]
+    result = vm_result(doc, "/api/v1/query_range")
     if not result:
         raise Failure(
             'auto-detect start: count({db="ha"}) returned no series over the last '
-            "8 days -- is the HA push alive?"
+            f"{DETECT_LOOKBACK_S // 86400} days -- is the HA push alive?"
         )
     stamps = sorted(int(point[0]) for series in result for point in series["values"])
     if not stamps:
         raise Failure('auto-detect start: count({db="ha"}) has no populated bucket')
-    return stamps[0] - 1800
+    # Within two buckets of the probe edge means the data very likely predates it.
+    saturated = stamps[0] <= probe_start + 3600
+    return stamps[0] - 1800, saturated
 
 
-def fetch_ha_states(ha_url: str, token: str) -> list[dict]:
+def fetch_ha_states(ha_url: str, token: Secret) -> list[dict]:
     states = ha_get(ha_url, "/api/states", token)
     if not isinstance(states, list):
         raise Failure("HA /api/states did not return a list")
+    if not states:
+        # Without this, len(ha)==0 divides by zero in the restore-burst indicator
+        # BEFORE the guard block can print "G1 FAIL 0 entities" and exit 2 -- the
+        # guard's own broken case would crash instead of reporting.
+        raise Failure("HA /api/states returned an empty list")
     return states
 
 
+def git_worktrees_containing(path: Path) -> list[Path]:
+    """Every git work tree that would track `path`, resolved from `path` itself.
+
+    Testing containment against the SCRIPT's repo root is not enough here: this
+    repo drives its agents from worktrees under `.claude/worktrees/<id>/`, which
+    are subdirectories of the main checkout. A snapshot written to the main
+    checkout's root is outside the worktree, passes a root-relative test, and
+    lands in a tracked tree anyway. Ask git about the destination instead.
+    """
+    probe = path if path.is_dir() else path.parent
+    roots: list[Path] = []
+    for flag in ("--show-toplevel", "--git-common-dir"):
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(probe), "rev-parse", flag],
+                capture_output=True, text=True, check=False,
+            )
+        except (FileNotFoundError, OSError):
+            return roots
+        if proc.returncode != 0 or not proc.stdout.strip():
+            continue
+        found = Path(proc.stdout.strip()).resolve()
+        # --git-common-dir points at `<main checkout>/.git`; its parent is the
+        # tree that would track the file.
+        roots.append(found.parent if found.name == ".git" else found)
+    return roots
+
+
 def load_or_capture_ha_states(
-    ha_url: str, token: str, snapshot: Path | None, repo_root: Path
+    ha_url: str, token: Secret, snapshot: Path | None, repo_root: Path, end: int
 ) -> list[dict]:
     """HA states, optionally pinned to a snapshot file so a re-run is reproducible.
 
@@ -322,23 +450,54 @@ def load_or_capture_ha_states(
 
     snapshot = snapshot.expanduser().resolve()
     # /api/states is a full readout of a home: occupancy, device names, presence.
-    # It must never land in the repo, where a stray `git add -A` would publish it.
-    if snapshot == repo_root or repo_root in snapshot.parents:
+    # It must never land in a tracked tree, where a stray `git add -A` publishes it.
+    forbidden = [repo_root, *git_worktrees_containing(snapshot)]
+    for root in forbidden:
+        if snapshot == root or root in snapshot.parents:
+            raise Failure(
+                f"refusing to write an HA snapshot inside a git work tree "
+                f"({root}): /api/states carries personal home-state data. Put it "
+                "in a scratch directory outside every checkout."
+            )
+
+    if snapshot.exists() and not snapshot.is_file():
         raise Failure(
-            f"refusing to use an HA snapshot inside the repo ({snapshot}): "
-            "/api/states carries personal home-state data. Put it in a scratch "
-            "directory outside the working tree."
+            f"HA snapshot path {snapshot} exists and is not a regular file"
         )
 
     if snapshot.is_file():
         try:
-            states = json.loads(snapshot.read_text())
+            payload = json.loads(snapshot.read_text())
         except json.JSONDecodeError as exc:
-            raise Failure(f"HA snapshot {snapshot} is not valid JSON: {exc.msg}") from None
+            raise Failure(
+                f"HA snapshot {snapshot} is not valid JSON ({exc.msg}) -- an "
+                "interrupted capture leaves a truncated file; delete it and re-run"
+            ) from None
+        if not isinstance(payload, dict) or "states" not in payload:
+            raise Failure(
+                f"HA snapshot {snapshot} is not in the expected "
+                '{"captured_at": <epoch>, "states": [...]} form'
+            )
+        states = payload["states"]
+        captured_at = payload.get("captured_at")
         if not isinstance(states, list) or not states:
             raise Failure(f"HA snapshot {snapshot} does not hold a non-empty list")
-        print(f"HA states REPLAYED from snapshot {snapshot} ({len(states)} entities)",
-              file=sys.stderr)
+        if not isinstance(captured_at, (int, float)):
+            raise Failure(f"HA snapshot {snapshot} has no usable captured_at stamp")
+        # A snapshot taken far from `end` describes a different instance than the
+        # VictoriaMetrics window does: entities created, renamed or deleted in
+        # between land in never-seen and vm_only as pure artefacts. A grossly
+        # stale one happens to empty G3's control set, but that backstop is
+        # accidental and does not cover the near-stale regime.
+        skew = abs(captured_at - end)
+        if skew > SNAPSHOT_SKEW_TOLERANCE_S:
+            raise Failure(
+                f"HA snapshot {snapshot} was captured {skew:.0f}s from --end "
+                f"(tolerance {SNAPSHOT_SKEW_TOLERANCE_S}s). Re-capture it, or pin "
+                "--end to the capture time; a skewed snapshot invents findings."
+            )
+        print(f"HA states REPLAYED from snapshot {snapshot} ({len(states)} entities, "
+              f"captured {skew:.0f}s from --end)", file=sys.stderr)
         return states
 
     states = fetch_ha_states(ha_url, token)
@@ -346,14 +505,14 @@ def load_or_capture_ha_states(
     # Written 0600: see the personal-data note above.
     fd = os.open(str(snapshot), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
-        json.dump(states, handle)
+        json.dump({"captured_at": int(time.time()), "states": states}, handle)
     print(f"HA states CAPTURED to snapshot {snapshot} ({len(states)} entities)",
           file=sys.stderr)
     return states
 
 
 def fetch_vm_series(
-    vm_url: str, auth: str, start: int, end: int, match: str
+    vm_url: str, auth: Secret, start: int, end: int, match: str
 ) -> list[dict]:
     doc = vm_post(
         vm_url,
@@ -361,12 +520,18 @@ def fetch_vm_series(
         [("match[]", match), ("start", str(start)), ("end", str(end))],
         auth,
     )
-    return doc.get("data", []) or []
+    data = doc.get("data")
+    if data is None or not isinstance(data, list):
+        raise Failure(
+            f"VM POST /api/v1/series ({match}): status=success but data is "
+            f"{type(data).__name__} -- refusing to read that as zero series"
+        )
+    return data
 
 
 def fetch_vm_last_samples(
-    vm_url: str, auth: str, start: int, end: int
-) -> dict[str, float]:
+    vm_url: str, auth: Secret, start: int, end: int
+) -> tuple[dict[str, float], int]:
     """Raw last-sample unix timestamp per (domain, entity_id) over the window.
 
     tlast_over_time is verified against /api/v1/export before every run (see the
@@ -387,15 +552,20 @@ def fetch_vm_last_samples(
         auth,
     )
     out: dict[str, float] = {}
-    for item in doc["data"]["result"]:
+    dropped = 0
+    for item in vm_result(doc, "/api/v1/query"):
         metric = item.get("metric", {})
         domain, entity = metric.get("domain"), metric.get("entity_id")
         if not domain or not entity:
+            dropped += 1
+            continue
+        ts = float(item["value"][1])
+        if ts != ts:  # NaN would poison max() and crash fmt_silence later
+            dropped += 1
             continue
         key = f"{domain}.{entity}"
-        ts = float(item["value"][1])
         out[key] = max(out.get(key, 0.0), ts)
-    return out
+    return out, dropped
 
 
 # ---------------------------------------------------------------------------
@@ -433,14 +603,27 @@ def main() -> int:
         eq12_vault, "vault_ha_long_lived_token", "host_vars/eq12_docker/vault.yml"
     )
     del all_vault, eq12_vault
-    vm_auth = base64.b64encode(f"{vm_user}:{vm_pass}".encode()).decode()
+    vm_auth = Secret(base64.b64encode(f"{vm_user}:{vm_pass}".encode()).decode())
+    ha_token = Secret(ha_token)
     del vm_pass
 
     # -- window --------------------------------------------------------------
     # The ONLY wallclock read in the script; everything downstream is a function
     # of (start, end), which is what makes a pinned re-run reproducible.
-    end = args.end if args.end is not None else int(time.time())
-    start = args.start if args.start is not None else detect_start(args.vm_url, vm_auth, end)
+    now = int(time.time())
+    end = args.end if args.end is not None else now
+    if end > now + 300:
+        # A future --end inflates every silence figure uniformly and still clears
+        # G3, so it fails no guard while making the whole report wrong.
+        raise Failure(
+            f"--end {end} is {end - now}s in the future; silence figures would be "
+            "inflated by that much and no guard would catch it"
+        )
+    saturated = False
+    if args.start is not None:
+        start = args.start
+    else:
+        start, saturated = detect_start(args.vm_url, vm_auth, end)
     if start >= end:
         raise Failure(f"start ({start}) must be before end ({end})")
     window = end - start
@@ -453,7 +636,20 @@ def main() -> int:
     emit("HA <-> VictoriaMetrics entity-set reconciliation (issue #171 item 2)")
     emit("=" * 78)
     emit(f"WINDOW   : {iso(start)} .. {iso(end)}  ({window / 3600:.1f}h)")
-    emit(f"           --start {start} --end {end}   (pin these to reproduce)")
+    emit(f"           --start {start} --end {end}")
+    if args.ha_states_json:
+        emit("           HA input PINNED to a snapshot -- with the same snapshot, "
+             "this output is byte-identical.")
+    else:
+        emit("           NOT byte-reproducible: HA /api/states is live and its "
+             "last_changed drifts (~11 entities/min),")
+        emit("           which moves the G3 control size and the restore-burst "
+             "line. Add --ha-states-json to pin it.")
+    if saturated:
+        emit(f"           WARNING: start is at the auto-detection probe's own edge "
+             f"({DETECT_LOOKBACK_S // 86400}d).")
+        emit("           This window is capped by the PROBE, not by the data -- "
+             "pass --start explicitly to go wider.")
     emit(f"HA       : {args.ha_url}/api/states")
     emit(f"VM       : {args.vm_url}  (series + tlast_over_time, read-only)")
     emit()
@@ -464,18 +660,29 @@ def main() -> int:
         ha_token,
         Path(args.ha_states_json) if args.ha_states_json else None,
         repo_root,
+        end,
     )
     del ha_token
 
     ha: dict[str, dict] = {}
+    dropped_no_dot = 0
+    unparseable_last_changed = 0
     for item in states:
         full_id = item.get("entity_id", "")
-        if "." not in full_id:
+        if not isinstance(full_id, str) or "." not in full_id:
+            dropped_no_dot += 1
             continue
+        changed = parse_ha_ts(item.get("last_changed", ""))
+        if changed is None:
+            # Counted, not swallowed: a PARTIAL last_changed format change would
+            # otherwise shrink G3's control set and DEFLATE the restore-burst
+            # indicator -- making a restore look less like a restore, on the one
+            # number whose job is to detect exactly that.
+            unparseable_last_changed += 1
         ha[full_id] = {
             "domain": full_id.split(".", 1)[0],
             "state": item.get("state", ""),
-            "last_changed": parse_ha_ts(item.get("last_changed", "")),
+            "last_changed": changed,
         }
 
     absent_by_design, excluded_update, writable = [], [], []
@@ -495,22 +702,48 @@ def main() -> int:
 
     # -- VM side -------------------------------------------------------------
     series = fetch_vm_series(args.vm_url, vm_auth, start, end, '{db="ha"}')
-    vm_seen: set[str] = set()
+    index_seen: set[str] = set()
     unjoinable = []
+    nameless_series = 0
     metric_names: set[str] = set()
     for metric in series:
         name = metric.get("__name__", "")
         if name:
             metric_names.add(name)
+        else:
+            nameless_series += 1
         domain, entity = metric.get("domain"), metric.get("entity_id")
         if domain and entity:
-            vm_seen.add(f"{domain}.{entity}")
+            index_seen.add(f"{domain}.{entity}")
         else:
             unjoinable.append(name or "<unnamed>")
 
-    last_sample = fetch_vm_last_samples(args.vm_url, vm_auth, start, end)
+    last_sample, tlast_dropped = fetch_vm_last_samples(args.vm_url, vm_auth, start, end)
+
+    # The two VM endpoints disagree in BOTH directions, for different reasons:
+    #   index_only -- /api/v1/series resolves against a per-DAY inverted index, so
+    #                 it can list a series whose samples fall outside [start,end];
+    #                 or a sample landed so recently it is not queryable yet
+    #                 (measured: present in /api/v1/export at T, invisible to a
+    #                 query at T+5s).
+    #   query_only -- tlast_over_time returned a real in-window sample timestamp
+    #                 for a pair the index did not list.
+    # Taking the UNION is the conservative direction: an entity either endpoint
+    # saw is never printed as dead. Reading only the index would have let a
+    # query_only entity into the dead list with its own proof of life sitting
+    # unread in memory.
+    vm_seen = index_seen | set(last_sample)
+    index_only = sorted(index_seen - set(last_sample))
+    query_only = sorted(set(last_sample) - index_seen)
+
     update_domain_series = fetch_vm_series(
         args.vm_url, vm_auth, start, end, '{db="ha",domain="update"}'
+    )
+    # G4 positive control: the SAME code path, same argument shape, against a
+    # domain known to be present. Without it, G4's healthy answer (0 series) and
+    # a silently broken query (0 series) are the same number.
+    g4_control_series = fetch_vm_series(
+        args.vm_url, vm_auth, start, end, '{db="ha",domain="sensor"}'
     )
     update_prefixed_names = sorted(n for n in metric_names if n.startswith("update."))
 
@@ -528,7 +761,12 @@ def main() -> int:
     seen_now_update = sorted(vm_seen & set(excluded_update))
 
     silence = {e: end - last_sample[e] for e in seen_writable if e in last_sample}
-    seen_no_ts = sorted(e for e in seen_writable if e not in last_sample)
+    # Writable entities the index listed but tlast could not date. NOT a weaker
+    # signal than never-seen and not a stronger one -- it is UNRESOLVED, and the
+    # two causes point opposite ways (see the union comment above). Listed in
+    # full, never truncated: truncating this list is how the earlier version hid
+    # them.
+    seen_writable_undated = sorted(e for e in seen_writable if e not in last_sample)
 
     # -- counts --------------------------------------------------------------
     emit("-- COUNTS " + "-" * 67)
@@ -538,26 +776,31 @@ def main() -> int:
     emit(f"  absent by design (unavail/unknown)  {len(absent_by_design):5d}"
          "   HA never writes these: event_to_json -> None")
     emit(f"  writable                            {len(writable):5d}")
+    emit(f"  entity_id unusable (no domain dot)  {dropped_no_dot:5d}   dropped")
+    emit(f"  last_changed unparseable            {unparseable_last_changed:5d}"
+         "   G3/restore-burst read past these")
     emit(f"VM series over window                 {len(series):5d}"
          f"   ({len(metric_names)} distinct metric names)")
-    emit(f"VM distinct (domain, entity_id)       {len(vm_seen):5d}")
+    emit(f"  series with no __name__             {nameless_series:5d}")
     emit(f"  series lacking domain or entity_id  {len(unjoinable):5d}   (cannot join)")
     for name in sorted(set(unjoinable))[:10]:
         emit(f"      {name}")
+    emit(f"  tlast results dropped (labels/NaN)  {tlast_dropped:5d}")
+    emit(f"VM distinct (domain, entity_id)       {len(vm_seen):5d}"
+         "   union of both endpoints")
+    emit(f"  listed by index, undated by query   {len(index_only):5d}")
+    emit(f"  dated by query, not listed by index {len(query_only):5d}")
     emit(f"writable AND VM-seen                  {len(seen_writable):5d}")
-    emit(f"VM-seen, now unavailable/unknown       {len(seen_now_absent):5d}"
+    emit(f"  of which undated (no tlast)         {len(seen_writable_undated):5d}"
+         "   UNRESOLVED, not ranked")
+    emit(f"VM-seen, now unavailable/unknown      {len(seen_now_absent):5d}"
          "   seen in-window, HA reports it gone now")
-    emit(f"VM-seen, domain=update                 {len(seen_now_update):5d}"
+    emit(f"VM-seen, domain=update                {len(seen_now_update):5d}"
          "   expected 0 (G4 subtraction)")
     emit(f"writable NEVER seen                   {len(never_seen):5d}")
     emit(f"  numeric-capable state (candidates)  {len(never_seen_numeric):5d}")
     emit(f"  string-only state (INCONCLUSIVE)    {len(never_seen_string):5d}")
     emit(f"VM-seen with no HA entity (vm_only)   {len(vm_only):5d}")
-    if seen_no_ts:
-        emit(f"seen but no tlast timestamp           {len(seen_no_ts):5d}"
-             "   (series/query disagreement)")
-        for entity in seen_no_ts[:10]:
-            emit(f"      {entity}")
     emit()
 
     # -- guards --------------------------------------------------------------
@@ -574,6 +817,12 @@ def main() -> int:
     g2_ok = len(vm_seen) >= G2_MIN
     emit(f"G2 VM side non-empty          {'PASS' if g2_ok else 'FAIL'}"
          f"   {len(vm_seen)} distinct (domain, entity_id) >= {G2_MIN}")
+    emit(f"   NOTE: {G2_MIN} was pre-registered against a 6.8h window and this one "
+         f"is {window / 3600:.1f}h, so the floor is slack here --")
+    emit("   a large but non-total shortfall would still pass. G3 cannot cover "
+         "that (its control set is by")
+    emit("   construction the FRESHEST entities); the cross-endpoint check below "
+         "is what covers it.")
     if not g2_ok:
         failures.append(f"G2: VM holds {len(vm_seen)} pairs, expected >= {G2_MIN}")
 
@@ -623,34 +872,72 @@ def main() -> int:
         for rec in ha.values()
         if rec["last_changed"] is not None and end - g3_window <= rec["last_changed"] <= end
     )
+    burst_pct = (recent_all / len(ha) * 100) if ha else 0.0
     emit(f"   restore-burst indicator: {recent_all}/{len(ha)} "
-         f"({recent_all / len(ha) * 100:.1f}%) of ALL entities report last_changed "
+         f"({burst_pct:.1f}%) of ALL entities report last_changed "
          f"inside the same {g3_window // 60}min -- a restore rewrites this to ~100%.")
+    if unparseable_last_changed:
+        emit(f"   CAVEAT: {unparseable_last_changed} entities have an unparseable "
+             "last_changed and are excluded from the numerator,")
+        emit("   which DEFLATES this indicator -- the one number whose job is to "
+             "detect that HA rewrote the field.")
 
-    # P1 -- structural invariant, added after the stop-point-1 review rather than
-    # pre-registered with G1-G5. Every VM-seen pair must land in exactly one
-    # bucket; an unexplained remainder means entities are being silently absorbed
-    # by the report instead of reported.
+    # P1 -- a SOURCE-CODE regression canary, not a data guard, and labelled as one.
+    # The three HA buckets come from a single if/elif/else over unique dict keys,
+    # so this identity holds for every possible input; it can only fail if someone
+    # edits the bucketing. That is worth keeping (it is how the dropped bucket was
+    # demonstrated) but it is not evidence about THIS run's data, and it does not
+    # catch an entity being absorbed WITHIN a bucket.
     partition = (
         len(seen_writable) + len(seen_now_absent) + len(seen_now_update) + len(vm_only)
     )
     p1_ok = partition == len(vm_seen)
-    emit(f"P1 VM-seen partition sums     {'PASS' if p1_ok else 'FAIL'}"
+    emit(f"P1 bucket-code canary         {'PASS' if p1_ok else 'FAIL'}"
          f"   {len(seen_writable)} writable + {len(seen_now_absent)} now-absent + "
          f"{len(seen_now_update)} update + {len(vm_only)} vm_only = {partition} "
          f"vs {len(vm_seen)} distinct pairs")
+    emit("   (structural: true for all inputs by construction -- fails only on a "
+         "bucketing-code edit, not on data)")
     if not p1_ok:
         failures.append(
             f"P1: buckets sum to {partition} but VM holds {len(vm_seen)} distinct "
-            "pairs -- some VM-seen entities are unaccounted for"
+            "pairs -- the bucketing code has been broken"
+        )
+
+    # P2 -- the cross-endpoint check, and the one that CAN fail on data. Every
+    # entity tlast dated must be in the seen set, so no entity can reach the dead
+    # list while its own sample timestamp sits unread in memory.
+    leaked = sorted(set(last_sample) & set(never_seen))
+    p2_ok = not leaked
+    emit(f"P2 no dated entity called dead {'PASS' if p2_ok else 'FAIL'}"
+         f"  {len(leaked)} of {len(never_seen)} never-seen entities have a "
+         "tlast timestamp")
+    for entity in leaked[:10]:
+        emit(f"   LEAKED: {entity} last sample {iso(last_sample[entity])}")
+    if not p2_ok:
+        failures.append(
+            f"P2: {len(leaked)} entities are in the dead list AND have an in-window "
+            "sample timestamp -- the seen set is not reading both endpoints"
         )
 
     g4_domain_hits = len(update_domain_series)
     g4_name_hits = len(update_prefixed_names)
-    g4_ok = g4_domain_hits == 0 and g4_name_hits == 0
+    g4_control_hits = len(g4_control_series)
+    # An expect-zero guard whose query is broken also returns zero. The control
+    # runs the SAME helper with the same argument shape against a domain known to
+    # be present, so "0 because absent" and "0 because broken" stop looking alike.
+    g4_ok = g4_domain_hits == 0 and g4_name_hits == 0 and g4_control_hits > 0
     emit(f"G4 update-domain absent       {'PASS' if g4_ok else 'FAIL'}"
          f"   {g4_domain_hits} series with domain=\"update\", {g4_name_hits} of "
          f"{len(metric_names)} metric names start 'update.'")
+    emit(f"   positive control (same code path, domain=\"sensor\"): "
+         f"{g4_control_hits} series -- must be > 0, else the zero above is "
+         "meaningless")
+    if g4_control_hits == 0:
+        failures.append(
+            "G4: the positive control returned 0 series for domain=\"sensor\", so "
+            "the zero for domain=\"update\" proves nothing about the subtraction"
+        )
     if not g4_ok:
         failures.append(
             f"G4: domain=update series {g4_domain_hits}, update.* metric names "
@@ -661,6 +948,14 @@ def main() -> int:
             emit(f"   update-prefixed name: {name}")
     emit()
 
+    g5_pinned = bool(args.ha_states_json)
+    emit(f"G5 determinism precondition   {'PASS' if g5_pinned else 'N/A '}"
+         f"   HA input {'PINNED to a snapshot' if g5_pinned else 'is LIVE'} -- "
+         "byte-identity requires --ha-states-json")
+    emit("   (not a failure: an unpinned run is still valid, its G3 control line "
+         "just will not repeat)")
+    emit()
+
     if failures:
         emit("=" * 78)
         for line in failures:
@@ -668,7 +963,15 @@ def main() -> int:
         emit("A failed guard is an instrument failure. Fix the instrument; do NOT "
              "publish a dead list from this run.")
         emit("=" * 78)
-        print("\n".join(out))
+        # Banner at the TOP too: the counts print before the guards, so the
+        # numbers a reader would paste sit above the verdict without it.
+        banner = [
+            "!" * 78,
+            "!! GUARDS FAILED -- EVERY NUMBER BELOW IS UNTRUSTWORTHY. DO NOT PUBLISH.",
+            "!" * 78,
+            "",
+        ]
+        print("\n".join(banner + out))
         return 2
 
     # -- never-seen numeric candidates ---------------------------------------
@@ -697,12 +1000,39 @@ def main() -> int:
         emit("  (none)")
     emit()
 
+    emit(f"-- VM-SEEN BUT UNDATED ({len(seen_writable_undated)}) -- listed by the "
+         "series index, no tlast timestamp --")
+    emit("   UNRESOLVED, deliberately not ranked. Two causes point OPPOSITE ways and "
+         "this run cannot")
+    emit("   separate them: /api/v1/series resolves against a per-DAY index and may "
+         "list a series whose")
+    emit("   samples fall outside the window (=> staler than it looks), or a sample "
+         "landed too recently")
+    emit("   to be queryable (=> fresher). Measured: a sample in /api/v1/export at "
+         "T was invisible to a")
+    emit("   query at T+5s. Full list, never truncated:")
+    for entity in seen_writable_undated:
+        emit(f"   {entity}  state={ha[entity]['state']!r}")
+    if not seen_writable_undated:
+        emit("   (none)")
+    emit()
+
     # -- G6 structural invisibility -------------------------------------------
     emit("-- STRUCTURAL INVISIBILITY (G6 measurement, not a guard) --")
-    emit("   A state that is neither float()-able nor in HA's binary vocabulary can "
-         "only be stored")
-    emit("   as a string field, so such an entity can be alive and still invisible "
-         "to this diff.")
+    emit("   Pre-registered theory: a state that is neither float()-able nor in HA's "
+         "binary vocabulary")
+    emit("   can only be stored as a string field, so such an entity could be alive "
+         "and still invisible.")
+    seen_in_ha = [e for e in vm_seen if e in ha]
+    seen_string = [e for e in seen_in_ha if not numeric_capable(ha[e]["state"])]
+    emit(f"   MEASURED, and it does NOT hold: {len(seen_string)} of "
+         f"{len(seen_in_ha)} VM-seen entities carry a non-numeric-capable state,")
+    emit("   so string states ARE written. The rule below is applied as "
+         "pre-registered anyway -- a rule fixed")
+    emit("   before a run does not get rewritten after seeing the data -- but the "
+         "refutation cuts toward MORE")
+    emit("   suspicion of this group, not less: their absence is no longer excused "
+         "by mechanism, just unranked.")
     string_by_domain: dict[str, int] = {}
     for entity in never_seen_string:
         string_by_domain[ha[entity]["domain"]] = (
@@ -766,12 +1096,37 @@ def main() -> int:
     emit("-- CROSS-CHECK vs the nine `last_seen`-derived dead devices (#133) --")
     emit("   Two independent mechanisms. If they disagree, the disagreement is the "
          "finding.")
+    def device_matches(pool) -> list[str]:
+        # ANCHORED, not a bare substring: `stairs_sensor` is a substring of
+        # `upstairs_sensor` and `downstairs_sensor`, and a live sibling matching
+        # by accident would set any_seen and manufacture the DISAGREE verdict --
+        # the headline this report treats as its most important possible result.
+        # Verified against this instance: anchoring changes 98 matches to 98.
+        out = []
+        for full in pool:
+            obj = full.split(".", 1)[1]
+            if obj == device or obj.startswith(device + "_"):
+                out.append(full)
+        return sorted(out)
+
     for device, days, since in NINE_DEVICES:
-        matches = sorted(e for e in ha if device in e.split(".", 1)[1])
+        matches = device_matches(ha)
         emit(f"   {days:>5}d  {device}  (last_seen: {since})")
         if not matches:
-            emit("            VERDICT: ABSENT-FROM-HA -- no entity's object_id "
-                 "contains this name (deleted from HA)")
+            # Ask the side that can still answer: an entity deleted from HA may
+            # well have samples in VictoriaMetrics, which is the one question
+            # this script is uniquely able to settle.
+            vm_matches = device_matches(vm_seen)
+            if vm_matches:
+                emit("            VERDICT: ABSENT-FROM-HA, PRESENT IN VM -- deleted "
+                     "from HA, yet VictoriaMetrics holds in-window samples:")
+                for entity in vm_matches:
+                    quiet = (fmt_silence(end - last_sample[entity])
+                             if entity in last_sample else "undated")
+                    emit(f"                     {entity}  silence={quiet}")
+            else:
+                emit("            VERDICT: ABSENT-FROM-HA -- no entity's object_id "
+                     "matches this name in HA or in VM (deleted)")
             continue
         any_seen = False
         for entity in matches:
