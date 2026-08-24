@@ -364,7 +364,7 @@ Hard-won lessons — check here before debugging from scratch.
   `truenas_` and re-assert with `namepass`. (2) **`host` is the collector's**: telegraf's
   `[agent] hostname` is stamped on metrics it merely RECEIVED, so NAS series claimed to
   come from the collector; map the exporter's `namespace` segment to the `host` label so
-  attribution comes from config, not from whoever forwarded it (fleet-wide version: #178).
+  attribution comes from config, not from whoever forwarded it (fixed fleet-wide in #178).
   (3) **`truenas_disk_temp` is SPARSE** (minutes, not 60s) so a 5-minute window is
   legitimately empty on a healthy array — rules need a lookback wider than the update
   interval — and `_devicename_sda` reports **0, not null**, a fabricated zero that drags

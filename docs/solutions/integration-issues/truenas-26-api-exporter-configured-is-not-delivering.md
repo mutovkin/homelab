@@ -72,7 +72,9 @@ Fix: the exporter's `namespace` carries the appliance's identity, and the
 graphite template maps that segment to the **`host` label** — so attribution is
 derived from configuration rather than inherited from whoever forwarded the data.
 The fleet-wide version of this (eq12_docker's own metrics also claim
-`homelab-telegraf`) is filed as #178.
+`homelab-telegraf`) was filed as #178 and fixed 2026-08-23: telegraf's
+`[agent] hostname` now substitutes `${TELEGRAF_HOSTNAME}` (= `inventory_hostname`,
+templated by env.j2), so its own metrics carry `host="eq12_docker"`.
 
 ## 4. Disk temperature is SPARSE, and the boot disk lies
 
