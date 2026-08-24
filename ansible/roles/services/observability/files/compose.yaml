@@ -286,6 +286,14 @@ services:
       # VictoriaMetrics auth — always on since #88; see the `:-` note on vector.
       VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}
       VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
+      # The host label on every metric this telegraf produces (#178) — templated
+      # from inventory_hostname by templates/env.j2, same mechanism and same
+      # convention as VECTOR_HOSTNAME on the vector service. :? not :- — an
+      # empty value would make telegraf fall back to os.Hostname(), which inside
+      # this container is a 12-char container id that changes on every recreate.
+      # Value quoted: the message contains '#178' and an unquoted YAML scalar
+      # ends at ' #' (see the vaultwarden dotenv gotcha in CLAUDE.md).
+      TELEGRAF_HOSTNAME: "${TELEGRAF_HOSTNAME:?required - see roles/services/observability/templates/env.j2 (#178)}"
     deploy:
       resources:
         limits:
