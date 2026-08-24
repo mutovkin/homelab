@@ -107,8 +107,21 @@ Fix — one entry, and it must stay:
 taginclude = ["container_id", "container_name", "container_image", "host"]
 ```
 
-`environment`/`location` are deliberately left out: fleet-constant here, so they
-would cost cardinality on 448 series and answer no question.
+`environment`/`location` are deliberately left out — but **not** for cardinality,
+which was the wrong word for it. Both are fleet-constant, and adding a *constant*
+label to existing series creates no new series: the count stays 448 either way.
+The real cost is **width** — one more name/value pair carried in every series'
+identity, in the index and in every remote-write payload — for a dimension that
+can only ever take one value on this fleet.
+
+The flip side, recorded because it is a deliberate asymmetry rather than an
+oversight: `taginclude` appears only under `[[inputs.docker]]`, so `docker_*` is
+the one telegraf family that does **not** carry `environment`/`location`. A
+future cross-family selector — `{environment="homelab"}`, a dashboard variable
+built on `location` — silently misses every `docker_*` series. It still returns
+rows, just not those ones, which is the same shape of quiet wrongness this whole
+document is about. Adding a host to the stack, or a selector like that, means
+adding both tags to the allowlist rather than assuming they are already there.
 
 Why `host` specifically is not cosmetic: `container_name` is **not** unique
 across machines. The day this stack runs on a second host, both hosts'

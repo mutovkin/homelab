@@ -369,10 +369,19 @@ evaluate each identity separately measures staleness per series, and a series th
 has stopped receiving samples remains inside the rule's lookback window until it ages
 out — so the abandoned identity keeps a growing staleness value and the rule fires
 for the whole width of that window. This is tolerable when the rename predates the
-rule; when the rule ships in the same change as the rename, it arrives firing. The
-resolution is to scope such a rule to the identity it expects rather than grouping
-across whatever identities exist, accepting the stated cost that it then watches
-exactly the names it lists and a new one is unwatched until added.
+rule; when the rule ships in the same change as the rename, it arrives firing. Two
+query shapes resolve it, and they differ in which direction they fail. The rule can
+stay identity-agnostic and exclude the retired identity by name, which quiets it
+immediately and needs no further attention once that identity ages out of the
+lookback — but the exclusion is then dead weight, and a wrong-but-present identity
+is once again indistinguishable from a healthy one, so the rule has gone quiet
+about the very thing it was written to catch. Or the rule can be scoped to the
+identity it expects, so that a wrong identity ages the query down to no rows at
+all, which such a rule is configured to treat as an alert. The scoped form is
+preferred because its failure direction is a page rather than silence: it fails
+loud, and stays loud until someone corrects the name. Its cost is the mirror image
+— it watches exactly the identities it lists, and a newly added one is unwatched
+until it is listed too.
 
 The owner's own signal is the part most easily got wrong, because choosing it feels
 like naming rather than measuring. A signal can only carry an absence rule if it is

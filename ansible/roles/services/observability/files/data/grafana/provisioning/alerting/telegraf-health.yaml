@@ -135,10 +135,12 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              # `min by (host)` is kept around the pinned selector on purpose: it
-              # keeps {{ $labels.host }} renderable in the annotation, and adding
-              # a second host to the selector then evaluates each on its own
-              # rather than letting the healthiest one mask a dead peer (#160).
+              # `min by (host)` is kept around the pinned selector on purpose:
+              # adding a second host to the selector then evaluates each one on
+              # its own, rather than letting the healthiest mask a dead peer
+              # (#160). It is NOT here to keep $labels.host renderable — no
+              # annotation on this rule interpolates it, and none needs to,
+              # because the selector names the host literally and so do they.
               expr: 'min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))'
               instant: true
               range: false
@@ -166,8 +168,12 @@ groups:
           # than guessed: the live lag for host="eq12_docker" was 0.641s
           # immediately after the #178 apply, so the healthy signal sits three
           # orders of magnitude below the threshold and a telegraf restart (~3s)
-          # cannot approach it. Detection latency ~15 min (600s of lag plus
-          # `for: 5m`), matching obs-http-probe-absent.
+          # cannot approach it. Detection latency is 15-20 min, and the group's
+          # 5m `interval` is the third term that is easy to forget: the lag must
+          # EXCEED 600s (10 min), that must then be OBSERVED at an evaluation
+          # tick — nothing is evaluated between ticks, so up to 5m later — and
+          # only then does `for: 5m` start, which also advances only at ticks.
+          # Best case 15 min, worst case ~20. Same order as obs-http-probe-absent.
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:

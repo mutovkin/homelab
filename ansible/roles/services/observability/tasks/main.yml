@@ -111,6 +111,10 @@
 # anchor `system_uptime{host="` appears exactly once in that file (the expr; the
 # narrative comments spell the name without it). A restructured file that no
 # longer matches yields '' and FAILS on the length check — never a silent pass.
+# That includes deliberately WIDENING the rule to a regex matcher (host=~"a|b"),
+# which this anchor cannot read: the guard still fails loud, but for a reason its
+# message would state wrongly, so widening the rule means widening the regex and
+# the comparison here in the same change. The fail_msg says so too.
 - name: Assert the telegraf alert rule's pinned host selector matches this host
   vars:
     _telegraf_rule_host: >-
@@ -134,9 +138,15 @@
       container id / the literal ${TELEGRAF_HOSTNAME} as its host label, and
       nothing pages: every other telegraf-fed rule aggregates the host dimension
       away. You get silence, not an alert. Fix by editing the `expr` in
-      files/data/grafana/provisioning/alerting/telegraf-health.yaml in THIS change
-      — to {{ inventory_hostname }} for a rename, or to a selector naming both
-      hosts (host=~"a|b") if the stack now runs in two places.
+      files/data/grafana/provisioning/alerting/telegraf-health.yaml in THIS
+      change — to {{ inventory_hostname }} if this is a rename. If instead the
+      stack now runs in two places, note that a regex selector (host=~"a|b")
+      does NOT satisfy this guard: the anchor above is the literal
+      system_uptime{host=" , which a regex matcher does not contain, so you
+      would land on the empty-selector branch of this same message and its
+      "file was restructured" wording would be misleading you. Widening the
+      rule therefore means widening this assert's regex and comparison in the
+      same change.
     quiet: true
 
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
