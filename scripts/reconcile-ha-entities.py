@@ -20,15 +20,33 @@ header: an entity absent from VictoriaMetrics is evidence of death only if it wa
 expected to report inside that window. See docs/solutions/conventions/
 instant-query-cannot-prove-a-series-is-live.md.
 
-Reproducibility, stated precisely because the naive claim is false. Everything
-derived from VictoriaMetrics is a pure function of (--start, --end) and repeats
-byte-for-byte. HA's /api/states is NOT: it is a live source, and an entity that
-changes state now moves its `last_changed` past a pinned `end`, which shrinks the
-G3 positive-control set (measured 2026-08-24: ~11 entities/min, the only two lines
-that moved across four pinned re-runs). So --ha-states-json pins that side too:
-the first run captures the payload, later runs replay it, and only then is stdout
-byte-identical end to end. Snapshots carry personal home-state data -- keep them
-out of the repo (the script refuses a path inside it).
+Reproducibility, stated precisely because the naive claim is false -- and the
+first precise statement of it was still too strong. THREE sources move, not one.
+
+1. HA's /api/states is a live source: an entity that changes state now moves its
+   `last_changed` past a pinned `end`, which shrinks the G3 positive-control set
+   (measured 2026-08-24: ~11 entities/min, the only two lines that moved across
+   four pinned re-runs). --ha-states-json pins that side: the first run captures
+   the payload, later runs replay it.
+2. The QUERY-derived numbers -- tlast_over_time and count_over_time -- ARE pure
+   functions of (--start, --end). They are the numbers the dead list is built
+   from, and they repeat exactly.
+3. /api/v1/series is NOT. It resolves against a per-UTC-DAY inverted index, so a
+   window that ends mid-day picks up that day's whole bucket, which keeps growing
+   until the day closes. Everything the index contributes therefore depends on
+   WHEN the run happens: index_only, vm_only, the series and metric-name counts,
+   and G4's series counts. Measured on one pinned 28.1h window: 245 union pairs
+   at end+minutes, 300 at end+3.9h (index_only 0 -> 55, vm_only 0 -> 46), while
+   both query legs held steady at 245. A 60-second window returns the same answer
+   as the whole day -- that is the tell.
+
+The practical rule: RUN PROMPTLY after the window ends, and expect byte-identity
+only across re-runs made against the same series-index state. The drift's
+direction is safe for a dead list -- a later sample is evidence of LIFE, so a
+later re-run can only shrink the candidate set, never convict anyone new.
+
+Snapshots carry personal home-state data -- keep them out of the repo (the script
+refuses a path inside it).
 
 Usage:
     export ANSIBLE_VAULT_PASSWORD_FILE=/path/to/.vault_password
@@ -871,7 +889,11 @@ def main() -> int:
                     and args.end is not None)
     if fully_pinned:
         emit("           HA input PINNED to a snapshot and the window pinned "
-             "explicitly -- byte-identical on a re-run.")
+             "explicitly -- byte-identical on a re-run against an")
+        emit("           unchanged series index. /api/v1/series is per-UTC-day, "
+             "so the trailing day's bucket grows until it closes;")
+        emit("           the query legs (tlast/count_over_time) are pure "
+             "functions of the window. Run promptly after `end`.")
     elif args.ha_states_json:
         emit("           HA input pinned, WINDOW IS NOT: --start/--end were not "
              "both given, so `end` moved with the clock and")
@@ -1003,7 +1025,13 @@ def main() -> int:
     #                 it can list a series whose samples fall outside [start,end];
     #                 or a sample landed so recently it is not queryable yet
     #                 (measured: present in /api/v1/export at T, invisible to a
-    #                 query at T+5s).
+    #                 query at T+5s). This is also why the index leg is not a pure
+    #                 function of the window (see the docstring): a window ending
+    #                 mid-day picks up that day's whole bucket, which grows until
+    #                 the day closes. Measured on one pinned window re-run 3.9h
+    #                 later: index_only 0 -> 55, vm_only 0 -> 46, both query legs
+    #                 steady at 245. The union keeps that drift in the SAFE
+    #                 direction -- everything it adds is evidence of life.
     #   query_only -- tlast_over_time returned a real in-window sample timestamp
     #                 for a pair the index did not list.
     # Taking the UNION is the conservative direction: an entity either endpoint
@@ -1288,6 +1316,12 @@ def main() -> int:
          " -- byte-identity needs BOTH")
     emit("   (not a failure: an unpinned run is still valid, it just will not "
          "reproduce byte-for-byte)")
+    emit("   Both pinned is NECESSARY, not sufficient: the series index is "
+         "per-UTC-day and its trailing bucket grows")
+    emit("   until that day closes, so byte-identity holds against an UNCHANGED "
+         "index state. Query-derived numbers")
+    emit("   (tlast/count_over_time, and the dead list built from them) are pure "
+         "functions of the window.")
     emit()
 
     if failures:
@@ -1344,7 +1378,15 @@ def main() -> int:
          "landed too recently")
     emit("   to be queryable (=> fresher). Measured: a sample in /api/v1/export at "
          "T was invisible to a")
-    emit("   query at T+5s. Full list, never truncated:")
+    emit("   query at T+5s. The per-day cause has a MEASURED magnitude, not a "
+         "theoretical one: re-running one")
+    emit("   pinned 28.1h window 3.9h later moved this list from 0 to 9 and "
+         "index_only from 0 to 55, purely")
+    emit("   because the trailing UTC day's bucket had grown. All 9 turned out to "
+         "be live-after-window -- first")
+    emit("   sample 21-79 min AFTER `end` -- which is the fresher cause, and the "
+         "conservative direction. Full")
+    emit("   list, never truncated:")
     for entity in seen_writable_undated:
         emit(f"   {entity}  state={ha[entity]['state']!r}")
     if not seen_writable_undated:
