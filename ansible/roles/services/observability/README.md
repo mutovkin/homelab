@@ -137,10 +137,53 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-**Fourteen** provisioned rules, all in the **Observability** folder. #151, #152 and
-#154 added eight of them (four Vector-health, one docker-ingest twin, three
-delivery-path). Routing is no longer "all by email" — see
+**Twenty-two** provisioned rules (16 `obs-*` + 6 `truenas-*`), all in the
+**Observability** folder — count the uids in
+`files/data/grafana/provisioning/alerting/` before trusting that number. It has
+drifted twice already, each time in the same way: a rule was added and the
+spelled-out total was not bumped, so the prose disagreed with the folder. Every
+count on this page is a snapshot of that directory, not a fact this file can
+enforce — adding a rule means editing the number AND the table in the same change.
+
+#151, #152 and #154 added eight of them (four Vector-health, one docker-ingest
+twin, three delivery-path); #174/#176 added the six TrueNAS rules; #178 added
+**two**, and the pair is the point. The `host` label reaches VictoriaMetrics by
+two INDEPENDENT delivery paths, so a detector on one is blind to the other:
+`obs-telegraf-metrics-absent` watches the AGENT path (telegraf's `[agent]
+hostname` stops resolving, so the expected series stops) and is the mirror of
+`obs-vector-metrics-absent` for the METRICS path, while
+`obs-docker-metrics-unlabelled` watches the PER-PLUGIN FILTER path (`taginclude`
+strips `host` off every `docker_*` series while `system_uptime` keeps flowing,
+perfectly labelled — the state that existed for the whole life of the
+deployment). Every other telegraf-fed rule here aggregates the `host` dimension
+away, so nothing else can see telegraf alive but stamping the wrong host.
+
+The table below itemises **all twenty-two**. It is what someone consults to
+answer "does this signal already have an absence owner?", which is exactly the
+question #178 got wrong once — so a rule missing from it is worse than a wrong
+total. Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
+
+**Absence ownership, so the table is not read as covering more than it does.**
+Absence is deliberately owned exactly once per signal, and two families are
+currently **unowned**:
+
+| signal | absence owner |
+| ------ | ------------- |
+| `system_uptime` (telegraf AGENT stream) | `obs-telegraf-metrics-absent` |
+| `http_response` (probe stream) | `obs-http-probe-absent` |
+| `vector_uptime_seconds` | `obs-vector-metrics-absent` |
+| **`docker_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
+| **`ping_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
+
+`obs-docker-metrics-unlabelled` is **not** an absence owner for `docker_*` — it
+catches those series arriving *mislabelled*, and its `noDataState: OK` is correct
+precisely because its signal only exists while something is broken. If
+`[[inputs.docker]]` dies on its own, `system_uptime` keeps flowing, both telegraf
+rules stay green, and nothing pages. Per-input death with a healthy agent is
+measured here, not hypothetical — `no_new_privs` once stripped setuid off
+`/usr/bin/ping` and eight ping metrics went NO DATA while the container stayed
+healthy.
 
 | uid | rule | fires when | noData |
 | --- | ---- | ---------- | ------ |
@@ -155,12 +198,22 @@ delivery-path). Routing is no longer "all by email" — see
 | `obs-vector-component-errors` | Vector component errors (#151) | `sum by (component_id) (increase(vector_component_errors_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-vector-metrics-absent` | Vector metrics export stopped (#151, #160) | `min by (host) (lag(vector_uptime_seconds[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
+| `obs-telegraf-metrics-absent` | Telegraf metrics stopped arriving for eq12_docker (#178) | `min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-docker-metrics-unlabelled` | Docker metrics have lost their host label (#178) | `count({__name__=~"docker_.+", host=""})` > 0, `for: 5m` | OK |
 | `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_alertmanager_receivers[24h]))` > 600, `for: 5m` | **Alerting** |
+| `truenas-hdd-temp-warning` | TrueNAS HDD temperature above 47C (#176, repointed #174) | `max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas", media="hdd"}[10m]))` > 47, `for: 0s` | OK |
+| `truenas-hdd-temp-critical` | TrueNAS HDD temperature above 52C (#176, repointed #174) | `max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas", media="hdd"}[10m]))` > 52, `for: 0s` | OK |
+| `truenas-metrics-absent` | TrueNAS graphite stream stopped (#176) | `count(last_over_time(truenas_arcstats_size_size{host="truenas"}[10m]))` < 1, `for: 10m` | **Alerting** |
+| `truenas-poller-absent` | TrueNAS API poller has stopped (#174) | `count(last_over_time(truenas_poller_up{host="truenas"}[10m]))` < 1, `for: 10m` | **Alerting** |
+| `truenas-pool-degraded` | TrueNAS pool is not healthy (#174) | `min by (pool) (truenas_pool_healthy{host="truenas"})` < 1, `for: 0s` | OK |
+| `truenas-scrub-overdue` | TrueNAS pool scrub is overdue (#174) | `max by (pool) (truenas_pool_scrub_age_seconds{host="truenas"})` > 3024000 (35d), `for: 1h` | OK |
 
-`execErrState: Alerting` on all fourteen — a datasource that cannot be reached is
-not evidence of health.
+`execErrState: Alerting` on all twenty-two — a datasource that cannot be reached
+is not evidence of health. Counted, not assumed: 22 uids and 22
+`execErrState: Alerting` lines across the seven files in `alerting/`, with no
+other value present.
 
 ### Why so many of the new rules are `noDataState: OK` (#151, #152)
 
@@ -651,6 +704,42 @@ nothing about the drop rule. Two traps here, both real:
   exists to generate one; a counter sitting at 0 reads exactly like a rule nothing
   ever tried to traverse. Use it to confirm the rule keeps firing after later
   reloads, never as the verification itself.
+
+## Metric attribution — the `host` label (#178)
+
+Every metric in VictoriaMetrics answers "which machine is this from?" the same
+way: **`host` = Ansible `inventory_hostname`**, plus `host="truenas"` for the
+appliance. Three producers, one convention:
+
+| producer | how `host` is set | value here |
+| -------- | ----------------- | ---------- |
+| telegraf (`[agent] hostname`) | `${TELEGRAF_HOSTNAME}` from `.env` (`inventory_hostname`), passed through by `compose.yaml` | `eq12_docker` |
+| Vector (containerized + native agents) | `${VECTOR_HOSTNAME}` from `.env`, same expression | `eq12_docker`, `eq12`, `n5pro`, `n5pro_docker` |
+| TrueNAS (graphite stream + API poller) | exporter `namespace` segment → `host` label; poller sets it itself | `truenas` |
+
+Before #178 telegraf pinned the literal `hostname = "homelab-telegraf"`, a name
+matching no machine, so eq12_docker's own vitals were unattributable.
+**Label boundary 2026-08-24T03:14Z** (= 2026-08-23 20:14 PDT — stated in UTC
+because that is what VictoriaMetrics displays, and the local date is a day
+earlier): samples before that instant carry `host="homelab-telegraf"`. Nothing consumed the old value (audited), so the break
+was accepted rather than shimmed.
+
+Two traps live in `telegraf.conf` because of it, both measured on the running
+1.39.3 image rather than assumed:
+
+- **An unset `TELEGRAF_HOSTNAME` is not an error.** `telegraf --test` with the
+  variable absent from the container env emits `host=${TELEGRAF_HOSTNAME}` — the
+  literal string — with exit 0 and a healthy agent; with it empty it falls back to
+  `os.Hostname()`, a 12-char container id. 1.38+ "strict environment variable
+  handling" catches neither. The `:?` guard in `compose.yaml` covers the
+  `.env` → compose hop; `obs-telegraf-metrics-absent` covers the rest.
+- **`taginclude` is an allowlist over the FINAL tag set.** `[[inputs.docker]]`
+  had `taginclude = ["container_id", "container_name", "container_image"]`, which
+  is applied *after* the agent adds `host` and `[global_tags]` — so all 448
+  `docker_*` series arrived with no host, no environment and no location, for the
+  life of the deployment, with no error anywhere. `"host"` is in that list now and
+  must stay: `container_name` is not unique across machines, so without it two
+  hosts' per-container series merge silently.
 
 ## Log record schema
 

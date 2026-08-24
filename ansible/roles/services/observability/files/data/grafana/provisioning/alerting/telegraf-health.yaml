@@ -1,0 +1,330 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — telegraf's own liveness and, specifically,
+# the CONTINUITY OF ITS host LABEL (#178).
+#
+# TWO rules, because the label reaches VictoriaMetrics by TWO INDEPENDENT PATHS
+# and a detector on one is blind to the other — the same "two delivery paths need
+# two liveness rules" lesson #174 learned the hard way:
+#   obs-telegraf-metrics-absent   — the AGENT path. [agent] hostname stops
+#       resolving (empty, unset, renamed) -> the expected series stops.
+#   obs-docker-metrics-unlabelled — the PER-PLUGIN FILTER path. [[inputs.docker]]
+#       `taginclude` is an allowlist over the FINAL tag set, so dropping "host"
+#       from it strips the label off every docker_* series while system_uptime —
+#       what the first rule watches — keeps flowing, perfectly labelled. Measured:
+#       that exact state existed for the whole life of the deployment and nothing
+#       could see it. A comment on the taginclude line is not a detector.
+#
+# The failure this exists for, and it is not "telegraf is down": #178 replaced a
+# hardcoded `hostname = "homelab-telegraf"` with `hostname =
+# "${TELEGRAF_HOSTNAME}"`, substituted from the container env. That fixed the
+# label and, on its own, left NOTHING able to notice the label going wrong
+# again. Every other telegraf-fed rule in this folder aggregates the host
+# dimension AWAY — probe-health groups `by (server, check_type)`,
+# delivery-health by `integration` — so telegraf can be alive, healthy, green in
+# every deploy, and stamping a garbage host on every metric, and not one rule
+# moves. That is bit-for-bit the state #178 exists to end.
+#
+# It is a reachable state, measured on the running image rather than argued
+# (telegraf 1.39.3, `telegraf --test`, same table in ../../../../compose.yaml):
+#   TELEGRAF_HOSTNAME empty                  -> host=<12-char container id>
+#   TELEGRAF_HOSTNAME unset in container env -> host=${TELEGRAF_HOSTNAME}, LITERALLY,
+#                                               exit 0, agent healthy
+# Telegraf's 1.38+ "strict environment variable handling" does not cover the
+# unset case. Deleting the passthrough line in compose.yaml is all it takes.
+#
+# SELECTOR: `host="eq12_docker"`, and the pinned name is the deliberate part.
+# The obvious mirror of obs-vector-metrics-absent would be host-agnostic —
+# `min by (host) (lag(system_uptime[24h]))` — and that is what this rule was
+# first written as. Measured against live VictoriaMetrics before landing, that
+# form arrives FIRING and stays that way for ~24h: lag() returns every series
+# with at least one sample in the lookbehind, so the retired
+# host="homelab-telegraf" series (last sample 2026-08-24T03:14:52Z, the #178
+# apply) is still in the result set with a monotonically climbing lag — measured
+# 1321s twenty-two minutes after the cutover, against a 600s threshold. The
+# host-agnostic form pages for a full lookbehind after ANY deliberate rename,
+# which is the tradeoff README.md already records for the vector rule; the
+# difference here is that #178 IS the rename, so the rule would have arrived
+# firing at its own deploy.
+# Scoping to the expected name instead is strictly BETTER at the job this rule
+# exists for: a wrong-but-present label (container id, stale name, the literal
+# ${TELEGRAF_HOSTNAME}) makes the eq12_docker series stop, which is exactly what
+# this fires on — and it does not depend on the abandoned series still sitting
+# in the window, which is the mechanism that produced the transient. Precedent
+# for a pinned host in a static alert file: truenas-health.yaml, host="truenas".
+# THE COST, stated plainly so the next reader does not have to rediscover it:
+# this rule watches ONE name. If the observability stack ever also runs on
+# n5pro_docker, that host's telegraf is unmonitored until its name is added to
+# the selector below — a silent gap, not a loud one. Adding a host to this stack
+# means adding it here in the same change.
+#
+# Why system_uptime and not one of the richer families: [[inputs.system]] emits
+# it every 60s unconditionally, it exists whenever the agent is running at all,
+# and it carries no per-target labels that could churn series identity. Same
+# role vector_uptime_seconds plays for obs-vector-metrics-absent.
+groups:
+  - orgId: 1
+    name: telegraf-health
+    folder: Observability
+    # 5m, matching vector-health. For obs-telegraf-metrics-absent the condition
+    # is 600s of lag, so a finer interval would only re-evaluate the same slow
+    # signal more often. It is NOT free for obs-docker-metrics-unlabelled
+    # though: that rule's signal appears instantly when the defect starts, so
+    # this interval, not the signal, sets its onset latency — nothing is
+    # evaluated between ticks, and `for: 5m` only advances at ticks. Measured
+    # end to end in #178's break-and-observe: 6m06s from first unlabelled
+    # sample to Alerting (injection 08:02:44Z, Pending 08:03:50Z, Alerting
+    # 08:08:50Z). Shortening this interval would buy detection latency there at
+    # the cost of re-evaluating the lag rule more often for no gain.
+    interval: 5m
+    rules:
+      # ---------------------------------------------------------------------
+      - uid: obs-telegraf-metrics-absent
+        title: Telegraf metrics stopped arriving for eq12_docker
+        condition: C
+        for: 5m
+        # THE absence owner for telegraf's metric export, mirroring
+        # obs-vector-metrics-absent. This is why probe-health's two failure rules
+        # are noDataState: OK — absence is alerted on exactly once, here, and one
+        # dead telegraf must not page three times.
+        #
+        # Alerting, not OK, and the #151 test is what settles it: system_uptime
+        # is exported continuously every 60s whether or not anything is wrong, so
+        # absence is NEVER its healthy state (unlike a counter such as
+        # vector_component_errors_total, which does not exist until it is
+        # non-zero and therefore must be OK on NoData). NoData here means the
+        # series is gone entirely — telegraf dead for longer than the lookbehind,
+        # VictoriaMetrics unreachable, or the host label no longer equal to
+        # "eq12_docker" for longer than 24h — each of which is the fault this
+        # rule owns.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Telegraf's metrics have stopped arriving for host eq12_docker — or its host label changed.
+          description: >-
+            No system_uptime sample tagged host="eq12_docker" in over 10 minutes,
+            while telegraf collects every 60s. READ THE TWO CAUSES IN THIS ORDER,
+            because the second is the one nothing else in this stack can see.
+            (1) Telegraf is down or wedged — `docker ps` and `docker logs telegraf`
+            on eq12_docker settle it in seconds, and obs-http-probe-absent will
+            usually be firing alongside.
+            (2) Telegraf is UP and its host label is wrong. This is the #178
+            regression, and every other telegraf-fed rule aggregates host away, so
+            this rule is the only thing that sees it. Confirm with
+            `count by (host) (system_uptime)` in VictoriaMetrics: a row labelled
+            with a 12-char container id means TELEGRAF_HOSTNAME resolved EMPTY, and
+            a row reading literally `${TELEGRAF_HOSTNAME}` means the variable is
+            not in the container env at all (measured on 1.39.3: telegraf emits the
+            literal string, exit 0, agent healthy — 1.38+ strict env handling does
+            not catch it). Both are one missing line in
+            ansible/roles/services/observability/files/compose.yaml, whose value is
+            templated from inventory_hostname by templates/env.j2.
+            The [24h] lookbehind mirrors obs-vector-metrics-absent and
+            obs-http-probe-absent: a series with no sample inside the lookbehind is
+            not returned AT ALL, so a shorter window would let a long-dead agent
+            vanish from the query, Grafana mark the instance stale and RESOLVE the
+            alert. relativeTimeRange below must stay >= the lookbehind.
+            NOTE for whoever renames this host on purpose: the rule is scoped to
+            the name, so a deliberate rename makes it fire — update the selector in
+            the same change that does the rename.
+        labels:
+          severity: critical
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # `min by (host)` is kept around the pinned selector on purpose:
+              # adding a second host to the selector then evaluates each one on
+              # its own, rather than letting the healthiest mask a dead peer
+              # (#160). It is NOT here to keep $labels.host renderable — no
+              # annotation on this rule interpolates it, and none needs to,
+              # because the selector names the host literally and so do they.
+              expr: 'min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not silently become 0 and read as
+          # "zero lag, all healthy" (#108). With no numeric value the rule falls
+          # through to noDataState, which is Alerting here on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 600s = ten missed 60s collections. Justified by measurement rather
+          # than guessed: the live lag for host="eq12_docker" was 0.641s
+          # immediately after the #178 apply, so the healthy signal sits three
+          # orders of magnitude below the threshold and a telegraf restart (~3s)
+          # cannot approach it. Detection latency is 15-20 min, and the group's
+          # 5m `interval` is the third term that is easy to forget: the lag must
+          # EXCEED 600s (10 min), that must then be OBSERVED at an evaluation
+          # tick — nothing is evaluated between ticks, so up to 5m later — and
+          # only then does `for: 5m` start, which also advances only at ticks.
+          # Best case 15 min, worst case ~20. Same order as obs-http-probe-absent.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600
+
+      # ---------------------------------------------------------------------
+      - uid: obs-docker-metrics-unlabelled
+        title: Docker metrics have lost their host label
+        condition: C
+        # 5m, not 0s: a telegraf restart produces no docker_* series at all for a
+        # few seconds, which is NoData (healthy here), not a zero. The 5m is for
+        # the case where a partially-collected first batch lands mid-restart.
+        for: 5m
+        # ######################################################################
+        # noDataState: OK IS CORRECT AND MUST NOT BE "FIXED" TO Alerting.
+        #
+        # Read the query before changing this line. It selects docker_* series
+        # that have NO host label. On a healthy system that set is EMPTY, so the
+        # query returns NOTHING and the rule sits in NoData permanently. This
+        # series only EXISTS while the system is broken — absence IS health, and
+        # it is the #151 rule (a signal that does not exist until something goes
+        # wrong cannot carry noDataState: Alerting; obs-vector-discarding-events
+        # and obs-vector-component-errors are OK for exactly the same reason).
+        #
+        # Setting this to Alerting would page CONTINUOUSLY, forever, in perfect
+        # health — and the reflex to "make the absence rule alert on absence" is
+        # precisely why this comment is this long.
+        #
+        # WHAT THIS RULE DOES NOT COVER, STATED PLAINLY (#189). Absence of the
+        # docker_* stream is a DIFFERENT fault, and it currently has NO owner.
+        # obs-telegraf-metrics-absent above does not cover it: that rule watches
+        # system_uptime, i.e. the AGENT stream only. If [[inputs.docker]] dies on
+        # its own — socket unmounted, a permission change after an image bump,
+        # the plugin erroring while the agent stays up — then every docker_*
+        # series stops, system_uptime keeps flowing, the agent rule stays green,
+        # THIS rule sees no unlabelled series and is therefore also green, and
+        # nothing pages. Per-input death with a healthy agent is measured here,
+        # not hypothetical: no_new_privs stripped setuid off /usr/bin/ping and
+        # eight ping metrics went NO DATA while the container stayed healthy.
+        # The fix is a SEPARATE rule (candidate: lag(docker_n_containers)), not
+        # a change to this line — tracked in #189. Do not close that gap by
+        # flipping this noDataState.
+        # ######################################################################
+        noDataState: OK
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Docker container metrics are arriving with no host label — telegraf's tag filter is stripping it.
+          description: >-
+            One or more docker_* series reached VictoriaMetrics with no `host`
+            label. THIS IS A REGRESSION OF #178 AND IT IS INVISIBLE TO EVERY
+            OTHER RULE: obs-telegraf-metrics-absent watches system_uptime, which
+            is agent-tagged and completely unaffected by the docker input's tag
+            filter, so telegraf stays healthy, every deploy stays green, and all
+            448 per-container series quietly lose their machine dimension.
+            The cause is almost certainly one word: `taginclude` in
+            [[inputs.docker]] in
+            ansible/roles/services/observability/files/data/telegraf/telegraf.conf
+            is an ALLOWLIST over the FINAL tag set, applied AFTER the agent adds
+            `host` and [global_tags]. Dropping "host" from that list strips it
+            back off. Check that line first; the file's own comment explains it.
+            Confirm from the query side with
+            `count by (host) ({__name__=~"docker_.+"})`: one row with an EMPTY
+            label set means the label is gone entirely (a label-less result is
+            NOT the same as one host, which is the trap that hid this defect for
+            the life of the deployment).
+            Why this matters beyond tidiness: `container_name` is not unique
+            across machines, so without `host` two hosts' per-container series
+            are label-identical and merge silently.
+        labels:
+          severity: critical
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # host="" matches series where the label is ABSENT as well as
+              # empty — that is the standard PromQL/MetricsQL semantics this
+              # relies on, and it is what makes a stripped tag detectable at all.
+              # __name__=~"docker_.+" is the non-empty matcher the selector needs
+              # to be legal on its own.
+              expr: 'count({__name__=~"docker_.+", host=""})'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not become 0. Here that matters
+          # in the opposite direction from the rule above: replaceNN would turn
+          # the healthy no-series case into a real 0 that never trips the
+          # threshold, which looks identical to working. dropNN sends it to
+          # noDataState instead, which is OK by design (see the block above).
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # > 0 — ANY unlabelled docker series is the fault. There is no
+          # tolerable number of them, so there is no threshold to tune.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 900
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
