@@ -6,6 +6,22 @@ metadata, because HA's `last_changed` is rewritten at restore: measured 2026-08-
 0 of 574 not-yet-seen entities read older than 7 days, including one device dead
 since 2023-08-20. VictoriaMetrics' sample timestamps are the only honest source.
 
+THREAT MODEL, declared. This guard is ACCIDENT PREVENTION for a tool the
+operator runs on their own machine. The failure it exists to stop is the one that
+actually happened here: a snapshot of the house written into a tracked git tree,
+where a stray `git add -A` would publish it. It is NOT a defence against an
+adversary who controls the arguments, the environment or the filesystem -- anyone
+who does has already won by simpler means than a crafted path.
+
+Under that model these residuals are accepted and named rather than chased:
+  * `core.worktree` set in a BARE repo's config, pointing into an approved root:
+    not detected by either git probe.
+  * PATH or GIT_CONFIG_* manipulation that suppresses the probes' widening.
+  * TOCTOU between the checks and the write: the checks run on the canonical
+    path, and O_EXCL protects only the final component, so a parent-directory
+    symlink swapped in between is not covered.
+  * Any path-resolution case that requires deliberately hostile input.
+
 Read-only. Issues exactly three kinds of request:
   * HA   GET  /api/states
   * VM   GET  /api/v1/series          (match[]={db="ha"} ...)
@@ -40,8 +56,13 @@ first precise statement of it was still too strong. THREE sources move, not one.
 Which numbers that touches is wider than it looks, and an earlier version of this
 note got it wrong by claiming the dead list was built from the query legs. It is
 not: never_seen = writable - vm_seen, and vm_seen is the UNION, so the DEAD LIST
-IS INDEX-DEPENDENT. Measured with a stub: identical query legs plus 55 extra
-index pairs moved the dead list by 55. So are index_only, vm_only, the series and
+IS INDEX-DEPENDENT. Two magnitudes, and they are not the same number. With a STUB
+(55 synthetic index pairs, all of them writable HA entities), the dead list moved
+by the full 55 -- that is the mechanism, not a field measurement. In the FIELD,
+the same 3.9h replay moved the dead list by 9: of the 55 real index_only pairs, 46
+had no HA entity at all and landed in vm_only, leaving 9 writable ones to come out
+of never-seen (479 -> 470). Read 9 as the observed magnitude and 55 as the upper
+bound the mechanism allows. So are index_only, vm_only, the series and
 metric-name counts, G4's series counts, G2's total, G3's hit rate, G6's
 VM-seen/string split, and the nine-device cross-check -- every one reads vm_seen
 or the raw series list.
@@ -53,21 +74,31 @@ construction:
     new. Retention is the qualifier that matters: if samples age out, or a series
     is deleted, vm_seen shrinks and the candidate list would GROW.
   * The published 479 is window-pure BECAUSE index_only was 0 in that run, which
-    makes writable - vm_seen exactly equal to writable - query-seen. That is a
-    property of that run, verifiable from its own printed counts, not a guarantee
+    makes writable - vm_seen exactly equal to writable - TLAST-seen (index_only is
+    defined against the tlast set); P3 passing is what extends that to the other
+    query leg. That is a property of that run, verifiable from its printed counts,
+    not a guarantee
     about every run.
 
 The practical rule: RUN PROMPTLY after the window ends, and expect byte-identity
 only across re-runs made against the same series-index state.
 
-Snapshots carry personal home-state data -- keep them out of the repo (the script
-refuses a path inside it).
+Snapshots carry personal home-state data, so where one may be written is decided
+by an AFFIRMATIVE ALLOW-LIST, not by trying to recognise a checkout: the path is
+canonicalized first, and must then lie under $TMPDIR, /tmp, /private/tmp, or a
+directory named with --snapshot-allow-root. Everything else still runs behind
+that gate (the ha-states*.json name pattern, a filesystem walk for a `.git`
+ancestor, two git probes, O_EXCL + 0600), and any error, ambiguity, unlisted root
+or failed probe is a refusal.
 
 Usage:
     export ANSIBLE_VAULT_PASSWORD_FILE=/path/to/.vault_password
     scripts/reconcile-ha-entities.py                     # widest available window
-    scripts/reconcile-ha-entities.py --ha-states-json /scratch/ha-states.json
-    scripts/reconcile-ha-entities.py --start S --end E --ha-states-json /scratch/ha-states.json
+    scripts/reconcile-ha-entities.py --ha-states-json /tmp/ha-states.json
+    scripts/reconcile-ha-entities.py --start S --end E --ha-states-json "$TMPDIR/ha-states.json"
+    # anywhere else needs the operator to approve the root explicitly:
+    scripts/reconcile-ha-entities.py --snapshot-allow-root /data/scratch \
+        --ha-states-json /data/scratch/ha-states.json
 
 A PAST --end requires a snapshot captured at that time. The freshness check
 compares the HA readout against `end` on EVERY path, so a live fetch (which can
@@ -527,7 +558,7 @@ GIT_ENV_STRIP = (
 )
 
 
-def allow_roots(extra: list[str] | None) -> list[Path]:
+def allow_roots(extra: list[str] | None) -> tuple[list[Path], list[str]]:
     """Resolved roots under which an HA snapshot may be written.
 
     AFFIRMATIVE ALLOW, and the inversion is the point. Four review rounds of this
@@ -543,51 +574,87 @@ def allow_roots(extra: list[str] | None) -> list[Path]:
     An allow-list fails CLOSED on it: an unanticipated layout lands on "not under
     an approved root", which is a refusal. Everything the enumeration checks is
     still checked -- this is a gate in front of them, not a replacement.
+
+    Returns (roots, dropped): a candidate that cannot be used is REPORTED, not
+    silently omitted, so a refusal can say which root was dropped and why.
     """
-    raw: list[str] = [os.environ.get("TMPDIR") or "", *DEFAULT_ALLOW_ROOTS]
-    raw += list(extra or [])
+    candidates: list[tuple[str, str]] = []
+    if os.environ.get("TMPDIR"):
+        candidates.append((os.environ["TMPDIR"], "$TMPDIR"))
+    candidates += [(item, "built-in") for item in DEFAULT_ALLOW_ROOTS]
+    candidates += [(item, "--snapshot-allow-root") for item in (extra or [])]
+
     roots: list[Path] = []
-    for item in raw:
+    dropped: list[str] = []
+    for item, source in candidates:
         if not item:
+            continue
+        # RELATIVE roots are refused, from every source. A relative $TMPDIR
+        # resolves against the CWD, so running this from inside a checkout would
+        # make the checkout an approved root -- the gate approving the one place
+        # it exists to forbid.
+        if not os.path.isabs(os.path.expanduser(item)):
+            dropped.append(f"{item!r} ({source}): not an absolute path")
             continue
         # Resolved before comparison: on macOS $TMPDIR is /var/folders/... which
         # is really /private/var/folders/..., and an unresolved root would never
         # match a resolved destination.
         try:
-            resolved = Path(item).expanduser().resolve()
-        except OSError:
+            resolved = Path(os.path.realpath(os.path.expanduser(item)))
+        except OSError as exc:
+            dropped.append(f"{item!r} ({source}): cannot resolve ({exc.strerror})")
+            continue
+        # `/` as an allow-root makes the gate a TAUTOLOGY -- every path on the
+        # machine is under it. Refused from every source, including an explicit
+        # --snapshot-allow-root /.
+        if resolved == Path("/"):
+            dropped.append(
+                f"{item!r} ({source}): resolves to '/', which would approve every "
+                "path on the machine"
+            )
             continue
         if resolved not in roots:
             roots.append(resolved)
-    return roots
+    return roots, dropped
 
 
-def real_path(path: Path) -> Path:
-    """The fully-resolved real path of a destination that may not exist yet.
+def canonical_path(path: Path) -> Path:
+    """The canonical absolute path of a destination that may not exist yet.
 
-    Resolve BEFORE deciding anything: a symlink sitting in an allow-root and
-    pointing into a checkout must be judged by where it lands, not by where it
-    sits. `Path.resolve()` is non-strict and does this too, but the deepest
-    -existing-ancestor form is written out because the destination usually does
-    NOT exist yet and the interesting case is a symlinked PARENT.
+    CANONICALIZE ONCE, FIRST, and let all three layers (the allow-root gate, the
+    `.git` ancestor walk, the git-probe containment test) consume only this. A
+    symlink sitting in an approved root and pointing into a checkout must be
+    judged by where it LANDS, not by where it sits.
+
+    BITTER LESSON, recorded so nobody re-derives it the hard way: do not
+    hand-roll path canonicalization. `os.path.realpath` already resolves symlinks
+    in the existing prefix AND collapses `..`, including after a component that
+    does not exist. The previous revision replaced it with a bespoke
+    deepest-existing-ancestor walk -- written precisely to make the affirmative
+    allow-root proof sound -- and that helper re-joined the remaining tail
+    VERBATIM, so a literal `..` survived into the decision. `Path.parents` treats
+    `..` as an ordinary name, so the gate matched on the pre-`..` prefix while
+    `mkdir(parents=True)` and the kernel resolved it for real. Measured against
+    that revision: a path of the form <approved-root>/absent/../victim_checkout/
+    was approved, the ancestor walk found no `.git`, and a snapshot was written
+    inside the checkout with `git status` reporting it untracked. The helper
+    written to close hole four opened hole five.
+
+    Belt and braces: any `..` or `.` still present after canonicalization is a
+    hard refusal rather than something to interpret.
     """
-    path = path.expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    tail: list[str] = []
-    probe = path
-    while probe != probe.parent:
-        try:
-            if probe.exists() or probe.is_symlink():
-                break
-        except OSError:
-            break
-        tail.append(probe.name)
-        probe = probe.parent
-    resolved = probe.resolve()
-    for name in reversed(tail):
-        resolved = resolved / name
-    return resolved
+    expanded = os.path.expanduser(str(path))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(os.getcwd(), expanded)
+    canonical = Path(os.path.realpath(expanded))
+    if any(part in ("..", ".") for part in canonical.parts):
+        raise Failure(
+            f"refusing to use the HA snapshot path {path}: it still contains a "
+            f"'..' or '.' component after canonicalization ({canonical}). Every "
+            "location check would then be reading a different path from the one "
+            "the kernel writes to."
+        )
+    return canonical
 
 
 def path_is_under(path: Path, root: Path) -> bool:
@@ -757,7 +824,7 @@ def load_or_capture_ha_states(
     token: Secret,
     snapshot: Path | None,
     repo_root: Path,
-    approved_roots: list[Path],
+    approved: tuple[list[Path], list[str]],
 ) -> tuple[list[dict], float]:
     """HA states, optionally pinned to a snapshot file so a re-run is reproducible.
 
@@ -774,7 +841,8 @@ def load_or_capture_ha_states(
     # threat model: the checks run on the resolved path and O_EXCL protects only
     # the final component, so a parent-directory symlink swapped between the check
     # and the open is not covered.)
-    snapshot = real_path(snapshot)
+    approved_roots, dropped_roots = approved
+    snapshot = canonical_path(snapshot)
     # The .gitignore backstop matches `ha-states*.json` by basename, so a snapshot
     # called anything else is NOT covered by it. Enforce the name the backstop
     # knows, so the two halves of the defence line up instead of only appearing to.
@@ -791,12 +859,17 @@ def load_or_capture_ha_states(
     # the next one; an unlisted root is a refusal, so an unanticipated layout
     # fails closed instead of open. See allow_roots().
     if not any(path_is_under(snapshot, root) for root in approved_roots):
+        detail = ""
+        if dropped_roots:
+            # Naming the DROPPED candidates matters: an operator who passed
+            # --snapshot-allow-root and still got refused would otherwise have no
+            # way to see that their root was discarded, or why.
+            detail = " Candidate roots dropped: " + "; ".join(dropped_roots) + "."
         raise Failure(
             f"refusing to write an HA snapshot at {snapshot}: it is not under any "
-            "approved root "
-            f"({', '.join(str(r) for r in approved_roots) or 'none'}). "
-            "/api/states carries personal home-state data, so this guard allows "
-            "only paths that are positively approved -- pass "
+            f"approved root ({', '.join(str(r) for r in approved_roots)})."
+            f"{detail} /api/states carries personal home-state data, so this guard "
+            "allows only paths that are positively approved -- pass "
             "--snapshot-allow-root DIR to add one."
         )
     # Then every earlier layer, unchanged. Pure filesystem next: any ancestor
@@ -1058,7 +1131,10 @@ def main() -> int:
                         help="add a directory an HA snapshot may be written under "
                              "(repeatable). The guard is affirmative-allow: a path "
                              "outside every approved root is refused, whether or not "
-                             "it looks like a checkout.")
+                             "it looks like a checkout. Must be ABSOLUTE, and may "
+                             "not be '/' -- a relative root would resolve against "
+                             "the current directory and '/' would approve the whole "
+                             "machine. A dropped root is named in the refusal.")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -1560,17 +1636,22 @@ def main() -> int:
          "age out or a series is deleted,")
     emit("   vm_seen SHRINKS and the list would grow.)")
     # Right by condition, and the condition is printed above so a reader can check
-    # it: the dead list equals `writable - query-seen` exactly when the index
-    # contributed nothing of its own.
+    # it. "query-seen" here means the TLAST leg specifically -- index_only is
+    # defined as index_seen - set(last_sample), so index_only == 0 says vm_seen
+    # equals the tlast set, and nothing about count_over_time. What makes the
+    # statement true of BOTH query legs is P3, which passed above: it asserts the
+    # two aggregations returned the same set, so with P3 green the tlast set and
+    # the count_over_time set are one set.
     if index_only:
         emit(f"   THIS run's candidate list is NOT window-pure: index_only reads "
-             f"{len(index_only)}, so vm_seen exceeds the query-seen set and the")
+             f"{len(index_only)}, so vm_seen exceeds the tlast-seen set and the")
         emit("   list is SMALLER than a query-only reading would give -- the safe "
              "direction, but not purity.")
     else:
         emit("   THIS run's candidate list IS window-pure: index_only reads 0, so "
-             "writable - vm_seen equals")
-        emit("   writable - query-seen exactly.")
+             "writable - vm_seen equals writable")
+        emit("   - tlast-seen exactly -- and P3 passed above, so the two query "
+             "legs are the same set.")
     emit()
 
     if failures:
