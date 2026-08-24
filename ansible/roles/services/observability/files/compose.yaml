@@ -288,9 +288,25 @@ services:
       VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
       # The host label on every metric this telegraf produces (#178) — templated
       # from inventory_hostname by templates/env.j2, same mechanism and same
-      # convention as VECTOR_HOSTNAME on the vector service. :? not :- — an
-      # empty value would make telegraf fall back to os.Hostname(), which inside
-      # this container is a 12-char container id that changes on every recreate.
+      # convention as VECTOR_HOSTNAME on the vector service.
+      #
+      # ALL THREE STATES MEASURED on eq12_docker against the running image
+      # (telegraf 1.39.3, `telegraf --test`), not inferred — the third one is
+      # why this line is `:?` and why removing it is not a cleanup:
+      #   TELEGRAF_HOSTNAME=eq12_docker -> host=eq12_docker            (correct)
+      #   TELEGRAF_HOSTNAME=            -> host=43dc22b498df           (os.Hostname()
+      #       fallback = a 12-char container id that changes every recreate)
+      #   TELEGRAF_HOSTNAME unset in the container env
+      #                                 -> host=${TELEGRAF_HOSTNAME}   (THE LITERAL
+      #       STRING, exit 0, agent healthy, every deploy green)
+      # Telegraf 1.38+ "strict environment variable handling" does NOT cover the
+      # unset case — it is not a config error, it is a wrong-but-present label.
+      # So `:?` and not `:-`, and deleting this passthrough while telegraf.conf
+      # still reads ${TELEGRAF_HOSTNAME} silently relabels the whole host.
+      # The `:?` guard covers the .env -> compose hop only; the compose ->
+      # container hop is covered by nothing but this line existing, which is what
+      # obs-telegraf-metrics-absent (provisioning/alerting/telegraf-health.yaml)
+      # is there to catch after the fact.
       # Value quoted: the message contains '#178' and an unquoted YAML scalar
       # ends at ' #' (see the vaultwarden dotenv gotcha in CLAUDE.md).
       TELEGRAF_HOSTNAME: "${TELEGRAF_HOSTNAME:?required - see roles/services/observability/templates/env.j2 (#178)}"

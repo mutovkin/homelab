@@ -364,7 +364,13 @@ Hard-won lessons — check here before debugging from scratch.
   `truenas_` and re-assert with `namepass`. (2) **`host` is the collector's**: telegraf's
   `[agent] hostname` is stamped on metrics it merely RECEIVED, so NAS series claimed to
   come from the collector; map the exporter's `namespace` segment to the `host` label so
-  attribution comes from config, not from whoever forwarded it (fixed fleet-wide in #178).
+  attribution comes from config, not from whoever forwarded it (fixed fleet-wide in
+  #178, which had to reach one layer deeper than the agent setting: a per-plugin
+  `taginclude` is an allowlist over the FINAL tag set, so `[[inputs.docker]]` had
+  been stripping `host` off all 448 `docker_*` series. And an unset
+  `TELEGRAF_HOSTNAME` is NOT an error — telegraf stamps the literal
+  `${TELEGRAF_HOSTNAME}` and stays healthy — so the label now has its own
+  absence rule rather than a deploy-time assert).
   (3) **`truenas_disk_temp` is SPARSE** (minutes, not 60s) so a 5-minute window is
   legitimately empty on a healthy array — rules need a lookback wider than the update
   interval — and `_devicename_sda` reports **0, not null**, a fabricated zero that drags

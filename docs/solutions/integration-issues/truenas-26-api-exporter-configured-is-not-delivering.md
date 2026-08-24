@@ -74,7 +74,12 @@ derived from configuration rather than inherited from whoever forwarded the data
 The fleet-wide version of this (eq12_docker's own metrics also claim
 `homelab-telegraf`) was filed as #178 and fixed 2026-08-23: telegraf's
 `[agent] hostname` now substitutes `${TELEGRAF_HOSTNAME}` (= `inventory_hostname`,
-templated by env.j2), so its own metrics carry `host="eq12_docker"`.
+templated by env.j2), so its own metrics carry `host="eq12_docker"`. That fix had
+to reach one place further than the agent setting: `[[inputs.docker]]`'s
+`taginclude` is an allowlist over the FINAL tag set, applied after the agent adds
+`host` and `[global_tags]`, so every `docker_*` series had been arriving with no
+host label at all — the same "attributed to nobody" defect as this one, hidden one
+layer down.
 
 ## 4. Disk temperature is SPARSE, and the boot disk lies
 
