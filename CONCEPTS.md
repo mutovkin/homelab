@@ -321,7 +321,17 @@ playbook is written against, and two of them change without anyone editing anyth
 Because the correct value cannot be derived on the host, it is injected from the
 deploy layer and made mandatory there: a missing value must abort the deployment
 rather than resolve to an empty label, since a signal labelled wrongly-but-plausibly
-is harder to notice than one that is missing.
+is harder to notice than one that is missing. Mandatory has to mean mandatory at
+every hop — a collector handed a placeholder it cannot resolve does not necessarily
+refuse to start; it may emit the unresolved placeholder as the label and stay
+healthy, which is the wrongly-but-plausibly case arriving by a different door.
+
+Injecting the value is also not the end of the job, because a collector can strip
+the label back off after stamping it. Where a collector offers a tag allowlist, that
+allowlist filters the finished signal rather than choosing which raw fields become
+tags, so it silently removes the injected identity along with any constants the
+collector attaches to everything it emits. Those constants are the cheap tell: if
+they are missing too, the identity was stamped and then filtered, not never stamped.
 
 ### Structured log stream
 A second, machine-parseable copy of a host's system log, emitted alongside the
@@ -352,6 +362,26 @@ failure mode the owner does not cover is a source that never started: absence
 measured against a signal that has never existed returns nothing and is
 indistinguishable from a mistyped query, so that case has to be watched at the
 receiving end instead, on a counter maintained there rather than by the sender.
+
+A third failure mode belongs to the owner's query shape rather than its signal, and
+it appears only when an identity is deliberately renamed. An absence rule written to
+evaluate each identity separately measures staleness per series, and a series that
+has stopped receiving samples remains inside the rule's lookback window until it ages
+out — so the abandoned identity keeps a growing staleness value and the rule fires
+for the whole width of that window. This is tolerable when the rename predates the
+rule; when the rule ships in the same change as the rename, it arrives firing. Two
+query shapes resolve it, and they differ in which direction they fail. The rule can
+stay identity-agnostic and exclude the retired identity by name, which quiets it
+immediately and needs no further attention once that identity ages out of the
+lookback — but the exclusion is then dead weight, and a wrong-but-present identity
+is once again indistinguishable from a healthy one, so the rule has gone quiet
+about the very thing it was written to catch. Or the rule can be scoped to the
+identity it expects, so that a wrong identity ages the query down to no rows at
+all, which such a rule is configured to treat as an alert. The scoped form is
+preferred because its failure direction is a page rather than silence: it fails
+loud, and stays loud until someone corrects the name. Its cost is the mirror image
+— it watches exactly the identities it lists, and a newly added one is unwatched
+until it is listed too.
 
 The owner's own signal is the part most easily got wrong, because choosing it feels
 like naming rather than measuring. A signal can only carry an absence rule if it is

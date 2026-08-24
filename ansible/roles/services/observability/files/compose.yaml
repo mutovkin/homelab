@@ -286,6 +286,36 @@ services:
       # VictoriaMetrics auth — always on since #88; see the `:-` note on vector.
       VM_AUTH_USERNAME: ${VM_AUTH_USERNAME:-}
       VM_AUTH_PASSWORD: ${VM_AUTH_PASSWORD:-}
+      # The host label on every metric this telegraf produces (#178) — templated
+      # from inventory_hostname by templates/env.j2, same mechanism and same
+      # convention as VECTOR_HOSTNAME on the vector service.
+      #
+      # ALL THREE STATES MEASURED on eq12_docker against the running image
+      # (telegraf 1.39.3, `telegraf --test`), not inferred — the third one is
+      # why this line is `:?` and why removing it is not a cleanup:
+      #   TELEGRAF_HOSTNAME=eq12_docker -> host=eq12_docker            (correct)
+      #   TELEGRAF_HOSTNAME=            -> host=43dc22b498df           (os.Hostname()
+      #       fallback = a 12-char container id that changes every recreate)
+      #   TELEGRAF_HOSTNAME unset in the container env
+      #                                 -> host=${TELEGRAF_HOSTNAME}   (THE LITERAL
+      #       STRING, exit 0, agent healthy, every deploy green)
+      # Telegraf 1.38+ "strict environment variable handling" does NOT cover the
+      # unset case — it is not a config error, it is a wrong-but-present label.
+      # So `:?` and not `:-`, and deleting this passthrough while telegraf.conf
+      # still reads ${TELEGRAF_HOSTNAME} silently relabels the whole host.
+      # The `:?` guard covers the .env -> compose hop only; the compose ->
+      # container hop is covered by nothing but this line existing, which is what
+      # obs-telegraf-metrics-absent (provisioning/alerting/telegraf-health.yaml)
+      # is there to catch after the fact.
+      # Value quoted deliberately, but NOT for the reason it is tempting to give:
+      # an unquoted YAML scalar ends at ' #', and the '#' here follows '(' — a
+      # non-space — so it would in fact survive unquoted. The quotes are here
+      # because CLAUDE.md says to quote the value rather than rely on that
+      # distinction: the failure mode is that a later edit adds a space before a
+      # '#', or reflows this string, and the truncation breaks interpolation for
+      # the WHOLE file ("invalid interpolation format"). Measured on #139's
+      # first live apply. Quoting costs nothing and removes the tripwire.
+      TELEGRAF_HOSTNAME: "${TELEGRAF_HOSTNAME:?required - see roles/services/observability/templates/env.j2 (#178)}"
     deploy:
       resources:
         limits:
