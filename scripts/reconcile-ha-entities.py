@@ -97,8 +97,8 @@ Usage:
     scripts/reconcile-ha-entities.py --ha-states-json /tmp/ha-states.json
     scripts/reconcile-ha-entities.py --start S --end E --ha-states-json "$TMPDIR/ha-states.json"
     # anywhere else needs the operator to approve the root explicitly:
-    scripts/reconcile-ha-entities.py --snapshot-allow-root /data/scratch \
-        --ha-states-json /data/scratch/ha-states.json
+    scripts/reconcile-ha-entities.py --snapshot-allow-root ~/scratch \
+        --ha-states-json ~/scratch/ha-states.json
 
 A PAST --end requires a snapshot captured at that time. The freshness check
 compares the HA readout against `end` on EVERY path, so a live fetch (which can
@@ -602,6 +602,10 @@ def allow_roots(extra: list[str] | None) -> tuple[list[Path], list[str]]:
         try:
             resolved = Path(os.path.realpath(os.path.expanduser(item)))
         except OSError as exc:
+            # Belt and braces: os.path.realpath is non-strict and swallows OSError
+            # today, so this arm is unreachable -- kept so a stricter resolver
+            # cannot turn a bad root into a traceback. (Same spirit as the `..`
+            # check in canonical_path.)
             dropped.append(f"{item!r} ({source}): cannot resolve ({exc.strerror})")
             continue
         # `/` as an allow-root makes the gate a TAUTOLOGY -- every path on the
@@ -641,18 +645,20 @@ def canonical_path(path: Path) -> Path:
     written to close hole four opened hole five.
 
     Belt and braces: any `..` or `.` still present after canonicalization is a
-    hard refusal rather than something to interpret.
+    hard refusal rather than something to interpret. Only `..` is checked: pathlib
+    drops a `.` component at construction, so a `.` arm here would be dead code
+    that reads like a live check.
     """
     expanded = os.path.expanduser(str(path))
     if not os.path.isabs(expanded):
         expanded = os.path.join(os.getcwd(), expanded)
     canonical = Path(os.path.realpath(expanded))
-    if any(part in ("..", ".") for part in canonical.parts):
+    if ".." in canonical.parts:
         raise Failure(
             f"refusing to use the HA snapshot path {path}: it still contains a "
-            f"'..' or '.' component after canonicalization ({canonical}). Every "
-            "location check would then be reading a different path from the one "
-            "the kernel writes to."
+            f"'..' component after canonicalization ({canonical}). Every location "
+            "check would then be reading a different path from the one the kernel "
+            "writes to."
         )
     return canonical
 
@@ -698,8 +704,17 @@ def ancestor_holding_dot_git(path: Path) -> Path | None:
                 "directory, so the snapshot path cannot exist as written. "
                 "Refusing to write personal home-state data on an unchecked path."
             ) from None
-        except OSError:
-            return parent
+        except OSError as exc:
+            # ELOOP, EACCES on an ancestor, and anything else that makes the
+            # question unanswerable. Still a refusal -- but reported as what it
+            # is. Returning `parent` here made the caller print "inside a git work
+            # tree", sending the operator to hunt for a checkout that may not
+            # exist. Same pattern as the NotADirectoryError arm above.
+            raise Failure(
+                f"cannot check {path} for a git work tree: cannot stat "
+                f"{parent / '.git'} ({type(exc).__name__}). Refusing to write "
+                "personal home-state data on an unchecked path."
+            ) from None
         return parent
     return None
 
@@ -1639,9 +1654,11 @@ def main() -> int:
     # it. "query-seen" here means the TLAST leg specifically -- index_only is
     # defined as index_seen - set(last_sample), so index_only == 0 says vm_seen
     # equals the tlast set, and nothing about count_over_time. What makes the
-    # statement true of BOTH query legs is P3, which passed above: it asserts the
-    # two aggregations returned the same set, so with P3 green the tlast set and
-    # the count_over_time set are one set.
+    # statement true of BOTH query legs is P3: it asserts the two aggregations
+    # returned the same set, so with P3 green the tlast set and the
+    # count_over_time set are one set. Hence the clause below reads P3's ACTUAL
+    # verdict rather than asserting it -- a caveat that names a condition and
+    # then ignores it is the shape this script keeps finding in its own output.
     if index_only:
         emit(f"   THIS run's candidate list is NOT window-pure: index_only reads "
              f"{len(index_only)}, so vm_seen exceeds the tlast-seen set and the")
@@ -1650,8 +1667,13 @@ def main() -> int:
     else:
         emit("   THIS run's candidate list IS window-pure: index_only reads 0, so "
              "writable - vm_seen equals writable")
-        emit("   - tlast-seen exactly -- and P3 passed above, so the two query "
-             "legs are the same set.")
+        if p3_ok:
+            emit("   - tlast-seen exactly -- and P3 PASSED above, so the two "
+                 "query legs are the same set.")
+        else:
+            emit("   - tlast-seen exactly. P3 FAILED above, so that says nothing "
+                 "about count_over_time: the two")
+            emit("   query legs are NOT known to be the same set on this run.")
     emit()
 
     if failures:
