@@ -98,8 +98,8 @@
 # the rule cannot follow the stack: move this role to another host, or rename
 # eq12_docker, and the rule keeps watching a name nothing exports — it goes
 # permanently NoData -> Alerting on the old name while the NEW host's telegraf
-# stream has no absence owner at all. Silence, not a page, and every deploy stays
-# green. That is exactly the class of defect #178 exists to end.
+# agent stream has no absence owner at all. Silence, not a page, and every deploy
+# stays green. That is exactly the class of defect #178 exists to end.
 #
 # THIS ASSERT IS WHAT A FUTURE OPERATOR TRIPS INSTEAD OF DISCOVERING THAT
 # SILENCE — it forces the selector edit into the same change that moves or
@@ -107,47 +107,64 @@
 # it runs under --check and fails before anything touches state.
 #
 # The value is parsed OUT OF the deployed rule file, like the datasource-uid check
-# further down, so the guard cannot drift from what is actually provisioned. The
-# anchor `system_uptime{host="` appears exactly once in that file (the expr; the
-# narrative comments spell the name without it). A restructured file that no
-# longer matches yields '' and FAILS on the length check — never a silent pass.
-# That includes deliberately WIDENING the rule to a regex matcher (host=~"a|b"),
-# which this anchor cannot read: the guard still fails loud, but for a reason its
-# message would state wrongly, so widening the rule means widening the regex and
-# the comparison here in the same change. The fail_msg says so too.
-- name: Assert the telegraf alert rule's pinned host selector matches this host
+# further down, so the guard cannot drift from what is actually provisioned.
+#
+# findall, NOT search, and the count is asserted FIRST — that ordering is the
+# whole point. regex_search validates only the FIRST match, so if someone later
+# quoted the expr verbatim in a comment ABOVE the real one, the guard would read
+# the COMMENT and pass while the live selector said something else: a guard
+# shadowed by prose. Asserting the anchor is unique closes that, and it fails
+# loud in both directions — zero matches (file restructured, or the rule widened
+# to a regex matcher like host=~"a|b", which this literal anchor cannot read) and
+# more than one (anchor no longer unique). Widening the rule to two hosts is a
+# deliberate design change that must widen THIS guard in the same commit.
+- name: Verify the telegraf alert rule's pinned host selector
   vars:
-    _telegraf_rule_host: >-
-      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
-          | regex_search('system_uptime\{host="([^"]+)"', '\1')
-          | default([], true) | first | default('', true)) }}
-  ansible.builtin.assert:
-    that:
-      - _telegraf_rule_host | length > 0
-      - _telegraf_rule_host == inventory_hostname
-    fail_msg: >-
-      The alert rule obs-telegraf-metrics-absent is scoped to the host selector
-      "{{ _telegraf_rule_host }}" (an EMPTY value here means the expr in
-      files/data/grafana/provisioning/alerting/telegraf-health.yaml no longer
-      contains system_uptime{host="..." at all — the file was restructured and
-      this guard could not read it), but this play is deploying the observability
-      stack to inventory_hostname={{ inventory_hostname }}. That rule is the ONLY absence
-      owner for telegraf's metric stream, and unlike obs-vector-metrics-absent it
-      is NOT host-agnostic — it never picks up a new or renamed host on its own.
-      Left as-is, {{ inventory_hostname }}'s telegraf can die, or start stamping a
-      container id / the literal ${TELEGRAF_HOSTNAME} as its host label, and
-      nothing pages: every other telegraf-fed rule aggregates the host dimension
-      away. You get silence, not an alert. Fix by editing the `expr` in
-      files/data/grafana/provisioning/alerting/telegraf-health.yaml in THIS
-      change — to {{ inventory_hostname }} if this is a rename. If instead the
-      stack now runs in two places, note that a regex selector (host=~"a|b")
-      does NOT satisfy this guard: the anchor above is the literal
-      system_uptime{host=" , which a regex matcher does not contain, so you
-      would land on the empty-selector branch of this same message and its
-      "file was restructured" wording would be misleading you. Widening the
-      rule therefore means widening this assert's regex and comparison in the
-      same change.
-    quiet: true
+    _telegraf_rule_hosts: >-
+      {{ lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+         | regex_findall('system_uptime\{host="([^"]+)"') }}
+  block:
+    - name: Assert the telegraf alert rule exposes exactly one pinned host selector
+      ansible.builtin.assert:
+        that:
+          - _telegraf_rule_hosts | length == 1
+        fail_msg: >-
+          Expected exactly ONE `system_uptime{host="..."` selector in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml, found
+          {{ _telegraf_rule_hosts | length }}: {{ _telegraf_rule_hosts }}.
+          ZERO means this guard can no longer read the file — either it was
+          restructured, or obs-telegraf-metrics-absent was widened to a regex
+          matcher (host=~"a|b"), which this literal anchor cannot parse. MORE
+          THAN ONE means the anchor is no longer unique, usually because a
+          comment now quotes the expr verbatim; that is dangerous rather than
+          merely untidy, because a first-match check would read the comment and
+          pass while the live selector said something else. Either way the fix
+          belongs in the same change: make the anchor unique again, or teach
+          this assert the new shape. Do not delete the guard to get past it.
+        quiet: true
+
+    - name: Assert the telegraf alert rule's pinned host selector matches this host
+      ansible.builtin.assert:
+        that:
+          - _telegraf_rule_hosts | first == inventory_hostname
+        fail_msg: >-
+          The alert rule obs-telegraf-metrics-absent is scoped to the host
+          selector "{{ _telegraf_rule_hosts | first }}", but this play is
+          deploying the observability stack to
+          inventory_hostname={{ inventory_hostname }}. That rule is the only
+          absence owner for telegraf's AGENT metric stream (system_uptime), and
+          unlike obs-vector-metrics-absent it is NOT host-agnostic — it never
+          picks up a new or renamed host on its own. Left as-is,
+          {{ inventory_hostname }}'s telegraf can die, or start stamping a
+          container id / the literal ${TELEGRAF_HOSTNAME} as its host label, and
+          nothing pages: every other telegraf-fed rule aggregates the host
+          dimension away. You get silence, not an alert. Fix by editing the
+          `expr` in files/data/grafana/provisioning/alerting/telegraf-health.yaml
+          in THIS change — to {{ inventory_hostname }} if this is a rename. If
+          the stack now runs in two places, widening that expr to a regex
+          selector also means widening this assert in the same change; the
+          uniqueness check above fails first and says so.
+        quiet: true
 
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
 # Governed ports and why each is on the list:

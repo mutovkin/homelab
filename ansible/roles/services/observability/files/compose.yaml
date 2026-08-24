@@ -307,8 +307,14 @@ services:
       # container hop is covered by nothing but this line existing, which is what
       # obs-telegraf-metrics-absent (provisioning/alerting/telegraf-health.yaml)
       # is there to catch after the fact.
-      # Value quoted: the message contains '#178' and an unquoted YAML scalar
-      # ends at ' #' (see the vaultwarden dotenv gotcha in CLAUDE.md).
+      # Value quoted deliberately, but NOT for the reason it is tempting to give:
+      # an unquoted YAML scalar ends at ' #', and the '#' here follows '(' — a
+      # non-space — so it would in fact survive unquoted. The quotes are here
+      # because CLAUDE.md says to quote the value rather than rely on that
+      # distinction: the failure mode is that a later edit adds a space before a
+      # '#', or reflows this string, and the truncation breaks interpolation for
+      # the WHOLE file ("invalid interpolation format"). Measured on #139's
+      # first live apply. Quoting costs nothing and removes the tripwire.
       TELEGRAF_HOSTNAME: "${TELEGRAF_HOSTNAME:?required - see roles/services/observability/templates/env.j2 (#178)}"
     deploy:
       resources:

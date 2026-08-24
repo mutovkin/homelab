@@ -66,8 +66,16 @@ groups:
   - orgId: 1
     name: telegraf-health
     folder: Observability
-    # 5m, matching vector-health. The condition is 600s of lag, so a finer
-    # interval would only re-evaluate the same slow signal more often.
+    # 5m, matching vector-health. For obs-telegraf-metrics-absent the condition
+    # is 600s of lag, so a finer interval would only re-evaluate the same slow
+    # signal more often. It is NOT free for obs-docker-metrics-unlabelled
+    # though: that rule's signal appears instantly when the defect starts, so
+    # this interval, not the signal, sets its onset latency — nothing is
+    # evaluated between ticks, and `for: 5m` only advances at ticks. Measured
+    # end to end in #178's break-and-observe: 6m06s from first unlabelled
+    # sample to Alerting (injection 08:02:44Z, Pending 08:03:50Z, Alerting
+    # 08:08:50Z). Shortening this interval would buy detection latency there at
+    # the cost of re-evaluating the lag rule more often for no gain.
     interval: 5m
     rules:
       # ---------------------------------------------------------------------
@@ -213,9 +221,22 @@ groups:
         #
         # Setting this to Alerting would page CONTINUOUSLY, forever, in perfect
         # health — and the reflex to "make the absence rule alert on absence" is
-        # precisely why this comment is this long. Absence of the whole telegraf
-        # metric stream is a different fault with a different owner:
-        # obs-telegraf-metrics-absent above owns it, alone.
+        # precisely why this comment is this long.
+        #
+        # WHAT THIS RULE DOES NOT COVER, STATED PLAINLY (#189). Absence of the
+        # docker_* stream is a DIFFERENT fault, and it currently has NO owner.
+        # obs-telegraf-metrics-absent above does not cover it: that rule watches
+        # system_uptime, i.e. the AGENT stream only. If [[inputs.docker]] dies on
+        # its own — socket unmounted, a permission change after an image bump,
+        # the plugin erroring while the agent stays up — then every docker_*
+        # series stops, system_uptime keeps flowing, the agent rule stays green,
+        # THIS rule sees no unlabelled series and is therefore also green, and
+        # nothing pages. Per-input death with a healthy agent is measured here,
+        # not hypothetical: no_new_privs stripped setuid off /usr/bin/ping and
+        # eight ping metrics went NO DATA while the container stayed healthy.
+        # The fix is a SEPARATE rule (candidate: lag(docker_n_containers)), not
+        # a change to this line — tracked in #189. Do not close that gap by
+        # flipping this noDataState.
         # ######################################################################
         noDataState: OK
         # A datasource that cannot be reached is not evidence of health (#108).
@@ -229,7 +250,7 @@ groups:
             OTHER RULE: obs-telegraf-metrics-absent watches system_uptime, which
             is agent-tagged and completely unaffected by the docker input's tag
             filter, so telegraf stays healthy, every deploy stays green, and all
-            446 per-container series quietly lose their machine dimension.
+            448 per-container series quietly lose their machine dimension.
             The cause is almost certainly one word: `taginclude` in
             [[inputs.docker]] in
             ansible/roles/services/observability/files/data/telegraf/telegraf.conf

@@ -107,12 +107,25 @@ Fix — one entry, and it must stay:
 taginclude = ["container_id", "container_name", "container_image", "host"]
 ```
 
-`environment`/`location` are deliberately left out — but **not** for cardinality,
-which was the wrong word for it. Both are fleet-constant, and adding a *constant*
-label to existing series creates no new series: the count stays 448 either way.
-The real cost is **width** — one more name/value pair carried in every series'
-identity, in the index and in every remote-write payload — for a dimension that
-can only ever take one value on this fleet.
+`environment`/`location` are deliberately left out. "Cardinality" was the wrong
+word for the cost, but the correction is not "it is free" — the cost lands
+somewhere else:
+
+- **Steady state:** no increase. Both tags are fleet-constant, so afterwards
+  there are still 448 active series, not 896.
+- **At cutover:** every series identity is **retired and replaced**. A series
+  *is* its label set, so adding a label does not decorate the existing 448 — it
+  ends them and starts 448 new ones. Both generations then sit in the index, and
+  any rule with a long lookbehind sees the retired ones for the width of its
+  window. That is not theoretical here: it is the same transient measured below
+  for the `host` cutover, where the retired `homelab-telegraf` series was still
+  returned by `lag()` with a climbing staleness — **1321s** twenty-two minutes
+  after the cutover, against a 600s threshold — which is why
+  `obs-telegraf-metrics-absent` is pinned to a host name rather than written
+  host-agnostic.
+- **Ongoing:** one more name/value pair in every series identity, in the index
+  and in every remote-write payload, for a dimension that can only ever take one
+  value on this fleet.
 
 The flip side, recorded because it is a deliberate asymmetry rather than an
 oversight: `taginclude` appears only under `[[inputs.docker]]`, so `docker_*` is
@@ -171,7 +184,9 @@ absence owner at all, which is the general rule in
    rule `obs-telegraf-metrics-absent` — so the label has a durable control rather
    than a once-per-deploy assert.
 
-Historical series keep `host="homelab-telegraf"` (label boundary 2026-08-23).
+Historical series keep `host="homelab-telegraf"` (label boundary
+**2026-08-24T03:14Z**, = 2026-08-23 20:14 PDT — given in UTC because that is what
+VictoriaMetrics displays, and the local date is a day earlier).
 Nothing consumed the old value — audited across every dashboard and alert `expr`
 — so the break was accepted rather than shimmed.
 

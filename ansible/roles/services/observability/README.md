@@ -164,6 +164,27 @@ question #178 got wrong once — so a rule missing from it is worse than a wrong
 total. Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
 
+**Absence ownership, so the table is not read as covering more than it does.**
+Absence is deliberately owned exactly once per signal, and two families are
+currently **unowned**:
+
+| signal | absence owner |
+| ------ | ------------- |
+| `system_uptime` (telegraf AGENT stream) | `obs-telegraf-metrics-absent` |
+| `http_response` (probe stream) | `obs-http-probe-absent` |
+| `vector_uptime_seconds` | `obs-vector-metrics-absent` |
+| **`docker_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
+| **`ping_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
+
+`obs-docker-metrics-unlabelled` is **not** an absence owner for `docker_*` — it
+catches those series arriving *mislabelled*, and its `noDataState: OK` is correct
+precisely because its signal only exists while something is broken. If
+`[[inputs.docker]]` dies on its own, `system_uptime` keeps flowing, both telegraf
+rules stay green, and nothing pages. Per-input death with a healthy agent is
+measured here, not hypothetical — `no_new_privs` once stripped setuid off
+`/usr/bin/ping` and eight ping metrics went NO DATA while the container stayed
+healthy.
+
 | uid | rule | fires when | noData |
 | --- | ---- | ---------- | ------ |
 | `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
@@ -698,8 +719,9 @@ appliance. Three producers, one convention:
 
 Before #178 telegraf pinned the literal `hostname = "homelab-telegraf"`, a name
 matching no machine, so eq12_docker's own vitals were unattributable.
-**Label boundary 2026-08-23**: samples before that date carry
-`host="homelab-telegraf"`. Nothing consumed the old value (audited), so the break
+**Label boundary 2026-08-24T03:14Z** (= 2026-08-23 20:14 PDT — stated in UTC
+because that is what VictoriaMetrics displays, and the local date is a day
+earlier): samples before that instant carry `host="homelab-telegraf"`. Nothing consumed the old value (audited), so the break
 was accepted rather than shimmed.
 
 Two traps live in `telegraf.conf` because of it, both measured on the running
