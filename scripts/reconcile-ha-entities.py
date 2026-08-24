@@ -33,9 +33,14 @@ out of the repo (the script refuses a path inside it).
 Usage:
     export ANSIBLE_VAULT_PASSWORD_FILE=/path/to/.vault_password
     scripts/reconcile-ha-entities.py                     # widest available window
-    scripts/reconcile-ha-entities.py --start 1787443200 --end 1787541146
     scripts/reconcile-ha-entities.py --ha-states-json /scratch/ha-states.json
     scripts/reconcile-ha-entities.py --start S --end E --ha-states-json /scratch/ha-states.json
+
+A PAST --end requires a snapshot captured at that time. The freshness check
+compares the HA readout against `end` on EVERY path, so a live fetch (which can
+only describe now) cannot serve a historical window -- and must not, because the
+HA side would then describe a different instance than the VictoriaMetrics window
+does. Capture first, replay against the pinned window afterwards.
 
 Exit codes: 0 = all guards passed; 1 = a fatal error before the verdict (bad
 credentials, unreachable endpoint, malformed payload, unusable snapshot);
@@ -47,6 +52,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import http.client
 import json
 import math
 import os
@@ -200,9 +206,20 @@ def vault_key(plaintext: str, key: str, where: str) -> str:
     prefix = f"{key}:"
     for line in plaintext.splitlines():
         if line.startswith(prefix):
-            value = line[len(prefix) :].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
+            rest = line[len(prefix) :]
+            stripped = rest.strip()
+            if (len(stripped) >= 2 and stripped[0] == stripped[-1]
+                    and stripped[0] in "'\""):
+                # QUOTED: the content is exact, `#` inside it is data, not a
+                # comment. Strip the quotes and nothing else.
+                value = stripped[1:-1]
+            else:
+                # UNQUOTED: a YAML scalar ends at a whitespace-`#`. Without this
+                # cut, `vault_x: secret  # rotated 2026-08-01` hands the comment
+                # to an Authorization header and the resulting 401 names the
+                # wrong cause -- the same shape as the block-scalar trap below.
+                cuts = [i for i in (rest.find(" #"), rest.find("\t#")) if i != -1]
+                value = (rest[: min(cuts)] if cuts else rest).strip()
             if not value:
                 raise Failure(f"{key} is empty in {where}")
             # `key: >` / `key: |` is a BLOCK SCALAR whose value lives on the
@@ -237,8 +254,14 @@ def _request(req: urllib.request.Request, what: str) -> dict | list:
         raise Failure(f"{what}: unreachable ({exc.reason})") from None
     except TimeoutError:
         raise Failure(f"{what}: timed out after {HTTP_TIMEOUT}s") from None
+    except http.client.HTTPException as exc:
+        # IncompleteRead / BadStatusLine / LineTooLong are HTTPException, which is
+        # NOT an OSError -- a truncated response body escaped the arm below as a
+        # raw traceback until this was added.
+        raise Failure(f"{what}: HTTP protocol error ({type(exc).__name__})") from None
     except OSError as exc:
-        # A reset or short read mid-body lands here rather than as a traceback.
+        # A connection reset mid-body lands here rather than as a traceback. A
+        # SHORT read does not: it is an http.client.HTTPException, caught above.
         raise Failure(f"{what}: connection failed ({type(exc).__name__})") from None
     try:
         return json.loads(payload)
@@ -419,14 +442,62 @@ def fetch_ha_states(ha_url: str, token: Secret) -> list[dict]:
     return states
 
 
+# Environment that can make `git rev-parse` deny standing in a repository it is
+# in fact standing in. Stripped before every probe so the one remaining string
+# match is stable by construction, together with LC_ALL=C.
+GIT_ENV_STRIP = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+)
+
+
+def ancestor_holding_dot_git(path: Path) -> Path | None:
+    """The nearest ancestor of `path` that holds a `.git` entry, or None.
+
+    PURE FILESYSTEM, no subprocess, and it is the PRIMARY refusal test because
+    git must never be able to GRANT safety. `git rev-parse` prints the canonical
+    `fatal: not a git repository` line -- while standing inside a real checkout --
+    under at least six measured conditions: a linked worktree whose .git-file
+    gitdir has been removed (`fatal: not a git repository: (null)`), a .git file
+    whose relative gitdir is missing, a repo with .git/HEAD deleted, one with
+    .git/objects deleted, a mode-000 .git, and an inherited GIT_DIR=/nonexistent
+    or GIT_CEILING_DIRECTORIES=<repo>. Every one of those leaves a `.git` entry
+    sitting in an ancestor, which is what this looks for.
+
+    Unreadable is REFUSE, not accept: an OSError here (a mode-000 ancestor) means
+    the question could not be answered, so the answer is "assume tracked".
+    """
+    for parent in path.parents:
+        try:
+            # lstat, not exists(): a DANGLING `.git` symlink must still count --
+            # exists() follows the link and would report False for it.
+            (parent / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return parent
+        return parent
+    return None
+
+
 def git_worktrees_containing(path: Path) -> list[Path]:
-    """Every git work tree that would track `path`, resolved from `path` itself.
+    """EXTRA git work trees that would track `path`, on top of the filesystem test.
+
+    This runs only to WIDEN the forbidden set (a sibling-worktree layout points
+    its `.git` file at a common dir elsewhere, and the toplevel may differ from
+    the nearest `.git`-holding ancestor). It can never shrink it: the caller has
+    already refused every path with a `.git` in an ancestor before asking git
+    anything, so a git answer of "not a repository" means only "git adds no extra
+    roots" -- never "safe".
 
     Testing containment against the SCRIPT's repo root is not enough here: this
     repo drives its agents from worktrees under `.claude/worktrees/<id>/`, which
     are subdirectories of the main checkout. A snapshot written to the main
     checkout's root is outside the worktree, passes a root-relative test, and
-    lands in a tracked tree anyway. Ask git about the destination instead.
+    lands in a tracked tree anyway. Ask git about the destination too.
     """
     # Walk UP to the nearest EXISTING directory. `git -C <nonexistent>` exits 128,
     # which used to make this return [] and quietly degrade the guard to the
@@ -438,12 +509,19 @@ def git_worktrees_containing(path: Path) -> list[Path]:
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
 
+    # Sanitized environment: inherited GIT_DIR / GIT_CEILING_DIRECTORIES make real
+    # git deny a real repository, and a localized git would break the one string
+    # match below. Neither can reach the probe now.
+    git_env = {k: v for k, v in os.environ.items() if k not in GIT_ENV_STRIP}
+    git_env["LC_ALL"] = "C"
+
     roots: list[Path] = []
     for flag in ("--show-toplevel", "--git-common-dir"):
         try:
             proc = subprocess.run(
                 ["git", "rev-parse", flag],
-                cwd=str(probe), capture_output=True, text=True, check=False,
+                cwd=str(probe), env=git_env, capture_output=True, text=True,
+                check=False,
             )
         except OSError as exc:
             # git missing or unrunnable. The guard cannot answer, so REFUSE: a
@@ -466,9 +544,14 @@ def git_worktrees_containing(path: Path) -> list[Path]:
             # It points at `<main checkout>/.git`; its parent is the tracking tree.
             roots.append(found.parent if found.name == ".git" else found)
             continue
-        stderr = (proc.stderr or "").lower()
-        if "not a git repository" in stderr or "no such file or directory" in stderr:
-            continue  # genuinely outside a repo: the safe answer
+        stderr = (proc.stderr or "").strip()
+        # ANCHORED to the start of git's canonical line, and it means only "git
+        # contributes no extra root" -- the filesystem test in the caller has
+        # already decided the safety question. The old substring form also
+        # accepted "no such file or directory", which is what a dangling worktree
+        # gitdir prints from INSIDE a tracked tree.
+        if stderr.startswith("fatal: not a git repository"):
+            continue
         raise Failure(
             f"cannot verify that {path} lies outside a git work tree: "
             f"`git rev-parse {flag}` exited {proc.returncode}. Refusing to write "
@@ -500,6 +583,19 @@ def load_or_capture_ha_states(
         )
     # /api/states is a full readout of a home: occupancy, device names, presence.
     # It must never land in a tracked tree, where a stray `git add -A` publishes it.
+    #
+    # PRIMARY test first, and it is pure filesystem: any ancestor holding a `.git`
+    # entry is a refusal, readable or not. Git is asked only afterwards, and only
+    # to ADD roots -- three review rounds in a row found a way to make `git
+    # rev-parse` report "not a git repository" from inside a tracked tree, so the
+    # subprocess is not allowed to be the thing that says yes.
+    tracked_ancestor = ancestor_holding_dot_git(snapshot)
+    if tracked_ancestor is not None:
+        raise Failure(
+            f"refusing to write an HA snapshot inside a git work tree "
+            f"({tracked_ancestor}): /api/states carries personal home-state data. "
+            "Put it in a scratch directory outside every checkout."
+        )
     forbidden = [repo_root, *git_worktrees_containing(snapshot)]
     for root in forbidden:
         if snapshot == root or root in snapshot.parents:
@@ -535,8 +631,17 @@ def load_or_capture_ha_states(
         captured_at = payload.get("captured_at")
         if not isinstance(states, list) or not states:
             raise Failure(f"HA snapshot {snapshot} does not hold a non-empty list")
-        if not isinstance(captured_at, (int, float)):
-            raise Failure(f"HA snapshot {snapshot} has no usable captured_at stamp")
+        if not isinstance(captured_at, (int, float)) or not math.isfinite(
+            float(captured_at)
+        ):
+            # json.loads accepts a BARE NaN, and NaN switches the freshness check
+            # off rather than failing it: `nan > tolerance` is False, so a
+            # snapshot captured at any distance from `end` would sail through and
+            # the run would exit 0 on a different instance's entity list.
+            raise Failure(
+                f"HA snapshot {snapshot} has no usable captured_at stamp "
+                "(missing, non-numeric, or not finite)"
+            )
         # A snapshot taken far from `end` describes a different instance than the
         # VictoriaMetrics window does: entities created, renamed or deleted in
         # between land in never-seen and vm_only as pure artefacts. A grossly
@@ -584,12 +689,21 @@ def fetch_vm_series(
     return data
 
 
-def fetch_vm_counted(vm_url: str, auth: Secret, start: int, end: int) -> set[str]:
-    """The seen set derived a SECOND way, via count_over_time.
+def fetch_vm_counted(
+    vm_url: str, auth: Secret, start: int, end: int
+) -> tuple[set[str], int]:
+    """The seen set derived a SECOND way, via count_over_time. Returns (set, drops).
 
     Same endpoint and window as tlast_over_time but a different aggregation, so
     the two can genuinely disagree -- which is what makes P3 falsifiable where P1
     and P2 are true by construction.
+
+    The drop counter exists because this leg USED to skip malformed rows silently
+    while its twin counted them -- and its twin also drops rows whose VALUE is
+    unparseable or non-finite, which this leg never even reads. A row dropped from
+    one leg and kept by the other is a P3 disagreement caused by a malformed row,
+    not by "the query layer", which is what P3 blamed by name. Both counters are
+    printed in the counts table and named in P3's failure text.
     """
     window = end - start
     doc = vm_post(
@@ -606,14 +720,18 @@ def fetch_vm_counted(vm_url: str, auth: Secret, start: int, end: int) -> set[str
         auth,
     )
     out: set[str] = set()
+    dropped = 0
     for item in vm_result(doc, "/api/v1/query"):
         metric = item.get("metric") if isinstance(item, dict) else None
         if not isinstance(metric, dict):
+            dropped += 1
             continue
         domain, entity = metric.get("domain"), metric.get("entity_id")
         if domain and entity:
             out.add(f"{domain}.{entity}")
-    return out
+        else:
+            dropped += 1
+    return out, dropped
 
 
 def fetch_vm_last_samples(
@@ -659,6 +777,18 @@ def fetch_vm_last_samples(
         if not math.isfinite(ts):
             dropped += 1
             continue
+        # A sample timestamp AFTER the window end is instrument breakage, not
+        # data: `end - ts` is negative and fmt_silence renders it as garbage
+        # (divmod walks backwards on a negative int). 60s of slack absorbs
+        # VictoriaMetrics' own rounding; anything beyond it is refused, the same
+        # way every other malformed payload here is refused.
+        if ts > end + 60:
+            raise Failure(
+                f"VM POST /api/v1/query: tlast_over_time returned {ts:.0f} for "
+                f"{domain}.{entity}, which is after --end ({end}) by more than "
+                "60s -- silence would render negative. Refusing to read a broken "
+                "instrument."
+            )
         key = f"{domain}.{entity}"
         out[key] = max(out.get(key, 0.0), ts)
     return out, dropped
@@ -677,7 +807,11 @@ def main() -> int:
                         help="window start, epoch seconds (default: auto-detect the "
                              "earliest {db=\"ha\"} bucket)")
     parser.add_argument("--end", type=int, default=None,
-                        help="window end, epoch seconds (default: now)")
+                        help="window end, epoch seconds (default: now). A PAST end "
+                             "requires --ha-states-json pointing at a snapshot "
+                             "captured at that time: the HA readout is checked "
+                             "against `end` on every path, and a live fetch can "
+                             "only describe now.")
     parser.add_argument("--vm-url", default=DEFAULT_VM_URL)
     parser.add_argument("--ha-url", default=DEFAULT_HA_URL)
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
@@ -754,7 +888,8 @@ def main() -> int:
         emit("           This window is capped by the PROBE, not by the data -- "
              "pass --start explicitly to go wider.")
     emit(f"HA       : {args.ha_url}/api/states")
-    emit(f"VM       : {args.vm_url}  (series + tlast_over_time, read-only)")
+    emit(f"VM       : {args.vm_url}  (series + tlast_over_time + "
+         "count_over_time, read-only)")
     emit()
 
     # -- HA side -------------------------------------------------------------
@@ -779,17 +914,32 @@ def main() -> int:
         raise Failure(
             f"the HA entity list is {ha_skew:.0f}s away from --end (tolerance "
             f"{HA_FRESHNESS_TOLERANCE_S}s), so it describes a different instance "
-            "than the window does. Re-capture it, or pin --end to the capture time."
+            "than the window does. For a PAST --end, replay a snapshot captured "
+            "at that time (--ha-states-json): a fresh capture can only describe "
+            "now, so re-capturing cannot fix a historical window. For a window "
+            "ending now, pin --end to the capture time."
         )
 
     ha: dict[str, dict] = {}
     dropped_no_dot = 0
+    states_malformed = 0
+    duplicate_entity_ids = 0
     unparseable_last_changed = 0
     for item in states:
+        if not isinstance(item, dict):
+            # /api/states is a list of objects; a row that is not one raised
+            # AttributeError on `.get` and left a raw traceback. Counted like its
+            # neighbours instead, and reconciled against len(states) below.
+            states_malformed += 1
+            continue
         full_id = item.get("entity_id", "")
         if not isinstance(full_id, str) or "." not in full_id:
             dropped_no_dot += 1
             continue
+        if full_id in ha:
+            # A duplicate entity_id used to vanish into dict last-wins, so
+            # len(states) and len(ha) disagreed with nothing to say why.
+            duplicate_entity_ids += 1
         changed = parse_ha_ts(item.get("last_changed", ""))
         if changed is None:
             # Counted, not swallowed: a PARTIAL last_changed format change would
@@ -824,7 +974,13 @@ def main() -> int:
     unjoinable = []
     nameless_series = 0
     metric_names: set[str] = set()
+    malformed_series = 0
     for metric in series:
+        if not isinstance(metric, dict):
+            # Same shape as the HA-side row guard: a non-object series entry
+            # raised AttributeError here rather than being counted.
+            malformed_series += 1
+            continue
         name = metric.get("__name__", "")
         if name:
             metric_names.add(name)
@@ -837,6 +993,10 @@ def main() -> int:
             unjoinable.append(name or "<unnamed>")
 
     last_sample, tlast_dropped = fetch_vm_last_samples(args.vm_url, vm_auth, start, end)
+    # Fetched next to its twin so BOTH drop counters can be printed in the counts
+    # table below, and so the two queries sit as close together in time as
+    # possible (see the N8 timing note beside P3).
+    counted_seen, counted_dropped = fetch_vm_counted(args.vm_url, vm_auth, start, end)
 
     # The two VM endpoints disagree in BOTH directions, for different reasons:
     #   index_only -- /api/v1/series resolves against a per-DAY inverted index, so
@@ -895,15 +1055,22 @@ def main() -> int:
          "   HA never writes these: event_to_json -> None")
     emit(f"  writable                            {len(writable):5d}")
     emit(f"  entity_id unusable (no domain dot)  {dropped_no_dot:5d}   dropped")
+    emit(f"  states rows that are not objects    {states_malformed:5d}   dropped")
+    emit(f"  duplicate entity_id (last wins)     {duplicate_entity_ids:5d}"
+         f"   {len(states)} rows = {len(ha)} unique + "
+         f"{dropped_no_dot + states_malformed} dropped + {duplicate_entity_ids} dup")
     emit(f"  last_changed unparseable            {unparseable_last_changed:5d}"
          "   G3/restore-burst read past these")
     emit(f"VM series over window                 {len(series):5d}"
          f"   ({len(metric_names)} distinct metric names)")
+    emit(f"  series rows that are not objects    {malformed_series:5d}   dropped")
     emit(f"  series with no __name__             {nameless_series:5d}")
     emit(f"  series lacking domain or entity_id  {len(unjoinable):5d}   (cannot join)")
     for name in sorted(set(unjoinable))[:10]:
         emit(f"      {name}")
-    emit(f"  tlast results dropped (labels/NaN)  {tlast_dropped:5d}")
+    emit(f"  tlast rows dropped (labels/value)   {tlast_dropped:5d}")
+    emit(f"  count_over_time rows dropped        {counted_dropped:5d}"
+         "   neither drop can create a dead entity: see P3")
     emit(f"VM distinct (domain, entity_id)       {len(vm_seen):5d}"
          "   union of both endpoints")
     emit(f"  listed by index, undated by query   {len(index_only):5d}")
@@ -939,8 +1106,14 @@ def main() -> int:
          f"is {window / 3600:.1f}h, so the floor is slack here --")
     emit("   a large but non-total shortfall would still pass. G3 cannot cover "
          "that (its control set is by")
-    emit("   construction the FRESHEST entities); the cross-endpoint check below "
-         "is what covers it.")
+    emit("   construction the FRESHEST entities), and NOTHING BELOW COVERS IT "
+         "EITHER: P3 re-derives the seen set")
+    emit("   from the SAME endpoint and the same selector with a different "
+         "aggregation, not from a second source.")
+    emit("   The index/query split is printed above as counts (index_only / "
+         "query_only) and is guarded by nothing;")
+    emit("   taking their union is the conservative direction, which is what "
+         "bounds the damage, not a check.")
     if not g2_ok:
         failures.append(f"G2: VM holds {len(vm_seen)} pairs, expected >= {G2_MIN}")
 
@@ -1047,7 +1220,21 @@ def main() -> int:
     # implied by the union and a real disagreement between the two shows up as a
     # failure rather than as a quietly smaller dead list. Pre-tested on this
     # instance: 245 vs 245, zero disagreement.
-    counted_seen = fetch_vm_counted(args.vm_url, vm_auth, start, end)
+    #
+    # TIMING (documented, deliberately NOT compensated): the two queries run
+    # seconds apart, and a sample landing near `end` can become queryable in
+    # between -- measured elsewhere in this repo at ~45s from ingestion to
+    # queryable. That makes a rare SPURIOUS P3 failure possible. It fails in the
+    # safe direction (an instrument-broken verdict, no dead list published), and
+    # an end-lag would trade a rare loud false alarm for a permanent silent blind
+    # spot at the fresh edge, so the gap is documented rather than papered over.
+    #
+    # BOUNDEDNESS of the two drop counters: a row dropped from EITHER query leg
+    # cannot put an entity into the dead list. A dropped row that carries labels
+    # is still in `vm_seen` through the /api/v1/series index leg of the union, and
+    # a row without usable labels never identified an entity at all -- its index
+    # twin is already counted in `unjoinable`. So the counters exist to ATTRIBUTE
+    # a P3 disagreement, not to bound the finding.
     tlast_set = set(last_sample)
     only_counted = sorted(counted_seen - tlast_set)
     only_tlast = sorted(tlast_set - counted_seen)
@@ -1060,8 +1247,12 @@ def main() -> int:
     if not p3_ok:
         failures.append(
             f"P3: count_over_time and tlast_over_time disagree on "
-            f"{len(only_counted) + len(only_tlast)} entities over the same window "
-            "-- the query layer is not returning a stable seen set"
+            f"{len(only_counted) + len(only_tlast)} entities over the same window. "
+            f"Rows dropped this run: count_over_time {counted_dropped}, tlast "
+            f"{tlast_dropped}. A non-zero drop on EITHER leg explains the "
+            "disagreement without implicating the query layer -- only if BOTH are "
+            "zero does this mean the query layer is not returning a stable seen "
+            "set"
         )
 
     g4_domain_hits = len(update_domain_series)
@@ -1176,14 +1367,22 @@ def main() -> int:
          "refutation cuts toward MORE")
     emit("   suspicion of this group, not less: their absence is no longer excused "
          "by mechanism, just unranked.")
-    string_by_domain: dict[str, int] = {}
+    string_by_domain: dict[str, list[str]] = {}
     for entity in never_seen_string:
-        string_by_domain[ha[entity]["domain"]] = (
-            string_by_domain.get(ha[entity]["domain"], 0) + 1
-        )
+        string_by_domain.setdefault(ha[entity]["domain"], []).append(entity)
+    emit("   Enumerated BY NAME below, grouped by domain and unranked -- this is "
+         "the one suspicion bucket the")
+    emit("   report used to summarise as per-domain counts only, while its own "
+         "text said the refutation RAISES")
+    emit("   suspicion of it. Naming them is not convicting them: every line here "
+         "is INCONCLUSIVE, because a")
+    emit("   string-only state is exactly the case this instrument cannot date.")
     for domain in sorted(string_by_domain):
-        emit(f"   never-seen, string-only  {domain:<16} {string_by_domain[domain]:4d}"
+        entities = sorted(string_by_domain[domain])
+        emit(f"   never-seen, string-only  {domain:<16} {len(entities):4d}"
              "   INCONCLUSIVE")
+        for entity in entities:
+            emit(f"      {entity}  state={ha[entity]['state']!r}")
     if not string_by_domain:
         emit("   (no never-seen entity carries a string-only state)")
     # Empirical check on `select`: a domain whose states are always strings.
@@ -1194,7 +1393,9 @@ def main() -> int:
         and ha[e]["last_changed"] is not None
         and start <= ha[e]["last_changed"] <= end
     )
-    select_vm_series = sum(1 for m in series if m.get("domain") == "select")
+    select_vm_series = sum(
+        1 for m in series if isinstance(m, dict) and m.get("domain") == "select"
+    )
     emit(f"   empirical: {len(select_changed_in_window)} `select` entities changed "
          f"state inside the window; VM holds {select_vm_series} `select` series.")
     if select_changed_in_window and select_vm_series == 0:
