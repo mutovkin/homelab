@@ -34,7 +34,8 @@ Usage:
     export ANSIBLE_VAULT_PASSWORD_FILE=/path/to/.vault_password
     scripts/reconcile-ha-entities.py                     # widest available window
     scripts/reconcile-ha-entities.py --start 1787443200 --end 1787541146
-    scripts/reconcile-ha-entities.py --ha-states-json /tmp/ha-states.json
+    scripts/reconcile-ha-entities.py --ha-states-json /scratch/ha-states.json
+    scripts/reconcile-ha-entities.py --start S --end E --ha-states-json /scratch/ha-states.json
 
 Exit codes: 0 = all guards passed; 1 = a fatal error before the verdict (bad
 credentials, unreachable endpoint, malformed payload, unusable snapshot);
@@ -47,6 +48,7 @@ import argparse
 import base64
 import datetime as dt
 import json
+import math
 import os
 import subprocess
 import sys
@@ -118,9 +120,10 @@ G3_WIDENED_WINDOW_S = 7200
 # How far back the start auto-detection probes. Data older than this is invisible
 # to it, so `saturated` reports the cap rather than presenting it as the answer.
 DETECT_LOOKBACK_S = 8 * 86400
-# How far an HA snapshot may sit from --end before it describes a different
-# instance than the VictoriaMetrics window does.
-SNAPSHOT_SKEW_TOLERANCE_S = 900
+# How far the HA entity list may sit from --end before it describes a different
+# instance than the VictoriaMetrics window does. Applies to live fetches, captures
+# and replays alike.
+HA_FRESHNESS_TOLERANCE_S = 900
 
 HTTP_TIMEOUT = 120
 
@@ -388,7 +391,15 @@ def detect_start(vm_url: str, auth: Secret, end: int) -> tuple[int, bool]:
             'auto-detect start: count({db="ha"}) returned no series over the last '
             f"{DETECT_LOOKBACK_S // 86400} days -- is the HA push alive?"
         )
-    stamps = sorted(int(point[0]) for series in result for point in series["values"])
+    try:
+        stamps = sorted(
+            int(point[0]) for series in result for point in series["values"]
+        )
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise Failure(
+            "auto-detect start: query_range result is malformed "
+            f"({type(exc).__name__}) -- refusing to guess a window from it"
+        ) from None
     if not stamps:
         raise Failure('auto-detect start: count({db="ha"}) has no populated bucket')
     # Within two buckets of the probe edge means the data very likely predates it.
@@ -417,28 +428,58 @@ def git_worktrees_containing(path: Path) -> list[Path]:
     checkout's root is outside the worktree, passes a root-relative test, and
     lands in a tracked tree anyway. Ask git about the destination instead.
     """
+    # Walk UP to the nearest EXISTING directory. `git -C <nonexistent>` exits 128,
+    # which used to make this return [] and quietly degrade the guard to the
+    # script's own root; `mkdir(parents=True)` then CREATED the missing directory
+    # inside the tracked tree and wrote a 590 KB home-state readout into it.
+    # Measured before this fix: /Users/surge/dev/homelab/scratch171/ha.json was
+    # accepted, and `git status` in the main checkout reported it untracked.
     probe = path if path.is_dir() else path.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+
     roots: list[Path] = []
     for flag in ("--show-toplevel", "--git-common-dir"):
         try:
             proc = subprocess.run(
-                ["git", "-C", str(probe), "rev-parse", flag],
-                capture_output=True, text=True, check=False,
+                ["git", "rev-parse", flag],
+                cwd=str(probe), capture_output=True, text=True, check=False,
             )
-        except (FileNotFoundError, OSError):
-            return roots
-        if proc.returncode != 0 or not proc.stdout.strip():
+        except OSError as exc:
+            # git missing or unrunnable. The guard cannot answer, so REFUSE: a
+            # privacy guard that fails open silently is the exact shape the rest
+            # of this script exists to refuse, and the pre-fix static test at
+            # least could not do it.
+            raise Failure(
+                f"cannot verify that {path} lies outside a git work tree "
+                f"({type(exc).__name__}). Refusing to write personal home-state "
+                "data without that check."
+            ) from None
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw = Path(proc.stdout.strip())
+            # `--git-common-dir` may print a RELATIVE path ('.git'), and
+            # Path('.git').resolve() resolves against the PROCESS CWD -- adding a
+            # phantom forbidden root taken from wherever the operator happened to
+            # run this, which then refuses legitimate scratch paths while naming a
+            # directory that is not a checkout. Resolve against the probe instead.
+            found = raw.resolve() if raw.is_absolute() else (probe / raw).resolve()
+            # It points at `<main checkout>/.git`; its parent is the tracking tree.
+            roots.append(found.parent if found.name == ".git" else found)
             continue
-        found = Path(proc.stdout.strip()).resolve()
-        # --git-common-dir points at `<main checkout>/.git`; its parent is the
-        # tree that would track the file.
-        roots.append(found.parent if found.name == ".git" else found)
+        stderr = (proc.stderr or "").lower()
+        if "not a git repository" in stderr or "no such file or directory" in stderr:
+            continue  # genuinely outside a repo: the safe answer
+        raise Failure(
+            f"cannot verify that {path} lies outside a git work tree: "
+            f"`git rev-parse {flag}` exited {proc.returncode}. Refusing to write "
+            "personal home-state data without that check."
+        )
     return roots
 
 
 def load_or_capture_ha_states(
-    ha_url: str, token: Secret, snapshot: Path | None, repo_root: Path, end: int
-) -> list[dict]:
+    ha_url: str, token: Secret, snapshot: Path | None, repo_root: Path
+) -> tuple[list[dict], float]:
     """HA states, optionally pinned to a snapshot file so a re-run is reproducible.
 
     Provenance goes to STDERR, never stdout: a "captured" vs "replayed" line on
@@ -446,9 +487,17 @@ def load_or_capture_ha_states(
     the property the snapshot exists to establish.
     """
     if snapshot is None:
-        return fetch_ha_states(ha_url, token)
+        return fetch_ha_states(ha_url, token), time.time()
 
     snapshot = snapshot.expanduser().resolve()
+    # The .gitignore backstop matches `ha-states*.json` by basename, so a snapshot
+    # called anything else is NOT covered by it. Enforce the name the backstop
+    # knows, so the two halves of the defence line up instead of only appearing to.
+    if not snapshot.name.startswith("ha-states") or snapshot.suffix != ".json":
+        raise Failure(
+            f"HA snapshot must be named ha-states*.json (got {snapshot.name}); "
+            "that is the pattern .gitignore covers as a second line of defence"
+        )
     # /api/states is a full readout of a home: occupancy, device names, presence.
     # It must never land in a tracked tree, where a stray `git add -A` publishes it.
     forbidden = [repo_root, *git_worktrees_containing(snapshot)]
@@ -468,6 +517,10 @@ def load_or_capture_ha_states(
     if snapshot.is_file():
         try:
             payload = json.loads(snapshot.read_text())
+        except OSError as exc:
+            raise Failure(
+                f"cannot read HA snapshot {snapshot}: {exc.strerror}"
+            ) from None
         except json.JSONDecodeError as exc:
             raise Failure(
                 f"HA snapshot {snapshot} is not valid JSON ({exc.msg}) -- an "
@@ -489,26 +542,28 @@ def load_or_capture_ha_states(
         # between land in never-seen and vm_only as pure artefacts. A grossly
         # stale one happens to empty G3's control set, but that backstop is
         # accidental and does not cover the near-stale regime.
-        skew = abs(captured_at - end)
-        if skew > SNAPSHOT_SKEW_TOLERANCE_S:
-            raise Failure(
-                f"HA snapshot {snapshot} was captured {skew:.0f}s from --end "
-                f"(tolerance {SNAPSHOT_SKEW_TOLERANCE_S}s). Re-capture it, or pin "
-                "--end to the capture time; a skewed snapshot invents findings."
-            )
-        print(f"HA states REPLAYED from snapshot {snapshot} ({len(states)} entities, "
-              f"captured {skew:.0f}s from --end)", file=sys.stderr)
-        return states
+        print(f"HA states REPLAYED from snapshot {snapshot} ({len(states)} "
+              f"entities, captured_at {captured_at})", file=sys.stderr)
+        return states, float(captured_at)
 
     states = fetch_ha_states(ha_url, token)
-    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Failure(
+            f"cannot create {snapshot.parent}: {exc.strerror}"
+        ) from None
     # Written 0600: see the personal-data note above.
-    fd = os.open(str(snapshot), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        json.dump({"captured_at": int(time.time()), "states": states}, handle)
+    captured_at = int(time.time())
+    try:
+        fd = os.open(str(snapshot), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"captured_at": captured_at, "states": states}, handle)
+    except OSError as exc:
+        raise Failure(f"cannot write HA snapshot {snapshot}: {exc.strerror}") from None
     print(f"HA states CAPTURED to snapshot {snapshot} ({len(states)} entities)",
           file=sys.stderr)
-    return states
+    return states, float(captured_at)
 
 
 def fetch_vm_series(
@@ -527,6 +582,38 @@ def fetch_vm_series(
             f"{type(data).__name__} -- refusing to read that as zero series"
         )
     return data
+
+
+def fetch_vm_counted(vm_url: str, auth: Secret, start: int, end: int) -> set[str]:
+    """The seen set derived a SECOND way, via count_over_time.
+
+    Same endpoint and window as tlast_over_time but a different aggregation, so
+    the two can genuinely disagree -- which is what makes P3 falsifiable where P1
+    and P2 are true by construction.
+    """
+    window = end - start
+    doc = vm_post(
+        vm_url,
+        "/api/v1/query",
+        [
+            (
+                "query",
+                f'count(count_over_time({{db="ha"}}[{window}s])) '
+                "by (domain, entity_id)",
+            ),
+            ("time", str(end)),
+        ],
+        auth,
+    )
+    out: set[str] = set()
+    for item in vm_result(doc, "/api/v1/query"):
+        metric = item.get("metric") if isinstance(item, dict) else None
+        if not isinstance(metric, dict):
+            continue
+        domain, entity = metric.get("domain"), metric.get("entity_id")
+        if domain and entity:
+            out.add(f"{domain}.{entity}")
+    return out
 
 
 def fetch_vm_last_samples(
@@ -554,13 +641,22 @@ def fetch_vm_last_samples(
     out: dict[str, float] = {}
     dropped = 0
     for item in vm_result(doc, "/api/v1/query"):
-        metric = item.get("metric", {})
+        metric = item.get("metric") if isinstance(item, dict) else None
+        if not isinstance(metric, dict):
+            dropped += 1
+            continue
         domain, entity = metric.get("domain"), metric.get("entity_id")
         if not domain or not entity:
             dropped += 1
             continue
-        ts = float(item["value"][1])
-        if ts != ts:  # NaN would poison max() and crash fmt_silence later
+        try:
+            ts = float(item["value"][1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            dropped += 1
+            continue
+        # NaN AND +/-Inf: `end - inf` is -inf and fmt_silence's int() would raise
+        # OverflowError. The previous comment named NaN and left inf open.
+        if not math.isfinite(ts):
             dropped += 1
             continue
         key = f"{domain}.{entity}"
@@ -637,9 +733,16 @@ def main() -> int:
     emit("=" * 78)
     emit(f"WINDOW   : {iso(start)} .. {iso(end)}  ({window / 3600:.1f}h)")
     emit(f"           --start {start} --end {end}")
-    if args.ha_states_json:
-        emit("           HA input PINNED to a snapshot -- with the same snapshot, "
-             "this output is byte-identical.")
+    fully_pinned = (bool(args.ha_states_json) and args.start is not None
+                    and args.end is not None)
+    if fully_pinned:
+        emit("           HA input PINNED to a snapshot and the window pinned "
+             "explicitly -- byte-identical on a re-run.")
+    elif args.ha_states_json:
+        emit("           HA input pinned, WINDOW IS NOT: --start/--end were not "
+             "both given, so `end` moved with the clock and")
+        emit("           every silence figure moves with it. Pin BOTH to "
+             "reproduce byte-for-byte.")
     else:
         emit("           NOT byte-reproducible: HA /api/states is live and its "
              "last_changed drifts (~11 entities/min),")
@@ -655,14 +758,29 @@ def main() -> int:
     emit()
 
     # -- HA side -------------------------------------------------------------
-    states = load_or_capture_ha_states(
+    states, ha_as_of = load_or_capture_ha_states(
         args.ha_url,
         ha_token,
         Path(args.ha_states_json) if args.ha_states_json else None,
         repo_root,
-        end,
     )
     del ha_token
+
+    # Freshness is checked on EVERY path, not only on replay. Checking it only
+    # when replaying guarded the byte-identical REPEAT of a run while letting the
+    # run that actually PRODUCES the dead list through -- measured: identical 1h
+    # staleness passed live and passed on capture, and was refused only on replay.
+    # A guard that fires on the healthy repeat and never on the original finding
+    # is inverted. An HA readout far from `end` describes a different instance
+    # than the VictoriaMetrics window does, and the difference lands in never-seen
+    # and vm_only as pure artefacts.
+    ha_skew = abs(ha_as_of - end)
+    if ha_skew > HA_FRESHNESS_TOLERANCE_S:
+        raise Failure(
+            f"the HA entity list is {ha_skew:.0f}s away from --end (tolerance "
+            f"{HA_FRESHNESS_TOLERANCE_S}s), so it describes a different instance "
+            "than the window does. Re-capture it, or pin --end to the capture time."
+        )
 
     ha: dict[str, dict] = {}
     dropped_no_dot = 0
@@ -904,20 +1022,46 @@ def main() -> int:
             "pairs -- the bucketing code has been broken"
         )
 
-    # P2 -- the cross-endpoint check, and the one that CAN fail on data. Every
-    # entity tlast dated must be in the seen set, so no entity can reach the dead
-    # list while its own sample timestamp sits unread in memory.
+    # P2 -- ALSO a source-code canary, not a data check, and it was briefly
+    # mislabelled as "the one that CAN fail on data". Since the seen set is the
+    # union, `x in last_sample` implies `x in vm_seen` implies `x not in
+    # never_seen`: `leaked` is empty for every possible input. The fixture that
+    # fails it does so by reverting the union at its definition -- a source edit,
+    # exactly like P1. Worth keeping for that; not evidence about the data.
     leaked = sorted(set(last_sample) & set(never_seen))
     p2_ok = not leaked
-    emit(f"P2 no dated entity called dead {'PASS' if p2_ok else 'FAIL'}"
-         f"  {len(leaked)} of {len(never_seen)} never-seen entities have a "
-         "tlast timestamp")
+    emit(f"P2 union-code canary          {'PASS' if p2_ok else 'FAIL'}"
+         f"   {len(leaked)} dated entities in the never-seen list")
+    emit("   (structural: true for all inputs by construction -- fails only if the "
+         "seen set stops reading both endpoints)")
     for entity in leaked[:10]:
         emit(f"   LEAKED: {entity} last sample {iso(last_sample[entity])}")
     if not p2_ok:
         failures.append(
             f"P2: {len(leaked)} entities are in the dead list AND have an in-window "
             "sample timestamp -- the seen set is not reading both endpoints"
+        )
+
+    # P3 -- the falsifiable one. It derives the seen set a SECOND time from a
+    # different MetricsQL aggregation over the same window, so nothing about it is
+    # implied by the union and a real disagreement between the two shows up as a
+    # failure rather than as a quietly smaller dead list. Pre-tested on this
+    # instance: 245 vs 245, zero disagreement.
+    counted_seen = fetch_vm_counted(args.vm_url, vm_auth, start, end)
+    tlast_set = set(last_sample)
+    only_counted = sorted(counted_seen - tlast_set)
+    only_tlast = sorted(tlast_set - counted_seen)
+    p3_ok = not only_counted and not only_tlast
+    emit(f"P3 two aggregations agree     {'PASS' if p3_ok else 'FAIL'}"
+         f"   count_over_time {len(counted_seen)} vs tlast_over_time "
+         f"{len(tlast_set)}; {len(only_counted) + len(only_tlast)} disagree")
+    for entity in (only_counted + only_tlast)[:10]:
+        emit(f"   DISAGREEMENT: {entity}")
+    if not p3_ok:
+        failures.append(
+            f"P3: count_over_time and tlast_over_time disagree on "
+            f"{len(only_counted) + len(only_tlast)} entities over the same window "
+            "-- the query layer is not returning a stable seen set"
         )
 
     g4_domain_hits = len(update_domain_series)
@@ -938,7 +1082,7 @@ def main() -> int:
             "G4: the positive control returned 0 series for domain=\"sensor\", so "
             "the zero for domain=\"update\" proves nothing about the subtraction"
         )
-    if not g4_ok:
+    elif not g4_ok:
         failures.append(
             f"G4: domain=update series {g4_domain_hits}, update.* metric names "
             f"{g4_name_hits} -- the by-design subtraction is INVALID and is itself "
@@ -948,12 +1092,11 @@ def main() -> int:
             emit(f"   update-prefixed name: {name}")
     emit()
 
-    g5_pinned = bool(args.ha_states_json)
-    emit(f"G5 determinism precondition   {'PASS' if g5_pinned else 'N/A '}"
-         f"   HA input {'PINNED to a snapshot' if g5_pinned else 'is LIVE'} -- "
-         "byte-identity requires --ha-states-json")
-    emit("   (not a failure: an unpinned run is still valid, its G3 control line "
-         "just will not repeat)")
+    emit(f"G5 determinism precondition   {'PASS' if fully_pinned else 'N/A '}"
+         f"   {'snapshot AND explicit --start/--end' if fully_pinned else 'NOT fully pinned'}"
+         " -- byte-identity needs BOTH")
+    emit("   (not a failure: an unpinned run is still valid, it just will not "
+         "reproduce byte-for-byte)")
     emit()
 
     if failures:
@@ -1096,7 +1239,7 @@ def main() -> int:
     emit("-- CROSS-CHECK vs the nine `last_seen`-derived dead devices (#133) --")
     emit("   Two independent mechanisms. If they disagree, the disagreement is the "
          "finding.")
-    def device_matches(pool) -> list[str]:
+    def device_matches(pool, device: str) -> list[str]:
         # ANCHORED, not a bare substring: `stairs_sensor` is a substring of
         # `upstairs_sensor` and `downstairs_sensor`, and a live sibling matching
         # by accident would set any_seen and manufacture the DISAGREE verdict --
@@ -1110,13 +1253,13 @@ def main() -> int:
         return sorted(out)
 
     for device, days, since in NINE_DEVICES:
-        matches = device_matches(ha)
+        matches = device_matches(ha, device)
         emit(f"   {days:>5}d  {device}  (last_seen: {since})")
         if not matches:
             # Ask the side that can still answer: an entity deleted from HA may
             # well have samples in VictoriaMetrics, which is the one question
             # this script is uniquely able to settle.
-            vm_matches = device_matches(vm_seen)
+            vm_matches = device_matches(vm_seen, device)
             if vm_matches:
                 emit("            VERDICT: ABSENT-FROM-HA, PRESENT IN VM -- deleted "
                      "from HA, yet VictoriaMetrics holds in-window samples:")
