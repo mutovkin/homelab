@@ -1,0 +1,23 @@
+---
+# Where the poller lives on the host and how often it runs.
+truenas_poller_dir: /opt/truenas-poller
+truenas_poller_user: root
+
+# 60s, matching the Graphite exporter's update_every and telegraf's agent
+# interval. Nothing this poller reads changes faster: pool capacity moves in
+# gigabytes per hour and disk temperature is polled by the appliance itself
+# every few minutes. A faster cadence would only add API load.
+truenas_poller_interval: 60
+
+# Pinned by git SHA, exactly as on the control node (docs/onboarding.md): the
+# package is not on PyPI and reports its version as 0.0.0, so there is no
+# version to pin. Keep this in step with the control-node pin — two different
+# commits on the two machines is the drift #137's policy exists to prevent.
+truenas_poller_client_ref: 8d7e37383717aea15ce46167cfcd92325acbcd8a
+
+# VictoriaMetrics' Prometheus-text import endpoint, over LOOPBACK on this host.
+# 127.0.0.1 is deliberate and load-bearing: the scoped nftables table already
+# accepts `iif lo` and 127.0.0.1 unconditionally, so this path needs no allowlist
+# entry, and the VM credential never crosses the flat LAN. Pointing this at a
+# routable address would silently make both of those untrue.
+truenas_poller_vm_url: "http://127.0.0.1:8428/api/v1/import/prometheus"
