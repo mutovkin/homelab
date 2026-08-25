@@ -34,7 +34,7 @@ apiVersion: 1
 #    SMART and netdata reports its temperature as **0, not null**. A fabricated
 #    zero would drag any min/avg panel down and, worse, would make an "average
 #    array temperature" rule structurally incapable of firing. It is excluded by
-#    the serial-based selector below rather than by an explicit != — the selector
+#    the media="hdd" selector below rather than by an explicit != — the selector
 #    is an allowlist, which fails closed.
 #
 # ── HDD SCOPING IS BY MEDIA TYPE (#174 resolved the interim by-serial list) ──
@@ -350,8 +350,9 @@ groups:
       # scrape pushed as if complete would look like a healthy pool with missing
       # disks. So absence, not a zero, is the failure signal.
       # The privilege roles a failed cycle usually lacks: pool.query needs
-      # POOL_READ, disk.query needs DISK_READ, and alert.list needs
-      # ALERT_LIST_READ (all carried by the ansible-ctrl privilege).
+      # POOL_READ, disk.query needs DISK_READ, and alert.list (#183's alert
+      # export) needs ALERT_LIST_READ — all carried by the ansible-ctrl
+      # privilege.
       - uid: truenas-poller-absent
         title: TrueNAS API poller has stopped
         condition: C

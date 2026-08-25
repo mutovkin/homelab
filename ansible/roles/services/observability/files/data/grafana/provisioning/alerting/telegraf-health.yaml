@@ -42,9 +42,11 @@ apiVersion: 1
 # host="homelab-telegraf" series (last sample 2026-08-24T03:14:52Z, the #178
 # apply) is still in the result set with a monotonically climbing lag — measured
 # 1321s twenty-two minutes after the cutover, against a 600s threshold. The
-# host-agnostic form pages for a full lookbehind after ANY deliberate rename,
-# which is the tradeoff README.md already records for the vector rule; the
-# difference here is that #178 IS the rename, so the rule would have arrived
+# host-agnostic form pages for a full lookbehind after ANY deliberate rename.
+# README.md records that tradeoff for the per-host log rule and for
+# obs-http-probe-absent; the write-up for this rule's own scoping decision is
+# docs/solutions/integration-issues/telegraf-host-label-fabricated-then-stripped-by-taginclude.md.
+# The difference here is that #178 IS the rename, so the rule would have arrived
 # firing at its own deploy.
 # Scoping to the expected name instead is strictly BETTER at the job this rule
 # exists for: a wrong-but-present label (container id, stale name, the literal

@@ -2,8 +2,8 @@ apiVersion: 1
 
 # Grafana file-provisioned alerting — the DELIVERY path itself (#152)
 #
-# Every other rule in this folder watches something the stack collects. These two
-# watch the thing that carries all of them. Until #152 nothing did: if the Gmail
+# Every other rule in this folder watches something the stack collects. The rules
+# below watch the thing that carries all of them. Until #152 nothing did: if the Gmail
 # app password was revoked or rotated, if Google blocked the sender, or if egress
 # to 587 was filtered, every alert in the stack failed silently into
 # `docker logs grafana` — including obs-log-ingest-stalled and
@@ -185,7 +185,7 @@ groups:
           description: |-
             Alerts fired and the message did not go out — `docker logs grafana` has the SMTP/API error.
             email → the shared Gmail app password or egress to :587; telegram → bot token, chat id, or the bot removed from the chat.
-            Sent to you via the other channel on purpose.
+            Normally sent to you via the other channel on purpose.
         labels:
           severity: critical
           component: alerting
