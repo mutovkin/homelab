@@ -348,6 +348,14 @@ Hard-won lessons — check here before debugging from scratch.
   `status=ERROR, got response code 401`), which `services/observability` now asserts for
   every uid read out of the provisioning file itself.
 
+- **Grafana alert provisioning is ALL-OR-NOTHING and boot-fatal: `__dashboardUid__`
+  without `__panelId__` crash-looped Grafana and withdrew all 22 rules** (measured
+  19:48-19:51, ten `Starting Grafana` lines, zero `HTTP Server Listen`) — a dashboard-only
+  deep link is not representable, so pair every link and pin panel ids in the dashboard
+  JSON. Nothing repo-side can catch it (valid YAML, lint-clean, and `--check` skips the
+  restart). See
+  [docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md](docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md).
+
 - **A configured TrueNAS reporting exporter is not a DELIVERING one — and forwarded
   metrics get stamped with the forwarder's identity.** `reporting.exporters.create`
   returns success and the object reads back exactly right (`enabled: true`, correct
