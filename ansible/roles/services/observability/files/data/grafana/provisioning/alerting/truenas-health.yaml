@@ -2,14 +2,15 @@ apiVersion: 1
 
 # Grafana file-provisioned alerting — TrueNAS disk thermals and stream liveness (#176)
 #
-# WHY THE LIVENESS RULE SHIPS WITH THE TEMPERATURE RULES, NOT AFTER THEM.
-# A temperature rule alone is a false sense of safety. If the exporter stalls,
-# truenas_disk_temp_temp simply stops arriving, a `> 47` rule sees nothing, and
-# it sits GREEN over a cooking array. #173 measured exactly that failure mode:
-# TrueNAS reports a reporting exporter as enabled and correct while netdata has
-# not loaded it, and no method reachable with REPORTING_WRITE forces it. A green
-# deploy is not evidence of delivery — so absence has to be somebody's alarm, and
-# here it is truenas-metrics-absent's.
+# WHY THE LIVENESS RULES SHIP WITH THE TEMPERATURE RULES, NOT AFTER THEM.
+# A temperature rule alone is a false sense of safety. If its feed stalls, the
+# series simply stops arriving, a `> 47` rule sees nothing, and it sits GREEN
+# over a cooking array. #173 measured exactly that failure mode: TrueNAS reports
+# a reporting exporter as enabled and correct while netdata has not loaded it,
+# and no method reachable with REPORTING_WRITE forces it. A green deploy is not
+# evidence of delivery — so absence has to be somebody's alarm. Since #174 the
+# thermal rules read the API poller, so THEIR alarm is truenas-poller-absent;
+# truenas-metrics-absent owns the Graphite stream (see the NoData policy below).
 #
 # METRIC NAMES AND LABELS MEASURED off the live 26.0 stream on 2026-08-23 (#173),
 # not copied from the community graphite mapping, which is 23.10-era and already
@@ -20,8 +21,9 @@ apiVersion: 1
 # 1. THE GRAPHITE SERIES IS SPARSE (it updates every few MINUTES, not every 60s).
 #    The rules below no longer use it — #174's poller supplies a dense, 60s
 #    per-device series instead — but the property is recorded because anything
-#    querying truenas_disk_temp_temp directly still has to cope with it — a 5-minute window is legitimately empty on a perfectly healthy
-#    array. That is why every query below wraps the selector in
+#    querying truenas_disk_temp_temp directly still has to cope with it — a
+#    5-minute window is legitimately empty on a perfectly healthy array. That
+#    is why anything querying it directly must wrap the selector in
 #    last_over_time(...[30m]) instead of reading the instant value: without it
 #    the rules would flap between OK and NoData continuously in normal operation,
 #    and a flapping thermal alarm is one you learn to ignore. 30m is ~6x the
@@ -111,9 +113,13 @@ groups:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
               # last_over_time, NOT an instant read — see property 1 in the header.
-              # `by (disk)` keeps one alert instance per drive so a notification
-              # names WHICH disk; the notification policy groups on `disk` for the
-              # same reason it groups on hostname and integration.
+              # `by (devname)` keeps one alert instance per drive so a notification
+              # names WHICH disk. NOTE: the notification policy's group_by still
+              # says `disk`, a pre-#174 label the expr no longer produces — two
+              # drives firing together therefore collapse into one [FIRING:2]
+              # notification; tracked as a follow-up issue. Do NOT "fix" the expr
+              # to by (disk) to match the policy — that would empty every
+              # {{ $labels.devname }} in the summaries.
               expr: >-
                 max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas",
                 media="hdd"}[10m]))
@@ -265,7 +271,7 @@ groups:
         annotations:
           summary: TrueNAS has sent no Graphite metrics for 10 minutes.
           description: |-
-            The NAS dashboard is going dark (ARC, CPU, I/O, capacity). Disk-temperature and pool alerts are unaffected — they read the API poller, which has its own liveness rule.
+            The NAS dashboard is going dark (ARC, CPU, memory, disk I/O). Disk-temperature and pool alerts are unaffected — they read the API poller, which has its own liveness rule.
             Known cause: the appliance accepts the exporter config but never loads it — cycle the exporter off and on (runbook).
           __dashboardUid__: nas-truenas
           # Grafana REJECTS __dashboardUid__ without __panelId__ ("both annotations
