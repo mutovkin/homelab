@@ -26,6 +26,16 @@ telegraf_agent_controller_cache: "{{ lookup('env', 'HOME') }}/.cache/homelab/tel
 # "false" from host_vars is a truthy string (vector_agent precedent).
 telegraf_agent_acpi_fan_state: false
 
+# Features the sensors input must EXCLUDE AT THE SOURCE — readings the chip
+# fabricates rather than measures (n5pro: amdgpu's vddgfx/vddnb, 0.000 V). This
+# is deliberately INDEPENDENT of telegraf_agent_forbidden_test_output below,
+# which is the PROOF list verified against `telegraf --test`'s own output: one
+# shapes the config, the other verifies the result, and one variable meaning both
+# made a host unable to prove an exclusion it did not also perform (or the
+# reverse). The two will usually name the same features — keeping them in sync is
+# a deliberate per-host act, not something the role infers (#186 review round).
+telegraf_agent_sensors_tagdrop_features: []
+
 # Per-host proof lists for the pre-flight `telegraf --test` (host_vars). The
 # expected list MUST be non-empty for every host in the group — an empty list
 # would turn the input-output proof into `assert: true`.

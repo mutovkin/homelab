@@ -119,6 +119,14 @@
 # The values are parsed OUT OF the deployed rule file, like the datasource-uid
 # check further down, so the guard cannot drift from what is actually provisioned.
 #
+# WHAT IT DOES NOT PROVE, stated so nobody reads more into a green run than is
+# there: that those rules WORK. It matches selector STRINGS, so a rule that is
+# `isPaused: true`, or whose noDataState is not Alerting, or whose `for:` was
+# widened to hours, satisfies it exactly as a working rule does. Coverage of the
+# host SET is this guard's whole claim; that the rules are actually served and
+# evaluated is proven separately, by this deploy's Grafana rule-count and
+# rule-evaluation checks further down.
+#
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
 # quoted an expr verbatim in a comment ABOVE the real one, the guard would read
@@ -137,7 +145,10 @@
     # This stack's own host runs the CONTAINER agent and is deliberately NOT in
     # `telegraf_agents` (that group is the native-agent hosts); adding it here is
     # what makes the two delivery paths one expected set.
-    _telegraf_expected_hosts: "{{ ([inventory_hostname] + groups['telegraf_agents']) | sort }}"
+    # `unique` before `sort`: a host mistakenly placed in BOTH roles would
+    # otherwise appear twice and fail the count assert below with a confusing
+    # off-by-one instead of the real problem.
+    _telegraf_expected_hosts: "{{ ([inventory_hostname] + groups['telegraf_agents']) | unique | sort }}"
   block:
     - name: Assert the telegraf alert rules expose one pinned host selector each
       ansible.builtin.assert:

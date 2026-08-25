@@ -83,12 +83,20 @@
 # feature names, which would merge eq12's core_0..core_3 into one series.
 [[inputs.sensors]]
   remove_numbers = false
-{% if telegraf_agent_forbidden_test_output | length > 0 %}
+{#
+  Gated on the EXCLUSION list, not on telegraf_agent_forbidden_test_output. Those
+  are two different jobs that happened to hold the same value: this one shapes the
+  config (what the sensors input must drop at the source), the other is the proof
+  list checked against `telegraf --test`'s output (what must then be absent).
+  Splitting them was #186's review round — see defaults/main.yml. The rendering is
+  byte-identical to the hardcoded pair it replaced, verified by diff.
+#}
+{% if telegraf_agent_sensors_tagdrop_features | length > 0 %}
   # Fabricated zeros, excluded at the source (CLAUDE.md: gauges skip on unknown):
   # amdgpu vddgfx/vddnb read 0.000 V on n5pro — unsupported readings, not
   # measurements. The deploy asserts these never appear in `telegraf --test`.
   [inputs.sensors.tagdrop]
-    feature = ["vddgfx", "vddnb"]
+    feature = [{{ telegraf_agent_sensors_tagdrop_features | map('to_json') | join(', ') }}]
 {% endif %}
 
 # NVMe SMART for the root disks — wear, spare, power-on-hours, media errors: the
@@ -104,9 +112,12 @@
   attributes = true
 
 {% if telegraf_agent_acpi_fan_state | bool %}
-# eq12 only. BINARY ACPI fan state (0/1) — NOT a fan speed. This board exposes
-# no tachometer (no fan*_input, no pwm*, no Super-I/O driver; measured #186).
-# Never graph or label this as RPM.
+# eq12 only. BINARY ACPI fan state (0/1) — NOT a fan speed, and not this board's
+# tachometer. Under the DEFAULT driver set the board exposes no fan*_input and no
+# pwm* (measured #186); a forced binding of the stock in-kernel it87 module DOES
+# read two real tachometers (measured 2026-08-25), but that is unpersisted, not
+# collected, and pending an operator decision — see docs/eq12.md.
+# Never graph or label this series as RPM.
 [[inputs.exec]]
   commands = ["/usr/local/lib/telegraf/acpi_fan_state.sh"]
   timeout = "5s"

@@ -163,6 +163,8 @@ proxmox_lxcs:
 telegraf_agent_acpi_fan_state: true
 # Substrings that MUST appear in `telegraf --test` output on this host — the
 # input's OWN output, per CLAUDE.md's ping lesson. chip names measured 2026-08-24.
+# Matched as LITERAL SUBSTRINGS, not as regexes: a `.` or `-` here is that
+# character, nothing more.
 telegraf_agent_expected_test_output:
   - "chip=coretemp-isa-0000" # 5 CPU temps (Package + Core 0..3)
   - "chip=acpitz-acpi-0"

@@ -112,6 +112,13 @@ the role work on a restricted or air-gapped host. Neither leg has a stat-exists
 gate: `get_url` hashes whatever is on disk, skips on a match and re-downloads on a
 mismatch, so a corrupt cache is repaired rather than trusted forever (CLAUDE.md).
 
+Both legs are `ignore_errors: true` **and registered**, never `failed_when: false`
+— the latter *assigns* `failed=False`, which made leg 1b run on a failed fetch and
+left the fallback leg unreachable dead code until #186's review round measured it.
+The loud failure belongs to the arrival assert, which reads the real `.failed`
+values to name the leg that broke; a failed leg shows as `failed(ignored)` in the
+recap.
+
 **A native package on a Proxmox host has no watchtower and no `pull: always`, so
 the update path has to be named or there is not one.** It is:
 
@@ -141,15 +148,29 @@ RAPL counters wrap fast (n5pro's package range is 65.5 kJ, roughly 20 minutes
 under load), so keep the 60 s interval rather than widening it, or a wrap lands
 inside a sampling gap and reads as a negative delta.
 
-## Fans: the negative result, stated honestly
+## Fans: what is collected, and what is only reachable
 
-**Neither host exposes a fan tachometer.** Measured 2026-08-24: no
-`fan*_input` and no `pwm*` under `/sys/class/hwmon/hwmon*/` on either machine, and
-no Super-I/O driver loaded (no `nct6775`, `it87`, `w836*`, `f718*`) — only
-`coretemp` on eq12 and `k10temp` on n5pro. Mini-PC boards frequently do not wire
-fan tach to a chip Linux can read, and that appears to be the case here.
+**No fan tachometer is collected by this role**, and under the DEFAULT driver set
+neither host exposes one. Measured 2026-08-24: no `fan*_input` and no `pwm*` under
+`/sys/class/hwmon/hwmon*/` on either machine, and no Super-I/O-class fan driver
+loaded (no `nct6775`, `it87`, `w836*`, `f718*`) — `coretemp` is the only CPU-temp
+module on eq12, `k10temp` the only one on n5pro.
 
-What does exist:
+Past that default reading the two hosts stop being the same story, and the
+difference is worth stating precisely:
+
+- **eq12's tachometers are REACHABLE.** A forced binding of the *stock*, in-kernel
+  `it87` module reads two real fans — measured 2026-08-25. It is **not persisted,
+  not exported, and pending an operator decision**; the command, the corroboration
+  and the reboot-to-default check are in [docs/eq12.md](../../../docs/eq12.md).
+- **n5pro's negative is definitive.** Its Super-I/O chip ID reads `0x5571`, which
+  no kernel driver claims; the chip is **community-identified** as an ITE IT5571,
+  and **community EC dumps** of this machine read zeros in the fan registers, so
+  even a purpose-written driver would find nothing there. Our own measurements are
+  the raw ID and `sensors-detect`'s empty scan — the identification and the dumps
+  are attributed, not ours. See [docs/n5pro.md](../../../docs/n5pro.md).
+
+What this role does collect:
 
 - **eq12** — five ACPI fan objects (`PNP0C0B:00`–`04`), surfaced as thermal
   cooling devices reading `Fan cur=0 max=1`. That is **binary on/off state**.
@@ -177,8 +198,11 @@ assert.
 ## The per-host proof lists
 
 `telegraf_agent_expected_test_output` / `telegraf_agent_forbidden_test_output` in
-each host's host_vars are substrings the role checks against
-`telegraf --test`'s output before it will finish. They are the input's OWN
+each host's host_vars are LITERAL SUBSTRINGS (not regexes) the role checks against
+`telegraf --test`'s output before it will finish. `telegraf_agent_forbidden_test_output`
+is the PROOF list only; what the sensors input actually drops at the source is the
+separate `telegraf_agent_sensors_tagdrop_features` — one shapes the config, the
+other verifies the result, and they are kept in sync per host deliberately. They are the input's OWN
 produce, not "the process started" — CLAUDE.md's ping lesson, where eight metrics
 went to NO DATA while the container stayed healthy. The expected list must be
 non-empty for every host in the group, and the role asserts that too: an empty

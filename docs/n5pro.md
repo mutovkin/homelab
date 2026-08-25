@@ -336,9 +336,10 @@ round of probing that overturned the equivalent finding on EQ12; the two hosts
 genuinely differ, and the reason is below.
 
 Direct enumeration, 2026-08-24: no `fan*_input` and no `pwm*` under
-`/sys/class/hwmon/hwmon*/`, no fan-capable hwmon chip, no Super-I/O fan driver
-loaded (`lsmod` shows `k10temp` only), and — unlike EQ12 — **no ACPI fan objects
-at all**.
+`/sys/class/hwmon/hwmon*/`, no fan-capable hwmon chip, no Super-I/O-class fan
+driver loaded — `k10temp` is the only CPU-temp module (`amdgpu` and `spd5118` are
+loaded hwmon modules too, but neither is a fan driver) — and, unlike EQ12, **no
+ACPI fan objects at all**.
 
 A deliberate probe followed, run through Ansible as an ad-hoc command rather than
 by hand, with host snapshots taken first and `/etc/modules` left unchanged:

@@ -78,6 +78,15 @@ apiVersion: 1
 # FAILS the observability deploy until its rule exists here. Static check, so it
 # fails under --check before anything touches state.
 #
+# FIRST-EVER FLEET BRING-UP, recorded so it is not mistaken for a defect: in
+# site.yml, deploy-services.yml (which provisions THIS file) runs BEFORE
+# metrics-agents.yml (which first starts the native agents) — deliberately, because
+# the agents' own arrival asserts query the VictoriaMetrics that deploy-services
+# creates. So on a from-scratch build both native-agent rules below sit
+# NoData -> Alerting for the interim between the two playbooks, then self-resolve
+# once the agents ship their first samples. Accepted posture, not something to
+# design around.
+#
 # One more thing pinning buys, beyond the transient argued above: each host's
 # TOTAL disappearance is NoData -> Alerting for THAT host's rule, whereas a
 # shared regex selector (host=~"eq12|n5pro|…") would return only the surviving
@@ -227,7 +236,6 @@ groups:
                     type: gt
                     params:
                       - 600
-
 
       # ---------------------------------------------------------------------
       # THE NATIVE-AGENT ABSENCE OWNERS (#186), one per physical Proxmox host.
