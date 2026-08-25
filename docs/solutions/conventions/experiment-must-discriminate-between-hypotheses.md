@@ -133,3 +133,32 @@ survivor.
 
 The instrument must create the condition it claims to test. Checking that is the same
 question as above, asked of your own test rig.
+
+Review then found two more instances of the identical error in the same change, which is
+why this section exists rather than a footnote:
+
+**The unreachable wrap guard.** The collector corrected a wrapped counter with
+`if (delta < 0) { delta += max }` and then claimed safety with a second
+`if (delta < 0) { continue }`. Both reads come from the same zone, so `delta` is in
+`[-max, max]` and the corrected value is never negative: the second guard **cannot fire**.
+Three separate comments asserted the behaviour it was supposed to provide. A counter
+*reset* (energy dropping high→low without reaching max) has the same sign as a wrap and
+was silently converted — measured on eq12, a `1000000 → 0` reset emitted
+**261339.76 W** from a 6 W part. The fix is a bound the hypothesis can actually fail
+against: a corrected value above `RAPL_MAX_PLAUSIBLE_WATTS` is discarded and logged. The
+repo rule "a guard you have not seen fail is not a guard" applies to **awk and shell**,
+not only to Ansible's `failed_when`.
+
+**A syntax check in the wrong dialect proves nothing.** The fix above was validated with
+the operator Mac's BSD awk, which accepted it. The hosts run **mawk 1.3.4**, which did not
+— and the deploy failed. Worse, the *reason* was not awk at all: the awk program is a
+single-quoted shell string, and an apostrophe inside an awk **comment** (the word
+`N100's`) closed that string forty lines early. mawk reported
+`line 33: missing } near end of file`, pointing at a comment. So: validate embedded
+interpreters against the interpreter **on the host**, and when awk reports an unbalanced
+brace, look for a quote before you look for a brace.
+
+The thing that caught both was the role's existing pre-flight assert — it runs
+`telegraf --test` and requires each declared family in the **output**, so a collector that
+parses on the author's laptop and dies on the host fails the deploy instead of quietly
+shipping an agent that is green and missing one family.

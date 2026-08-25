@@ -434,8 +434,18 @@ Hard-won lessons — check here before debugging from scratch.
   sensor and a reading that moves is not proof of a correct one. Corollary measured
   in the same change: a dead-zone test using `chmod 000` **as root** proves nothing —
   root bypasses permission checks, so the harness must actually create the condition
-  it claims to test. Excluded domains are dropped, not relabelled: a per-core series
-  sharing a metric name with `package-0` invites a sum that is always wrong.
+  it claims to test, and a syntax check in the WRONG DIALECT proves nothing — the same
+  change validated an awk edit against the Mac's BSD awk, which accepted a program the
+  hosts' **mawk 1.3.4** refused. The actual defect was not awk: the program is a
+  single-quoted shell string, and an apostrophe inside an awk COMMENT (`N100's`) closed
+  it forty lines early, which mawk reported as `missing } near end of file` pointing at
+  a comment. Validate embedded interpreters against the interpreter ON A HOST; when awk
+  claims an unbalanced brace, look for a quote first. Also from that round: "a guard you
+  have not seen fail is not a guard" binds in awk too — a wrap correction followed by
+  `if (delta < 0) { continue }` can never fire (both reads come from one zone, so
+  `delta + max >= 0`), and a counter RESET was therefore converted into a measured
+  261339.76 W from a 6 W part. Excluded domains are dropped, not relabelled: a per-core
+  series sharing a metric name with `package-0` invites a sum that is always wrong.
   See [docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md](docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md).
 
 ## Conventions
