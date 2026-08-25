@@ -33,6 +33,21 @@ VM_USER = os.environ["VM_AUTH_USERNAME"]
 VM_PASS = os.environ["VM_AUTH_PASSWORD"]
 HOST = os.environ.get("TRUENAS_HOST_LABEL", "truenas")
 
+# Middleware drive-health alert klasses -> alert LEVEL, pinned from
+# truenas/middleware release/26.0.0-BETA.2 alert/source/smart.py (the klass
+# string is the class name minus "AlertClass"). The level label is pinned
+# HERE rather than read from the alert instance so the healthy zero-valued
+# series and a firing series carry IDENTICAL label sets — Grafana alert
+# dedup and the #151 absence contract both depend on that. Extending this
+# map is a code change by design: a klass not listed here has no healthy
+# zero, and a series that only exists once non-zero cannot carry a rule.
+SMART_ALERT_KLASSES = {
+    "SMARTUncorrectedErrors": "WARNING",
+    "SMARTFailedSelfTest": "WARNING",
+    "SMARTSpareBlockCount": "CRITICAL",
+    "SMARTEraseCycleCount": "WARNING",
+}
+
 
 def esc(v):
     """Escape a Prometheus label value."""
@@ -133,6 +148,73 @@ def collect(client):
             if end.tzinfo is None:
                 end = end.replace(tzinfo=timezone.utc)
             add(f"truenas_pool_scrub_age_seconds{{{pl}}} {int((now - end).total_seconds())}")
+
+    # ── Middleware drive-health alerts (#183, re-scoped) ────────────────────
+    # TrueNAS 26.0 removed every SMART API surface (measured 2026-08-23:
+    # smart.test.results / disk.smart_attributes -> "Method does not exist";
+    # SMART left the middleware in 25.10). The four raw counters #183 wanted
+    # are unobtainable without root-exec on the appliance, which the operator
+    # declined. alert.list (ALERT_LIST_READ) is the lawful remainder: the
+    # middleware's OWN ~90-minute smartctl scan, surfaced as conclusions.
+    # This is NOT sector-level trend data and must never be presented as such.
+    #
+    # TWO OPERATOR ACTIONS ZERO THESE SERIES, AND ONLY ONE IS VISIBLE HERE.
+    # alert.list filters every alert through should_show_alert(), which drops any
+    # alert whose CLASS has policy == "NEVER" (System -> Alert Settings) —
+    # verified 2026-08-24 against plugins/alert.py at release/26.0.0-BETA.2.
+    # So: (a) per-alert dismissal, an explicit ack, zeroes one series; (b) a
+    # class-wide policy of NEVER makes the class absent from this answer
+    # ENTIRELY and permanently, so the series reads a healthy 0 forever while
+    # the middleware still detects the failure. (b) applies to every series
+    # emitted below, the catch-all included — a suppressed class cannot show up
+    # as unrecognized either. Do not set policy=NEVER on SMART classes if these
+    # metrics are to mean anything.
+    alerts = client.call("alert.list")
+
+    add("# HELP truenas_alert_active Count of un-dismissed TrueNAS middleware alerts of this klass. Exists as 0 while healthy.")
+    add("# TYPE truenas_alert_active gauge")
+    # EMITTED AS EXPLICIT ZEROS — THE OPPOSITE OF THE TEMPERATURE GAUGE ABOVE,
+    # AND BOTH RULES ARE LOAD-BEARING. Temperature is a READING from a device:
+    # when the device cannot answer (sda has no SMART) the honest value is NO
+    # value, and a zero would fabricate a healthy reading. This series is a
+    # COUNT over a successful alert.list answer: the appliance responded, and
+    # "zero alerts of this klass" is a fact it just asserted — the zero is
+    # measured, not fabricated. DO NOT UNIFY THESE TWO BEHAVIOURS. The guard
+    # against fabrication here is the call itself: if alert.list raises (role
+    # revoked, API down), collect() aborts and the cycle pushes NOTHING, so a
+    # failure can never be dressed as a healthy zero — the poller goes absent
+    # and truenas-poller-absent owns that signal.
+    for klass, level in SMART_ALERT_KLASSES.items():
+        n = sum(1 for a in alerts
+                if a.get("klass") == klass and not a.get("dismissed"))
+        add(f'truenas_alert_active{{{labels(host=HOST, klass=klass, level=level)}}} {n}')
+
+    # CATCH-ALL: the map above is pinned from a BETA middleware, so a klass
+    # RENAME upstream would leave all four series sitting at a healthy 0 while
+    # the real alert fired under a name nothing counted — the failure is silent
+    # and looks like health, which is the worst shape a monitoring bug can take.
+    # This series converts both klass drift AND newly added SMART classes from
+    # silent-mute into something that fires.
+    #
+    # Verified 2026-08-24 against truenas/middleware release/26.0.0-BETA.2:
+    # (1) alert/source/smart.py defines EXACTLY the four SMART* alert classes
+    #     pinned above, levels included; (2) no SMARTUnrecognizedAlertClass
+    #     exists, so this synthetic klass cannot collide with a real one. Both
+    #     checks were run across all 70 alert/source/*.py at that tag (148
+    #     AlertClass definitions), not just smart.py, because the klass
+    #     namespace is global — AlertClass.class_by_name is keyed on the class
+    #     name minus "AlertClass" (alert/base.py).
+    #
+    # RESIDUAL, ACCEPTED: the SMART-prefix heuristic is what makes this work,
+    # and it is also its limit — a klass renamed AWAY from the SMART prefix
+    # evades this counter exactly as it evades the pinned map. Narrowing that
+    # gap needs an enumeration API the middleware does not expose to a
+    # read-only role.
+    unrecognized = sum(1 for a in alerts
+                       if str(a.get("klass") or "").startswith("SMART")
+                       and a.get("klass") not in SMART_ALERT_KLASSES
+                       and not a.get("dismissed"))
+    add(f'truenas_alert_active{{{labels(host=HOST, klass="SMARTUnrecognized", level="WARNING")}}} {unrecognized}')
 
     return out
 
