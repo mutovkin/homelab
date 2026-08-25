@@ -134,6 +134,41 @@ groups:
     # beat, which the firing demonstration measures against the clock.
     interval: 5m
     rules:
+      # TRIAGE, in path order. The beat is emitted by homelab-heartbeat.timer
+      # (roles/rsyslog_structured) and travels logger -> /dev/log -> rsyslog's
+      # `*.*` selector -> omfile -> /var/log/structured.log -> Vector ->
+      # VictoriaLogs. Any link in that chain breaking produces this alert, so
+      # check them in that order: `systemctl status homelab-heartbeat.timer`
+      # first (is the beat even being emitted?), then rsyslog, then Vector.
+      #
+      # THE SHIPPER IS NOT THE SAME PROCESS ON EVERY HOST. On eq12, n5pro or
+      # n5pro_docker it is a native systemd unit: `systemctl status vector` and
+      # `journalctl -u vector -n 100` on that host. On eq12_docker it is a
+      # container: `docker logs --tail 100 vector`. A 401 in either means the
+      # VictoriaLogs credential or VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION
+      # is wrong — Vector will NOT exit, it will stay active and drop every batch.
+      #
+      # On any of them, confirm /var/log/structured.log is GROWING and not merely
+      # present (`wc -l` it twice) — if it is not, rsyslog is the problem, not
+      # Vector. Re-running the host's deploy re-asserts the whole path end to end,
+      # marker included: `ansible-playbook playbooks/log-agents.yml --limit <host>`
+      # for the agents, `--tags observability --limit eq12_docker` for the
+      # container. If the disk buffer is wedged, the runbook is
+      # docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+      #
+      # EXPECTED LATENCY, so a slow page is not mistaken for a broken rule: ~20m
+      # for the window to empty (4 missed beats) + `for: 5m` + the root policy's
+      # 30s group_wait = about 25m30s from the last beat to the email landing. The
+      # old rule's own resolved notice reported "Observed 10m30s before this
+      # notification was delivered", which is exactly its `for: 10m` plus that
+      # same 30s — so this arithmetic is measured, not assumed.
+      #
+      # IF YOU ARE HERE BECAUSE A HOST WENT QUIET, check the whole expected fleet
+      # (eq12, eq12_docker, n5pro, n5pro_docker) against the query's output rather
+      # than trusting the instance list to be complete — "THE 24h WINDOW CUTS BOTH
+      # WAYS" above is why a never-shipped or >24h-dead host is missing from that
+      # list entirely, and why a still-dead host draws a RESOLVED notice at the
+      # 24h boundary.
       - uid: obs-host-log-ingest-stalled-per-host
         title: A host stopped shipping logs to VictoriaLogs
         condition: C
@@ -172,54 +207,9 @@ groups:
           # not by reading this file.
           summary: >-
             {{ $labels.hostname }} has missed every log heartbeat for 20 minutes.
-          description: >-
-            {{ $labels.hostname }} has not emitted a `homelab-heartbeat` marker in
-            20 minutes — four consecutive missed beats, at one beat every 5 minutes
-            from homelab-heartbeat.timer. Other hosts are still beating, so this is
-            ONE dead shipper rather than a dead log store; the fleet-wide rules
-            (obs-log-ingest-stalled, obs-host-log-ingest-stalled) cannot see this
-            and will stay Normal.
-            THIS IS NOT "the host went quiet". That is the whole reason the rule
-            counts a heartbeat rather than incidental traffic: host logs here
-            arrive in bursts, and 66% of eq12_docker's and 40% of eq12's 10-minute
-            windows are legitimately empty in perfect health. A missed beat is a
-            broken path, not a slow night.
-            The beat is emitted by homelab-heartbeat.timer (roles/rsyslog_structured)
-            and travels logger -> /dev/log -> rsyslog's `*.*` selector -> omfile ->
-            /var/log/structured.log -> Vector -> VictoriaLogs. Any link in that
-            chain breaking produces this alert, so check them in that order:
-            `systemctl status homelab-heartbeat.timer` first (is the beat even being
-            emitted?), then rsyslog, then Vector.
-            On eq12, n5pro or n5pro_docker the shipper is a native systemd unit:
-            check `systemctl status vector` and `journalctl -u vector -n 100` on
-            that host. A 401 in the journal means the VictoriaLogs credential or
-            VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION is wrong — Vector will
-            NOT exit, it will stay active and drop every batch.
-            On eq12_docker the shipper is a container: `docker logs --tail 100
-            vector`.
-            On any of them, confirm /var/log/structured.log is GROWING and not
-            merely present (`wc -l` it twice) — if it is not, rsyslog is the
-            problem, not Vector. Re-running the host's deploy re-asserts the whole
-            path end to end, marker included:
-            `ansible-playbook playbooks/log-agents.yml --limit <host>` for the
-            agents, `--tags observability --limit eq12_docker` for the container.
-            If the disk buffer is wedged, the runbook is
-            docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
-            EXPECTED LATENCY, so a slow page is not mistaken for a broken rule:
-            ~20m for the window to empty (4 missed beats) + `for: 5m` + the root
-            policy's 30s group_wait = about 25m30s from the last beat to the email
-            landing. The old rule's own resolved notice reported "Observed 10m30s
-            before this notification was delivered", which is exactly its `for: 10m`
-            plus that same 30s — so this arithmetic is measured, not assumed.
-            NOTE, both directions of the 24h window: a hostname that was
-            DELIBERATELY retired keeps producing a recent=0 row, and therefore keeps
-            alerting, for up to 24h — the documented cost, not a bug. And in the
-            other direction, a host that has NEVER shipped, or has been dead for
-            MORE than 24h, has no row at all and this rule is SILENT about it; at
-            the 24h boundary it will even send a RESOLVED notice for a host that is
-            still dead. If you are here because a host went quiet, check the whole
-            expected fleet (eq12, eq12_docker, n5pro, n5pro_docker) against the
-            query's output rather than trusting the instance list to be complete.
+          description: |-
+            Four consecutive missed 5-minute beats — that host's shipping path is broken, not a quiet night; the other hosts are still beating.
+            Check in order on {{ $labels.hostname }}: `systemctl status homelab-heartbeat.timer`, then rsyslog and that /var/log/structured.log is growing, then Vector.
         labels:
           severity: critical
           component: log-pipeline
