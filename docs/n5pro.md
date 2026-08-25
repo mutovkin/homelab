@@ -298,26 +298,51 @@ converted and wrap-corrected at the source** by
 `roles/telegraf_agent/files/rapl_power.sh`. Each sample is a **~1 s instantaneous
 snapshot taken once per 60 s interval, not a 60 s average**.
 
-**`core` is deliberately NOT exported, and the negative is measured.** Its
-powercap reading is 0.07 W against a 6.4 W package, which cannot be a core
-aggregate. Second source, the AMD energy MSRs read read-only off
-`/dev/cpu/*/msr` over a 4 s window (energy unit shift 16 → 15.2588 µJ/unit),
-2026-08-25:
+**`core` is deliberately NOT exported: it covers CPU0 alone, not the package's
+cores.** The discriminating test is *load placement*. A busy-loop pinned to CPU0
+raises `core` whether the domain is a real all-core aggregate or only CPU0's
+counter — both hypotheses predict the same rise, so that test settles nothing.
+Put the load on cores the domain would see *only* if it were an aggregate.
+Measured 2026-08-25, two independent runs, 6 s windows (run 2 in parentheses):
 
-| quantity | measured | in µJ |
-| -------- | -------- | ----- |
-| powercap `intel-rapl:0:0` (`core`) | 291,748 µJ | 291,748 |
-| CPU0 `MSR_AMD_CORE_ENERGY_STATUS` (0xC001029A) | 19,131 units | 291,927 |
-| package MSR (0xC001029B) | 1,671,711 units | 25,508,354 |
-| powercap `intel-rapl:0` (`package-0`) | 25,496,942 µJ | 25,496,942 |
+| placement | package | core |
+| --------- | ------- | ---- |
+| idle | 5.93 W (5.83) | 0.06 W (0.05) |
+| busy-loop on CPU0 | 21.96 W (22.84) | 15.83 W (16.59) |
+| busy-loop on CPU20 | 11.21 W (11.88) | 0.16 W (0.13) |
+| busy-loop on CPU2+14+20 | 33.93 W (33.78) | 0.12 W (0.24) |
+| idle again | 6.32 W (6.16) | 0.09 W (0.11) |
 
-powercap `core` matches CPU0's **single-core** counter to within 0.06% while
-package matches package to within 0.04%. On this platform the `intel_rapl`
-`core` subdomain is one core of twelve, mislabelled as a domain aggregate — a
-real reading of the wrong thing, which is worse than a fabricated zero because it
-looks measured. It is excluded at the source
-(`telegraf_agent_rapl_exclude_domains: [core]`) and the deploy asserts it is
-absent from both telegraf's own output and the delivered domain set.
+`core` stays flat at ~0.12 W while `package-0` climbs 28 W under a three-core
+load containing no CPU0, and moves only when CPU0 itself is loaded. On this
+Zen 5 board `intel-rapl:0:0` is one core of twenty-four logical CPUs.
+
+Two earlier readings of this domain were both wrong, in opposite directions, and
+both came from evidence that could not have distinguished the hypotheses:
+
+- An idle-time cross-check against the AMD core-energy MSRs found powercap
+  `core` matching CPU0's `MSR_AMD_CORE_ENERGY_STATUS` to 0.06%. True, and
+  uninformative — **at idle an aggregate approximates its busiest core**, so the
+  match is what you would see either way.
+- A single-core load test found `core` rising 0.04 → 11 W and concluded the
+  domain was real and merely power-gated at idle. Also true, and also
+  uninformative — that load ran on CPU0.
+
+The lesson is not "measure more carefully"; both measurements were careful.
+**An experiment that cannot distinguish between the hypotheses is not evidence,
+however careful it looks.** Ask what result would falsify the alternative, then
+design for that.
+
+It is **dropped rather than relabelled** `domain="cpu0"`. One core out of twelve
+answers no question anyone asks here, and a per-core series living under the
+same metric name as `package-0` invites a sum that is always wrong. This is not
+a fabricated zero — it is a real reading of the wrong thing, which is worse,
+because it looks measured. If per-core power is ever genuinely wanted, that is a
+deliberate feature with its own design.
+
+Contrast **eq12**, where the same sysfs path and the same domain name pass this
+same test (`core` tracks package to within 0.08 W at every placement) and are
+exported — see [eq12.md](eq12.md).
 
 **`amdgpu`'s `power1_average` / `power1_input` already come through the `sensors`
 input**, so iGPU package draw is measured too — but it is **not additive** with

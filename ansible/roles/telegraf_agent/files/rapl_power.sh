@@ -51,7 +51,8 @@
 # Arguments: domain names to EXCLUDE, one per argument (templated from
 # `telegraf_agent_rapl_exclude_domains`). n5pro passes `core` — its powercap
 # `core` subdomain was measured to be ONE core of twelve, not a package
-# aggregate; see the role README and docs/n5pro.md for the MSR corroboration.
+# aggregate — established by LOAD PLACEMENT, not by its magnitude; see the
+# role README and docs/n5pro.md for both hosts' measured tables.
 #
 # RAPL_SYSFS_ROOT overrides the sysfs root (default /sys/class/powercap) so the
 # wrap branch can be exercised against a stub tree off-host. It must not contain

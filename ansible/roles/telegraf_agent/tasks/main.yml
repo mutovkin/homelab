@@ -1213,8 +1213,9 @@
 #     disappearance rather than an obvious total absence. Two domains where three
 #     are expected must fail as loudly as zero;
 #   * EQUALITY, not superset, so an EXCLUDED domain reappearing also fails. That
-#     is n5pro's `core`, measured against the AMD core-energy MSR to be one core
-#     of twelve (0.07 W beside a 6.4 W package) rather than a package aggregate.
+#     is n5pro's `core`, measured by LOAD PLACEMENT to cover CPU0 alone rather
+#     than the package's cores (flat at 0.12 W while package climbed 28 W under
+#     a three-core load containing no CPU0).
 #     If a kernel or firmware change ever made that subdomain mean something
 #     else, this is what says so instead of a wrong number reaching a panel;
 #   * the domain LABEL comes from the sysfs `name` file, never the node index, so
@@ -1282,7 +1283,8 @@
       CAP_DAC_OVERRIDE, so a drop-in regression takes this family out while
       telegraf stays `active` (the assert above covers the drop-in).
       EXTRA means a domain this host deliberately excludes is being exported
-      again — for n5pro that is `core`, measured to be one core of twelve rather
+      again — for n5pro that is `core`, measured by load placement to cover CPU0
+      alone rather
       than a package aggregate; check telegraf_agent_rapl_exclude_domains in
       host_vars before widening this list. If the hardware genuinely changed,
       update telegraf_agent_rapl_expected_domains in the same change that

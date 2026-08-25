@@ -182,28 +182,45 @@ Keep it at 60 s.
 index** (`intel-rapl:0` -> `package-0`, `intel-rapl:0:0` -> `core`). Indices are
 not stable across boots or hardware.
 
-**n5pro's `core` domain is EXCLUDED, and that negative is measured rather than
-inferred from its implausibility.** Second source: the AMD energy MSRs, read
-read-only off `/dev/cpu/*/msr` over a 4 s window (energy unit shift 16 ->
-15.2588 uJ/unit), 2026-08-25:
+**Domain coverage is a property of the BOARD, and the only test that establishes
+it is LOAD PLACEMENT.** The two hosts give opposite answers for the same sysfs
+path and the same domain name:
 
-| quantity | measured | in uJ |
-| -------- | -------- | ----- |
-| powercap `intel-rapl:0:0` (`core`) | 291,748 uJ | 291,748 |
-| CPU0 `MSR_AMD_CORE_ENERGY_STATUS` (0xC001029A) | 19,131 units | 291,927 |
-| package MSR (0xC001029B) | 1,671,711 units | 25,508,354 |
-| powercap `intel-rapl:0` (`package-0`) | 25,496,942 uJ | 25,496,942 |
+| placement | eq12 package / core | n5pro package / core |
+| --------- | ------------------- | -------------------- |
+| idle | 1.70 / 1.62 W | 5.93 / 0.06 W |
+| busy-loop on CPU0 | 11.47 / 11.39 W | 21.96 / 15.83 W |
+| busy-loop on a non-CPU0 core | 12.13 / 12.05 W | 11.21 / 0.16 W |
+| busy-loop on three non-CPU0 cores | 19.55 / 19.46 W | 33.93 / 0.12 W |
+| idle again | 1.86 / 1.78 W | 6.32 / 0.09 W |
 
-powercap `core` matches CPU0's **single-core** counter to within 0.06% while
-package matches package to within 0.04%: on this platform the `intel_rapl` `core`
-subdomain is **one core of twelve, mislabelled as a domain aggregate**. Exporting
-0.07 W as "core" beside a 6.4 W package would mislead every reader. It is dropped
-at the source via `telegraf_agent_rapl_exclude_domains: [core]` and asserted
-absent from `telegraf --test`'s own output. This is not a fabricated zero — it is
-a real reading of the wrong thing, which is worse, because it looks measured.
-eq12's `core` (2.58 W against a 2.67 W package) IS a plausible all-core
-aggregate and is exported; so is its `uncore`, which is the iGPU and is flat, not
-absent, at idle.
+(measured 2026-08-25; eq12 loaded CPU3 and CPU1+2+3, n5pro CPU20 and CPU2+14+20)
+
+eq12's `core` tracks package to within ~0.08 W at every placement — a genuine
+all-core aggregate, exported. n5pro's stays flat at ~0.12 W while package climbs
+28 W under a three-core load with no CPU0 in it — it is **one core of
+twenty-four logical CPUs**, and is dropped at the source via
+`telegraf_agent_rapl_exclude_domains: [core]` and asserted absent from
+`telegraf --test`'s own output. Its `uncore` does not exist at all; eq12's does
+and is the iGPU, flat rather than absent at idle.
+
+**Why placement and nothing weaker.** A busy-loop pinned to CPU0 raises `core`
+under BOTH hypotheses — real aggregate and CPU0-only — so it cannot separate
+them. Neither can an idle-time comparison against the per-core MSRs, because at
+idle an aggregate approximates its busiest core. During #194 both of those tests
+were run, by different people, and produced confident and *opposite* wrong
+conclusions. The generalisable rule, which is the most valuable thing this
+collector taught us:
+
+> An experiment that cannot distinguish between the hypotheses is not evidence,
+> however careful it looks. Ask what result would falsify the alternative, then
+> design the measurement for that.
+
+n5pro's `core` is dropped rather than relabelled `domain="cpu0"`: one core of
+twelve answers no question anyone asks, and a per-core series under the same
+metric name as `package-0` invites a sum that is always wrong. This is not a
+fabricated zero — it is a real reading of the wrong thing, which is worse,
+because it looks measured.
 
 **The delivered domain set is asserted for EQUALITY, not presence.** The script
 emits nothing for a zone it cannot read completely (gauges skip on unknown), so
