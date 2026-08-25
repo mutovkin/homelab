@@ -190,7 +190,8 @@
       NOTHING on failure by design, so metrics are simply absent rather than
       wrong. Read `journalctl -u truenas-poller.service -n 30`; the usual causes
       are a revoked API key, or a missing role on the ansible-ctrl privilege
-      (pool.query needs POOL_READ and disk.query needs DISK_READ).
+      (pool.query needs POOL_READ, disk.query needs DISK_READ, alert.list
+      needs ALERT_LIST_READ).
     success_msg: The TrueNAS poller completed a full cycle and pushed its metrics.
     quiet: true
   when: not ansible_check_mode

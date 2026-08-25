@@ -38,6 +38,13 @@ truenas_granted_roles:
   # ROTATION RATE — the only honest way to tell a real spinning disk from the
   # QEMU virtual boot disk, which reports type="HDD" with no SMART.
   - DISK_READ
+  # #183 (re-scoped). alert.list is the ONLY lawful drive-health surface left
+  # on 26.0: every SMART attribute/test method was removed from the middleware
+  # in 25.10 (measured 2026-08-23: smart.test.results and disk.smart_attributes
+  # both return "Method does not exist"; core.get_methods shows zero SMART
+  # methods). The poller exports the middleware's own SMART alert conclusions
+  # from alert.list — NOT raw attribute counters, which 26.0 cannot supply.
+  - ALERT_LIST_READ
 # Still NOT granted, and each absence is deliberate — verified 2026-08-23 that
 # privilege.query, user.query and system.reboot are all denied to this account.
 
