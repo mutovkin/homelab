@@ -181,48 +181,74 @@
 #   B — every group_by key is aggregated on by at least one rule (an inert key
 #       claims protection nothing provides).
 #
-# Pure control-machine lookups + regex, so they run under --check and fail
-# before anything touches state — and they read the SAME files the deploy
-# ships, so the guard cannot drift from what is provisioned.
+# Pure control-machine lookups, so they run under --check and fail before
+# anything touches state — and they read the SAME files the deploy ships, so
+# the guard cannot drift from what is provisioned.
 #
-# Comments are stripped from every file before matching, deliberately: a
-# `by (disk)` quoted in prose — this repo's own history has one — must never
-# re-legitimize a dead key. Same guard-shadowed-by-prose trap the telegraf
-# selector assert above closes, one file over.
+# The witness sets are parsed with from_yaml and walked down to the rules' own
+# `expr` fields — NOTHING else in those files is read. Prose therefore cannot
+# feed the guard: neither a `by (disk)` in a comment (this repo's history has
+# one) nor an expr quoted in an annotation can re-legitimize a dead key. Both
+# forms are live here — telegraf-health.yaml's description scalar contains
+# `count by (host) (system_uptime)` as operator guidance, and under the earlier
+# regex-over-raw-text parse it was silently voting `host` into the witness set.
+# Same guard-shadowed-by-prose trap the telegraf selector assert above closes,
+# one layer deeper.
+#
+# The POLICY side cannot work that way — a .j2 is not YAML until it renders —
+# so it stays a regex slice, and assert A pays for that with two parse-anchor
+# preconditions: the `group_by:`/`group_wait:` anchors must each occur exactly
+# once, or the slice silently reads the wrong span.
 - name: Verify the alert grouping labels and the notification policy's group_by agree
   vars:
     _obs_alerting_dir: "{{ role_path }}/files/data/grafana/provisioning/alerting"
-    # The group_by list only: the template's routes and prose mention label
-    # names too, and a whole-file findall would read them as keys.
+    _obs_policy_template: "{{ lookup('file', role_path ~ '/templates/grafana-notification-policies.yaml.j2') }}"
+    # The root group_by list only: the template's routes and prose mention label
+    # names too, and a whole-file findall would read them as keys. Comments are
+    # still stripped here because this half is a raw-text slice.
     _obs_policy_group_by: >-
-      {{ (lookup('file', role_path ~ '/templates/grafana-notification-policies.yaml.j2').split('group_by:')[1].split('group_wait:')[0])
+      {{ (_obs_policy_template.split('group_by:')[1].split('group_wait:')[0])
          | regex_replace('(?m)^\s*#.*$', '')
          | regex_findall('-\s*(\w+)') }}
     _obs_truenas_by_labels: >-
-      {{ ((lookup('file', _obs_alerting_dir ~ '/truenas-health.yaml')
-           | regex_replace('(?m)^\s*#.*$', '')
-           | regex_findall('by \(([^)]+)\)')
-           | join(',')).split(','))
+      {{ (((lookup('file', _obs_alerting_dir ~ '/truenas-health.yaml') | from_yaml).groups
+           | map(attribute='rules') | flatten
+           | map(attribute='data') | flatten
+           | map(attribute='model')
+           | selectattr('expr', 'defined')
+           | map(attribute='expr')
+           | map('regex_findall', 'by \(([^)]+)\)')
+           | flatten | join(',')).split(','))
          | map('trim') | reject('equalto', '') | unique | list }}
     # The glob is unpacked as VARARGS on purpose: `query('file', <list>)` does
-    # not flatten its terms (ansible-core 2.19 hands the file lookup the list
+    # not flatten its terms (ansible-core 2.19+ hands the file lookup the list
     # itself and it dies with "'_AnsibleLazyTemplateList' object has no
-    # attribute 'split'"). `*` gives the lookup one term per path.
+    # attribute 'split'"; reproduced on 2.21). `*` gives the lookup one term
+    # per path.
     _obs_all_by_labels: >-
       {{ ((query('file', *query('fileglob', _obs_alerting_dir ~ '/*.yaml'))
-           | map('regex_replace', '(?m)^\s*#.*$', '')
+           | map('from_yaml') | map(attribute='groups') | flatten
+           | map(attribute='rules') | flatten
+           | map(attribute='data') | flatten
+           | map(attribute='model')
+           | selectattr('expr', 'defined')
+           | map(attribute='expr')
            | map('regex_findall', 'by \(([^)]+)\)')
            | flatten | join(',')).split(','))
          | map('trim') | reject('equalto', '') | unique | list }}
   block:
-    # Truenas-scoped ON PURPOSE. The other rule files aggregate on `host`,
-    # `check_type`, `error_type` and `intentional`, none of which are in
-    # group_by — generalizing this coverage assert fleet-wide would be a real
-    # routing change (it would demand those keys be added), not a lint fix, so
-    # it is deliberately NOT asserted here. Tracked in #198.
+    # Truenas-scoped ON PURPOSE, and scoped to the FILE truenas-health.yaml:
+    # the other rule files aggregate on `host`, `check_type`, `error_type` and
+    # `intentional`, none of which are in group_by, so generalizing this
+    # coverage assert fleet-wide would be a real routing change (it would
+    # demand those keys be added), not a lint fix. The same scoping means a
+    # TrueNAS rule added in a NEW sibling file gets no coverage from A — B
+    # still catches the inert direction, but not that one. Tracked in #198.
     - name: Assert every label the TrueNAS rules aggregate on is in the policy's group_by
       ansible.builtin.assert:
         that:
+          - _obs_policy_template | regex_findall('group_by:') | length == 1
+          - _obs_policy_template | regex_findall('group_wait:') | length == 1
           - _obs_policy_group_by | length >= 2
           - _obs_truenas_by_labels | length >= 2
           - _obs_truenas_by_labels | difference(_obs_policy_group_by) | length == 0
@@ -238,12 +264,18 @@
           templates/grafana-notification-policies.yaml.j2 — the POLICY is the
           side that drifts. Do NOT instead rewrite the rule exprs to aggregate
           on whatever the policy happens to say: `by (disk)` would empty every
-          $labels.devname interpolation in the summaries and every notification
-          body would read [no value].
+          $labels.devname interpolation in the summaries, which then render as
+          EMPTY strings — "TrueNAS disk  is at 48C", the drive name simply gone.
           A short list on either side means this guard can no longer PARSE its
           inputs (group_by carries 8 keys, truenas-health.yaml aggregates on 2)
           — an empty parse would make the comparison trivially true, i.e. a
           silent-green guard. Teach it the new shape; do not delete it.
+          A duplicated `group_by:` or `group_wait:` anchor fails the same way
+          and for the same reason: the policy list is sliced out of the raw
+          template between those two literals (a .j2 cannot be parsed as YAML),
+          so a second occurrence — a comment written with the colon, or a
+          per-route override — silently mis-slices the span and the guard reads
+          a list nobody deploys.
         quiet: true
 
     - name: Assert no notification-policy group_by key is inert
@@ -265,9 +297,10 @@
           groups nothing (#188). This is the `disk` defect: an inert key reads
           like per-instance protection and provides none. Either delete the
           key from templates/grafana-notification-policies.yaml.j2, or correct
-          it to the label the rules actually emit (`disk` -> `devname`). If a
-          rule file mentions the label only inside a COMMENT, that does not
-          count — comments are stripped before matching, on purpose.
+          it to the label the rules actually emit (`disk` -> `devname`). A
+          label that appears only in a COMMENT, a summary or a description does
+          not count: this guard reads the rules' `expr` fields and nothing else,
+          on purpose.
           An empty label set means this guard could not read
           files/data/grafana/provisioning/alerting/*.yaml at all; fix the
           parser rather than the symptom.

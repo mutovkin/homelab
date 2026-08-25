@@ -90,6 +90,13 @@ policies:
     group_interval: 5m
     # 12h: these are homelab alerts on a mailbox a human reads, not a pager.
     repeat_interval: 12h
+    # NOTE (#188): a per-route group_by override is NOT covered by the
+    # deploy-time guard in tasks/main.yml — it reads only the ROOT list, sliced
+    # out of this file between the group_by and group_wait keys above. Adding
+    # one means teaching the guard about it first, or the inert-key check
+    # silently stops being total. (Written without the trailing colons on
+    # purpose: the guard asserts each of those anchors occurs exactly ONCE, and
+    # a comment that spells them with a colon trips it — as this one did.)
     routes:
 {% if observability_alert_telegram | bool %}
       # ORDER MATTERS TWICE OVER: first match wins, there is no `continue` on any

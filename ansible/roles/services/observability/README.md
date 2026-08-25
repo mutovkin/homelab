@@ -448,7 +448,8 @@ is not a control.** So the load-bearing half is a second, independent channel.
 `observability_alert_telegram` (role default `false`, **`true` on eq12_docker**)
 gates everything Telegram-shaped. False, delivery is email-only — the same
 *channel coverage* #139 shipped, though not the same routing tree, since the
-flag-false render still carries #152's heartbeat and severity routes. So this role
+flag-false render still carries the heartbeat, thermal and severity routes (#152,
+#176). So this role
 still deploys on a host whose vault has no Telegram keys. True, it
 requires `vault_grafana_telegram_bot_token` and `vault_grafana_telegram_chat_id`,
 both asserted BY NAME at the top of the play — a blank key fails the deploy loudly
