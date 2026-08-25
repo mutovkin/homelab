@@ -157,6 +157,18 @@ def collect(client):
     # declined. alert.list (ALERT_LIST_READ) is the lawful remainder: the
     # middleware's OWN ~90-minute smartctl scan, surfaced as conclusions.
     # This is NOT sector-level trend data and must never be presented as such.
+    #
+    # TWO OPERATOR ACTIONS ZERO THESE SERIES, AND ONLY ONE IS VISIBLE HERE.
+    # alert.list filters every alert through should_show_alert(), which drops any
+    # alert whose CLASS has policy == "NEVER" (System -> Alert Settings) —
+    # verified 2026-08-24 against plugins/alert.py at release/26.0.0-BETA.2.
+    # So: (a) per-alert dismissal, an explicit ack, zeroes one series; (b) a
+    # class-wide policy of NEVER makes the class absent from this answer
+    # ENTIRELY and permanently, so the series reads a healthy 0 forever while
+    # the middleware still detects the failure. (b) applies to every series
+    # emitted below, the catch-all included — a suppressed class cannot show up
+    # as unrecognized either. Do not set policy=NEVER on SMART classes if these
+    # metrics are to mean anything.
     alerts = client.call("alert.list")
 
     add("# HELP truenas_alert_active Count of un-dismissed TrueNAS middleware alerts of this klass. Exists as 0 while healthy.")
@@ -176,6 +188,33 @@ def collect(client):
         n = sum(1 for a in alerts
                 if a.get("klass") == klass and not a.get("dismissed"))
         add(f'truenas_alert_active{{{labels(host=HOST, klass=klass, level=level)}}} {n}')
+
+    # CATCH-ALL: the map above is pinned from a BETA middleware, so a klass
+    # RENAME upstream would leave all four series sitting at a healthy 0 while
+    # the real alert fired under a name nothing counted — the failure is silent
+    # and looks like health, which is the worst shape a monitoring bug can take.
+    # This series converts both klass drift AND newly added SMART classes from
+    # silent-mute into something that fires.
+    #
+    # Verified 2026-08-24 against truenas/middleware release/26.0.0-BETA.2:
+    # (1) alert/source/smart.py defines EXACTLY the four SMART* alert classes
+    #     pinned above, levels included; (2) no SMARTUnrecognizedAlertClass
+    #     exists, so this synthetic klass cannot collide with a real one. Both
+    #     checks were run across all 73 alert/source/*.py at that tag (148
+    #     AlertClass definitions), not just smart.py, because the klass
+    #     namespace is global — AlertClass.class_by_name is keyed on the class
+    #     name minus "AlertClass" (alert/base.py).
+    #
+    # RESIDUAL, ACCEPTED: the SMART-prefix heuristic is what makes this work,
+    # and it is also its limit — a klass renamed AWAY from the SMART prefix
+    # evades this counter exactly as it evades the pinned map. Narrowing that
+    # gap needs an enumeration API the middleware does not expose to a
+    # read-only role.
+    unrecognized = sum(1 for a in alerts
+                       if str(a.get("klass") or "").startswith("SMART")
+                       and a.get("klass") not in SMART_ALERT_KLASSES
+                       and not a.get("dismissed"))
+    add(f'truenas_alert_active{{{labels(host=HOST, klass="SMARTUnrecognized", level="WARNING")}}} {unrecognized}')
 
     return out
 
