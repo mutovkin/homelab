@@ -220,9 +220,19 @@
   changed_when: false
   when: not ansible_check_mode
 
-# LEG 1. failed_when:false because a controller WITHOUT egress must fall through
-# to leg 2, not abort the play — the whole point is that either leg can carry it.
-# The loud failure lives in the assert below, which can name which leg failed.
+# LEG 1. `ignore_errors: true`, and the difference from `failed_when: false` is
+# not stylistic — it is CLAUDE.md's measured trap, found by #186's review round
+# in the telegraf copy CLONED FROM this role and fixed here by #203.
+# `failed_when: false` does not "let the result through": it ASSIGNS
+# failed=False to the register. Leg 1b's
+# `not (vector_agent_controller_fetch.failed | default(true))` therefore read
+# False for a fetch that had just FAILED — so 1b ran on a .deb the controller
+# never got, and leg 2, whose condition is the same term inverted, could never be
+# selected: the fallback leg was unreachable dead code for the life of this role.
+# `ignore_errors: true` records the REAL failed=True, which is also what the
+# WHICH-LEG-FAILED diagnosis in the arrival assert below reads to name the leg
+# that broke. A leg that does fail now shows as failed(ignored) in the recap's
+# `ignored` column — honest, and the loud failure still belongs to that assert.
 - name: Fetch the pinned Vector .deb on the controller
   ansible.builtin.get_url:
     url: "{{ vector_agent_deb_url }}"
@@ -233,7 +243,7 @@
   become: false
   run_once: true
   register: vector_agent_controller_fetch
-  failed_when: false
+  ignore_errors: true
   when: not ansible_check_mode
 
 # LEG 1b. `copy` compares checksums and transfers only on a difference, so this
@@ -251,7 +261,12 @@
 
 # LEG 2, the fallback: the target fetches for itself, but ONLY if the controller
 # could not. On n5pro this leg would fail, and that is fine — leg 1 already
-# delivered the file. failed_when:false so the assert below owns the diagnosis.
+# delivered the file. This leg is REACHABLE only because leg 1 uses
+# ignore_errors rather than failed_when:false (read leg 1's note; that is the
+# defect #186's review round measured in the telegraf copy cloned from here).
+# ignore_errors here for the same two reasons: the assert below owns the
+# diagnosis, and it reads the real `.failed` values to say which leg broke. A
+# failed leg shows as failed(ignored) in the recap.
 - name: Download the pinned Vector .deb on the target (fallback)
   ansible.builtin.get_url:
     url: "{{ vector_agent_deb_url }}"
@@ -259,7 +274,7 @@
     checksum: "sha256:{{ vector_agent_deb_sha256 }}"
     mode: "0644"
   register: vector_agent_deb_direct
-  failed_when: false
+  ignore_errors: true
   when:
     - not vector_agent_preview_only
     # `not ansible_check_mode` is NOT redundant with preview_only. The controller
