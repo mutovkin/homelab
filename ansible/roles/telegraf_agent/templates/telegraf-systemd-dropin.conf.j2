@@ -1,0 +1,45 @@
+# {{ ansible_managed }} — roles/telegraf_agent (#186)
+# -> /etc/systemd/system/telegraf.service.d/10-homelab.conf
+# The shipped unit (usr/lib/telegraf/scripts/telegraf.service, read out of the
+# 1.39.3 .deb, 2026-08-24): Type=notify, User=telegraf,
+# EnvironmentFile=-/etc/default/telegraf, Restart=on-failure, no StartLimit
+# overrides — i.e. systemd's default 5-starts-in-10s limit applies and a crash
+# loop latches `failed` permanently. Same traps vector_agent's drop-in fixes.
+
+[Unit]
+# A collector that retries forever beats one that latches failed; liveness is
+# phase 2's absence rule over the store, not a systemd state nobody polls.
+StartLimitIntervalSec=0
+
+[Service]
+# The shipped User=telegraf STAYS. Elevation is the AMBIENT capability set, not
+# root, not sudo (absent on both hypervisors), not setuid. Measured on BOTH
+# hosts 2026-08-25, systemd-run as an unprivileged user:
+#   no caps                    -> smartctl: open /dev/nvme* Permission denied
+#   CAP_DAC_OVERRIDE           -> opens, then NVME_IOCTL_ADMIN_CMD: Permission denied
+#   + CAP_SYS_ADMIN            -> full smartctl -H/-x succeeds
+#   + NoNewPrivileges=yes      -> STILL succeeds — ambient caps are not
+#     setuid/fscaps and survive no_new_privs: the clean answer to CLAUDE.md's
+#     ping lesson, not a carve-out from it. Children (smartctl) inherit the
+#     ambient set across execve; the deploy's --test assert proves the smart
+#     input's own output under exactly these properties.
+# CAP_DAC_OVERRIDE alone also covers #194's root-only RAPL energy_uj (measured);
+# sensors, ZFS kstats and eq12's fan cur_state need no capability at all.
+AmbientCapabilities=CAP_DAC_OVERRIDE CAP_SYS_ADMIN
+NoNewPrivileges=yes
+# Two strong capabilities in exchange for confinement everywhere else. The
+# statefile dir is postinst-created root:telegraf 770 and is the unit's only
+# writable path. If a directive here ever breaks an input, relax THAT directive
+# with the measured failure recorded beside it — do not jump to User=root.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/telegraf
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# No `-` prefix: if the credentials file is missing the unit must fail loudly,
+# not start unauthenticated. The base unit's -/etc/default/telegraf entry stays
+# (dpkg touches that file empty); EnvironmentFile entries are additive and
+# later entries win.
+EnvironmentFile=/etc/telegraf/telegraf.env
+Restart=always
+RestartSec=10s

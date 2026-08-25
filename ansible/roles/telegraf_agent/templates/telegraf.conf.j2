@@ -1,0 +1,114 @@
+# {{ ansible_managed }} — roles/telegraf_agent (#186)
+# Host metrics agent for the PHYSICAL Proxmox hosts (eq12, n5pro). The container
+# telegraf on eq12_docker (roles/services/observability) is a different animal —
+# it also carries the TrueNAS graphite listener and Grafana scrape; this file is
+# deliberately host-vitals only.
+
+[global_tags]
+  environment = "homelab"
+  location = "home"
+
+[agent]
+  interval = "60s"
+  round_interval = true
+  metric_batch_size = 1000
+  metric_buffer_limit = 10000
+  collection_jitter = "5s"
+  flush_interval = "10s"
+  flush_jitter = "0s"
+  precision = "1s"
+  # host = inventory_hostname — the fleet-wide convention (#178). Templated
+  # LITERALLY rather than via ${TELEGRAF_HOSTNAME}: an unset env var is stamped
+  # as the literal string `${TELEGRAF_HOSTNAME}` while the agent stays healthy
+  # (measured in #178). Templating removes that failure class for the native
+  # agents; the deploy still proves the label end-to-end by querying the store.
+  hostname = "{{ inventory_hostname }}"
+  omit_hostname = false
+
+# VictoriaMetrics remote write — same shape, auth and reasoning as the container
+# telegraf's output block; credentials come from /etc/telegraf/telegraf.env via
+# the systemd drop-in. Telegraf 1.38+ errors loudly on an UNSET ${VAR} in config,
+# so a missing env file fails the unit rather than shipping unauthenticated.
+[[outputs.http]]
+  url = "{{ victoriametrics_ingest_endpoint }}"
+  data_format = "prometheusremotewrite"
+  timeout = "10s"
+  username = "${VM_AUTH_USERNAME}"
+  password = "${VM_AUTH_PASSWORD}"
+  [outputs.http.headers]
+    Content-Type = "application/x-protobuf"
+    Content-Encoding = "snappy"
+    X-Prometheus-Remote-Write-Version = "0.1.0"
+
+[[inputs.cpu]]
+  percpu = true
+  totalcpu = true
+  collect_cpu_time = false
+  report_active = false
+
+[[inputs.disk]]
+  ignore_fs = ["tmpfs", "devtmpfs", "devfs", "iso9660", "overlay", "aufs", "squashfs"]
+
+# Meaningful on physical hosts (the container config disables it for LXC reasons
+# that do not apply here): real NVMe queue/latency/throughput per device.
+[[inputs.diskio]]
+  skip_serial_number = true
+
+[[inputs.kernel]]
+
+[[inputs.mem]]
+
+[[inputs.processes]]
+
+[[inputs.swap]]
+
+[[inputs.system]]
+  fieldexclude = ["uptime_format"]  # string field, incompatible with prometheus
+
+[[inputs.net]]
+
+[[inputs.netstat]]
+
+# ZFS kstats: ARC size/hits/misses etc from /proc/spl/kstat/zfs — both hosts are
+# root-on-ZFS (rpool). Dataset USAGE arrives via inputs.disk (mounted datasets).
+[[inputs.zfs]]
+
+# The measured lm-sensors surface (#186, 2026-08-24):
+#   eq12:  coretemp (Package + Core 0..3, max/crit), acpitz, nvme Composite
+#   n5pro: k10temp Tctl (ONE value — no per-core on this Zen5; may carry an AMD
+#          offset, so no threshold goes on it without a second source),
+#          spd5118 x2 (DDR5 DIMM temps), amdgpu (edge temp, power1), nic1 (PHY+MAC),
+#          r8169 (NIC), acpitz, nvme Composite
+# remove_numbers = false is LOAD-BEARING: the default true strips digits from
+# feature names, which would merge eq12's core_0..core_3 into one series.
+[[inputs.sensors]]
+  remove_numbers = false
+{% if telegraf_agent_forbidden_test_output | length > 0 %}
+  # Fabricated zeros, excluded at the source (CLAUDE.md: gauges skip on unknown):
+  # amdgpu vddgfx/vddnb read 0.000 V on n5pro — unsupported readings, not
+  # measurements. The deploy asserts these never appear in `telegraf --test`.
+  [inputs.sensors.tagdrop]
+    feature = ["vddgfx", "vddnb"]
+{% endif %}
+
+# NVMe SMART for the root disks — wear, spare, power-on-hours, media errors: the
+# signal #183 wanted and could not get from TrueNAS, obtainable here. smartctl is
+# already installed on both hosts (measured 2026-08-24), and the unit reaches the
+# NVMe admin ioctl through AMBIENT CAP_DAC_OVERRIDE + CAP_SYS_ADMIN rather than
+# root, sudo (absent here) or setuid — see the drop-in for the measured staircase.
+# use_sudo stays off for that reason. Ambient caps survive NoNewPrivileges, so the
+# trap that cost the container telegraf its ping metrics does not arise; the
+# deploy proves it against this input's OWN output rather than assuming it.
+[[inputs.smart]]
+  path_smartctl = "/usr/sbin/smartctl"
+  attributes = true
+
+{% if telegraf_agent_acpi_fan_state | bool %}
+# eq12 only. BINARY ACPI fan state (0/1) — NOT a fan speed. This board exposes
+# no tachometer (no fan*_input, no pwm*, no Super-I/O driver; measured #186).
+# Never graph or label this as RPM.
+[[inputs.exec]]
+  commands = ["/usr/local/lib/telegraf/acpi_fan_state.sh"]
+  timeout = "5s"
+  data_format = "influx"
+{% endif %}
