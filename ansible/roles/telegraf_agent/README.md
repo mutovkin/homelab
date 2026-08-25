@@ -167,10 +167,27 @@ spike at every wrap. The script takes two `energy_uj` reads ~1 s apart, adds tha
 zone's own `max_energy_range_uj` to a negative delta, and divides by the
 **actual** elapsed time measured between the two read passes rather than an
 assumed 1.0 s. Over a ~1 s window a *double* wrap is physically impossible (it
-would need >65 kW on n5pro), so the single correction is exact rather than a
-heuristic; a delta still negative after it is a counter reset, and that zone
-emits nothing. The wrap branch is exercised against a stub tree through the
-`RAPL_SYSFS_ROOT` override, which is the only reason that override exists.
+would need >65 kW on n5pro), so a single correction is the only one that can be
+needed.
+
+**But the correction is a GUESS about what a negative delta meant, and it is
+bounded by physics.** A counter RESET (`energy_uj` dropping high->low without
+reaching max: module reload, kexec, a firmware event) has the same sign as a
+wrap. This paragraph used to claim that "a delta still negative after the
+correction is a counter reset, and that zone emits nothing" — that was false, and
+the guard backing it was unreachable: both reads come from the same zone, so
+`delta` is in `[-max, max]` and `delta += max` can never leave it negative. A
+reset was therefore silently converted into a vast number — measured on eq12, a
+`1000000 -> 0` reset printed **261339.76 W**, the same artefact class this script
+rejects `[[inputs.intel_powerstat]]` for. Corrected values above
+`RAPL_MAX_PLAUSIBLE_WATTS` (default 1000, ~40x the N100's ceiling and ~12x the
+Ryzen's) are now discarded with a message on stderr.
+
+The wrap branch **was exercised**, manually during #194, against a stub tree via
+the `RAPL_SYSFS_ROOT` override — the only reason that override exists. No harness
+is committed, so treat this as a recipe to re-run rather than a test that runs
+itself, and do re-run it after any edit to the awk stage: it is how both the
+unreachable guard and the reset path above were found.
 
 **Each sample is a ~1 s instantaneous snapshot taken once per 60 s interval, not
 a 60 s average.** Say so on any panel that could be read as energy. Widening the
@@ -198,8 +215,8 @@ path and the same domain name:
 
 eq12's `core` tracks package to within ~0.08 W at every placement — a genuine
 all-core aggregate, exported. n5pro's stays flat at ~0.12 W while package climbs
-28 W under a three-core load with no CPU0 in it — it is **one core of
-twenty-four logical CPUs**, and is dropped at the source via
+28 W under a three-core load with no CPU0 in it — it is **one physical core of
+twelve (24 logical CPUs)**, and is dropped at the source via
 `telegraf_agent_rapl_exclude_domains: [core]` and asserted absent from
 `telegraf --test`'s own output. Its `uncore` does not exist at all; eq12's does
 and is the iGPU, flat rather than absent at idle.
@@ -216,11 +233,28 @@ collector taught us:
 > however careful it looks. Ask what result would falsify the alternative, then
 > design the measurement for that.
 
-n5pro's `core` is dropped rather than relabelled `domain="cpu0"`: one core of
-twelve answers no question anyone asks, and a per-core series under the same
+n5pro's `core` is dropped rather than relabelled `domain="cpu0"`: one physical
+core of twelve answers no question anyone asks, and a per-core series under the same
 metric name as `package-0` invites a sum that is always wrong. This is not a
 fabricated zero — it is a real reading of the wrong thing, which is worse,
 because it looks measured.
+
+**KNOWN GAP — a FROZEN counter reads as a confident `0.000000 W`, and nothing
+alerts on it.** The script's contract is that a zone it cannot read completely
+emits nothing. That covers *unreadable*; it does not cover *readable but never
+advancing* — a domain the driver still exposes while the firmware has stopped
+updating it. Measured: with `energy_uj` static across both passes the script
+emits `power_watts=0.000000`, which is a faithful reading of the counter (energy
+consumed in the window really was below 1 uJ) and is therefore NOT suppressed at
+the source — eq12's `uncore` legitimately reads exactly that at idle, and its
+24 h max is 0.000182 W. But the two absence rules count DOMAINS, and a frozen
+domain is still present, so neither fires. `package-0` can never legitimately be
+0 W on a running host, so the detector would be a rule of the shape
+`max_over_time(rapl_power_watts{domain="package-0"}[6h]) == 0` with
+`noDataState: OK` (absence is already owned). Deliberately not added here: the
+per-family absence design is deferred to #202 and weighed against the
+alert-fatigue posture #193 landed. Recorded so it is a known limitation rather
+than a discovery.
 
 **The delivered domain set is asserted for EQUALITY, not presence.** The script
 emits nothing for a zone it cannot read completely (gauges skip on unknown), so

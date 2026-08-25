@@ -538,8 +538,15 @@ groups:
       #
       # NOTE for whoever renames a host, or changes a board: these are scoped to
       # the name AND to the domain count, so both a rename and a hardware change
-      # must be made here in the same change — the role's own deploy-time proof
-      # asserts the same set out of host_vars and will fail first.
+      # must be made here in the same change. This used to claim the telegraf
+      # role's own deploy proof "will fail first" — it does NOT. site.yml imports
+      # deploy-services.yml (this file) BEFORE metrics-agents.yml, so a stale
+      # threshold goes live first and only then does the role's assert fail; and
+      # that assert compares DELIVERED domains against host_vars, never reading
+      # this file at all. The actual coupling is the static reconciler in
+      # roles/services/observability/tasks/main.yml ("Assert each RAPL rule's
+      # threshold equals that host's declared domain count"), which parses this
+      # file against hostvars and runs under --check, before anything deploys.
 
       # eq12 (Intel N100) delivers THREE domains — package-0, core, uncore —
       # enumerated from the sysfs `name` files, 2026-08-25.
@@ -608,9 +615,13 @@ groups:
           # < 3: this board's measured domain set is exactly {package-0, core,
           # uncore}. n5pro's rule below uses 1 because that machine has two
           # domains and deliberately excludes one — the counts are per-board
-          # facts, not a shared constant. Detection latency is the group's 5m
-          # `interval` plus `for: 5m`, both of which only advance at evaluation
-          # ticks: 5-10 min once the domains stop arriving.
+          # facts, not a shared constant. Detection latency has THREE terms, not
+          # two: `last_over_time(...[10m])` keeps a dead domain counted for the
+          # full 10 m window first, and only then do the group's 5 m `interval`
+          # and `for: 5m` advance at evaluation ticks. Best case ~15 min, worst
+          # case ~20 — the same arithmetic the gt-600 rule above states for
+          # itself. The wide window is deliberate: it is what makes a PARTIAL
+          # loss (one domain of three) legible instead of flapping.
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:

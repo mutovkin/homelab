@@ -303,14 +303,14 @@ telegraf_agent_forbidden_test_output:
 #
 # `core` stays FLAT at ~0.12 W while package climbs 28 W under a three-core load
 # containing no CPU0. It tracks only when CPU0 itself is loaded. On this Zen 5
-# board intel-rapl:0:0 is one core of twenty-four logical CPUs.
+# board intel-rapl:0:0 is one physical core of twelve (24 logical CPUs).
 #
 # Contrast eq12, where the SAME sysfs path is a genuine aggregate (it tracks
 # package to within 0.08 W on every placement) — so a domain's coverage is a
 # property of the BOARD and must be measured per host, never inferred from the
 # name `core`.
 #
-# It is dropped rather than relabelled `domain=cpu0`: one core of twelve answers
+# It is dropped rather than relabelled `domain=cpu0`: one physical core of twelve answers
 # no question anyone asks, and a per-core series sitting under the same metric
 # name as `package-0` invites a sum that is always wrong. This is not a
 # fabricated zero — it is a real reading of the wrong thing, which is worse,

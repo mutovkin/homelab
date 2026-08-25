@@ -199,6 +199,88 @@
           so. Do not delete the guard to get past it.
         quiet: true
 
+# #194: the RAPL absence rules carry a DOMAIN COUNT threshold (`lt 3` for eq12,
+# `lt 1` for n5pro) that duplicates `telegraf_agent_rapl_expected_domains` in
+# host_vars, and nothing at runtime reconciled the two — the #188 matched-pair
+# defect, forty lines below the guard written for #188. Both drift directions
+# are silent:
+#   * host_vars SHRINKS (a domain added to telegraf_agent_rapl_exclude_domains):
+#     the role's deploy assert still passes (it compares DELIVERED against
+#     host_vars, and never reads this file), while `lt 3` now fires forever — a
+#     rule that cries wolf until someone pauses it.
+#   * host_vars GROWS (a kernel/board change adds `psys`): the role's assert
+#     passes again, and `lt 3` can no longer see one domain go missing. Partial
+#     loss stops being detectable, which is the entire reason the threshold is a
+#     COUNT and not a presence check.
+#
+# The expected host set keys on `telegraf_agent_rapl_expected_domains` being
+# declared rather than on telegraf_agent_rapl_power, because a role DEFAULT is
+# not visible in hostvars for another host — only what host_vars actually sets
+# is. That is sound rather than a workaround: the telegraf_agent role refuses to
+# run on a RAPL-enabled host that declares no domains, so a host reaching this
+# guard with the variable undefined is one where RAPL is off (nothing to own) or
+# one whose own play has already failed.
+#
+# inventory_hostname is deliberately NOT added to the expected set here, unlike
+# the system_uptime guard above: this stack's host runs the CONTAINER agent,
+# which has no /sys/class/powercap of its own and exports no RAPL.
+- name: Verify the RAPL absence rules match each host's declared domain set
+  vars:
+    _rapl_rules: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+          | from_yaml).groups | map(attribute='rules') | flatten
+         | selectattr('uid', 'match', '^obs-rapl-power-absent-') | list }}
+    _rapl_rule_hosts: >-
+      {{ _rapl_rules | map(attribute='uid')
+         | map('regex_replace', '^obs-rapl-power-absent-', '') | sort }}
+    _rapl_expected_hosts: >-
+      {{ groups['telegraf_agents'] | map('extract', hostvars)
+         | selectattr('telegraf_agent_rapl_expected_domains', 'defined')
+         | map(attribute='inventory_hostname') | sort }}
+  block:
+    - name: Assert every RAPL-collecting host has an absence rule of its own
+      ansible.builtin.assert:
+        that:
+          - _rapl_rule_hosts == _rapl_expected_hosts
+        fail_msg: >-
+          The RAPL absence rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
+          to {{ _rapl_rule_hosts }}, but the hosts declaring
+          telegraf_agent_rapl_expected_domains are {{ _rapl_expected_hosts }}.
+          A MISSING rule means that host's exec collector can die while telegraf
+          itself stays healthy and NOTHING pages — the exec input is a separate
+          delivery path from the agent, and two delivery paths need two liveness
+          owners (#174). An EXTRA rule means a rule pinned to a host that no
+          longer collects RAPL, which will sit in noData and page forever. Adding
+          a host to `telegraf_agents` with RAPL enabled means adding its rule in
+          the same change. Do not delete the guard to get past it.
+        quiet: true
+
+    - name: Assert each RAPL rule's threshold equals that host's declared domain count
+      vars:
+        _host: "{{ item.uid | regex_replace('^obs-rapl-power-absent-', '') }}"
+        _threshold: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.params[0] }}
+      ansible.builtin.assert:
+        that:
+          - _threshold | int == hostvars[_host].telegraf_agent_rapl_expected_domains | length
+        fail_msg: >-
+          Alert rule {{ item.uid }} fires below {{ _threshold }} domains, but
+          {{ _host }} declares
+          {{ hostvars[_host].telegraf_agent_rapl_expected_domains | length }}
+          ({{ hostvars[_host].telegraf_agent_rapl_expected_domains }}) in its
+          host_vars. These are two copies of one fact and they have drifted. If
+          the domain set changed, the threshold moves WITH it in the same change:
+          a threshold above the real count fires forever, one below it stops
+          detecting partial loss — the failure the count shape exists to catch.
+          Do not "fix" this by lowering the threshold to silence an alert; find
+          out which domain stopped arriving.
+        quiet: true
+      loop: "{{ _rapl_rules }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
 # #188: the notification policy's `group_by` and the rules' `by (...)` clauses
 # are a MATCHED PAIR, and nothing at runtime reconciles them. Grouping on a
 # label that no alert instance carries is a NO-OP, and a SILENT one: Grafana

@@ -28,7 +28,13 @@
 # negative delta by adding that zone's own `max_energy_range_uj`, and divides by
 # the ACTUAL elapsed time rather than an assumed 1.0 s. Over a ~1 s window a
 # DOUBLE wrap is physically impossible (it would need >65 kW on n5pro), so one
-# correction is exact rather than a heuristic.
+# correction is the only one that can be needed.
+#
+# But the correction is still a GUESS about what a negative delta MEANT, and a
+# counter RESET produces the same sign. It is therefore bounded by physics: a
+# corrected value above RAPL_MAX_PLAUSIBLE_WATTS (default 1000) is discarded with
+# a message on stderr rather than exported. See the END block for the measured
+# reset that motivated this.
 #
 # WHAT THE SAMPLE MEANS, stated honestly because the dashboards depend on it: it
 # is a ~1 s INSTANTANEOUS snapshot taken once per 60 s collection interval, NOT a
@@ -126,7 +132,7 @@ td=$(date +%s%N)
   printf '%s' "$meta" | sed 's/^/M /'
   printf '%s\n' "$first" | sed 's/^/A /'
   printf '%s\n' "$second" | sed 's/^/B /'
-} | awk '
+} | awk -v ceiling="${RAPL_MAX_PLAUSIBLE_WATTS:-1000}" '
   $1 == "T" { t0 = ($2 + $3) / 2; t1 = ($4 + $5) / 2; next }
   # Emission order follows discovery order (package-0, core, uncore) rather than
   # awk hash order, so the exec output is stable enough to eyeball in a journal.
@@ -137,18 +143,41 @@ td=$(date +%s%N)
   $1 == "B" && NF == 3 { b[$2] = $3; next }
   END {
     elapsed = (t1 - t0) / 1000000000
-    if (elapsed <= 0) { exit 0 }
+    if (elapsed <= 0) {
+      print "rapl_power.sh: non-positive elapsed time between sample passes; emitting nothing" > "/dev/stderr"
+      exit 1
+    }
     for (i = 1; i <= n; i += 1) {
       z = zone[i]
-      if (!(z in a) || !(z in b)) { continue }
+      if (!(z in a) || !(z in b)) {
+        print "rapl_power.sh: " z " (" name[z] ") became unreadable during a sample pass; emitting nothing for it" > "/dev/stderr"
+        continue
+      }
       delta = b[z] - a[z]
-      # THE WRAP BRANCH. One correction only: a still-negative delta after it
-      # means a double wrap or a counter reset, neither of which this can
-      # honestly convert to watts, so the zone emits nothing.
+      # THE WRAP BRANCH, and it is a GUESS that must be bounded. Both reads come
+      # from the same zone, so delta is in [-max, max] and `delta += max` is ALWAYS
+      # >= 0 — a second `if (delta < 0)` after it can never fire, which is exactly
+      # the unfalsifiable guard CLAUDE.md forbids. It sat here until review, and a
+      # counter RESET (energy_uj jumping high->low without reaching max: module
+      # reload, kexec, firmware event) was silently "corrected" into a vast number:
+      # measured on this host, a 1000000 -> 0 reset on eq12 printed 261339.76 W.
+      # That is the same artefact class this script rejects [[inputs.intel_powerstat]]
+      # for, so it is bounded by PHYSICS instead: no package here can draw `ceiling`
+      # watts (default 1000 W, ~40x the N100's ceiling and ~12x the Ryzen's), so a
+      # corrected value above it is a reset or garbage, never a reading.
       if (delta < 0) { delta += max[z] }
-      if (delta < 0) { continue }
-      printf "rapl,domain=%s power_watts=%.6f\n", name[z], delta / 1000000 / elapsed
+      watts = delta / 1000000 / elapsed
+      if (watts > ceiling) {
+        print "rapl_power.sh: " z " (" name[z] ") implausible " watts " W over " elapsed \
+              "s (counter reset, not a wrap?); emitting nothing for it" > "/dev/stderr"
+        continue
+      }
+      printf "rapl,domain=%s power_watts=%.6f\n", name[z], watts
+      emitted += 1
+    }
+    if (emitted == 0) {
+      print "rapl_power.sh: no zone produced a usable sample" > "/dev/stderr"
+      exit 1
     }
   }
 '
-exit 0

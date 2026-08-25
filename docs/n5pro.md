@@ -315,7 +315,7 @@ Measured 2026-08-25, two independent runs, 6 s windows (run 2 in parentheses):
 
 `core` stays flat at ~0.12 W while `package-0` climbs 28 W under a three-core
 load containing no CPU0, and moves only when CPU0 itself is loaded. On this
-Zen 5 board `intel-rapl:0:0` is one core of twenty-four logical CPUs.
+Zen 5 board `intel-rapl:0:0` is one physical core of twelve (24 logical CPUs).
 
 Two earlier readings of this domain were both wrong, in opposite directions, and
 both came from evidence that could not have distinguished the hypotheses:

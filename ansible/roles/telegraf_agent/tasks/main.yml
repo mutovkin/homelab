@@ -149,6 +149,27 @@
 # dotenv `$` traps) — so the shape is asserted here rather than trusted. The
 # character class is the one files/rapl_power.sh itself accepts at discovery, so
 # a name this guard admits is a name that script can emit.
+# A domain in BOTH lists is a contradiction: the script would drop it and the
+# equality assert would then demand it. Without this, that mistake is caught only
+# by the arrival assert at the very END of a deploy, after telegraf has been
+# reconfigured and restarted — and only on a real run, never under --check.
+- name: Assert no RAPL domain is both expected and excluded
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_rapl_expected_domains
+        | intersect(telegraf_agent_rapl_exclude_domains) | length == 0
+    fail_msg: >-
+      {{ telegraf_agent_rapl_expected_domains
+         | intersect(telegraf_agent_rapl_exclude_domains) }} appears in BOTH
+      telegraf_agent_rapl_expected_domains and
+      telegraf_agent_rapl_exclude_domains for {{ inventory_hostname }}. The
+      script drops excluded domains at the source, so the delivered set can never
+      contain one — this host could not converge. Decide which the domain is:
+      exported (drop it from the exclude list) or not (drop it from the expected
+      list).
+    quiet: true
+  when: telegraf_agent_rapl_power | bool
+
 - name: Assert every declared RAPL domain name is a safe, well-formed token
   ansible.builtin.assert:
     that:
@@ -923,7 +944,17 @@
   until: >-
     telegraf_agent_arrival.status | default(0) == 200
     and (telegraf_agent_arrival.json.data.result | default([]) | length) > 0
-  retries: 12
+  # RETRIES MUST OUTLAST THE LOOKBEHIND, and that is why the window is 2m rather
+  # than the 5m this started as. The check below is an EQUALITY, so it fails on an
+  # EXTRA domain as well as a missing one — and the run that first EXCLUDES a
+  # domain leaves that domain's last real sample sitting inside the window. With
+  # [5m] and 12x10s of retries the loop could not outlive the stale sample: every
+  # attempt re-read the excluded domain, the budget ran out at 120s, and a
+  # correct change failed for ~3 more minutes. It never fired on this branch only
+  # because n5pro had no `core` in VictoriaMetrics to go stale. 180s of retries
+  # against a 120s window always converges; keep that inequality if either moves.
+  # 2m is still two samples of headroom at the 60s agent interval.
+  retries: 18
   delay: 10
   changed_when: false
   # failed_when:false so RETRY EXHAUSTION lands on the assert below, which can say
@@ -1237,7 +1268,7 @@
     method: POST
     body_format: form-urlencoded
     body:
-      query: 'count by (domain) (last_over_time(rapl_power_watts{host="{{ inventory_hostname }}"}[5m]))'
+      query: 'count by (domain) (last_over_time(rapl_power_watts{host="{{ inventory_hostname }}"}[2m]))'
     url_username: "{{ vault_vm_auth_username }}"
     url_password: "{{ vault_vm_auth_password }}"
     force_basic_auth: true
