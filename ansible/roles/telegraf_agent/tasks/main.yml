@@ -944,17 +944,7 @@
   until: >-
     telegraf_agent_arrival.status | default(0) == 200
     and (telegraf_agent_arrival.json.data.result | default([]) | length) > 0
-  # RETRIES MUST OUTLAST THE LOOKBEHIND, and that is why the window is 2m rather
-  # than the 5m this started as. The check below is an EQUALITY, so it fails on an
-  # EXTRA domain as well as a missing one — and the run that first EXCLUDES a
-  # domain leaves that domain's last real sample sitting inside the window. With
-  # [5m] and 12x10s of retries the loop could not outlive the stale sample: every
-  # attempt re-read the excluded domain, the budget ran out at 120s, and a
-  # correct change failed for ~3 more minutes. It never fired on this branch only
-  # because n5pro had no `core` in VictoriaMetrics to go stale. 180s of retries
-  # against a 120s window always converges; keep that inequality if either moves.
-  # 2m is still two samples of headroom at the 60s agent interval.
-  retries: 18
+  retries: 12
   delay: 10
   changed_when: false
   # failed_when:false so RETRY EXHAUSTION lands on the assert below, which can say
@@ -1284,7 +1274,17 @@
     and (telegraf_agent_rapl_arrival.json.data.result | default([])
          | map(attribute='metric.domain', default='<untagged>') | sort | list)
         == (telegraf_agent_rapl_expected_domains | sort | list)
-  retries: 12
+  # RETRIES MUST OUTLAST THE LOOKBEHIND, and that is why the window is 2m rather
+  # than the 5m this started as. The assert below is an EQUALITY, so it fails on
+  # an EXTRA domain as well as a missing one — and the run that first EXCLUDES a
+  # domain leaves that domain's last real sample sitting inside the window. With
+  # [5m] and 12x10s the loop could not outlive the stale sample: every attempt
+  # re-read the excluded domain, the budget ran out at 120s, and a CORRECT change
+  # failed for ~3 more minutes. It never fired on this branch only because n5pro
+  # had no `core` in VictoriaMetrics to go stale. 180s of retries against a 120s
+  # window always converges — keep retries*delay > the window if either moves.
+  # 2m is still two collections of headroom at the 60s agent interval.
+  retries: 18
   delay: 10
   changed_when: false
   failed_when: false
