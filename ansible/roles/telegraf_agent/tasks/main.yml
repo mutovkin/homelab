@@ -195,20 +195,35 @@
 # round). Static file+inventory check; runs under --check.
 - name: Assert this host has an absence owner in the observability alert rules
   vars:
+    _telegraf_rules_file: >-
+      {{ lookup('file', role_path ~ '/../services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml') }}
     _telegraf_agent_rule_hosts: >-
-      {{ lookup('file', role_path ~ '/../services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
-         | regex_findall('system_uptime\{host="([^"]+)"') }}
+      {{ _telegraf_rules_file | regex_findall('system_uptime\{host="([^"]+)"') }}
+    # The AGENT stream and the RAPL exec stream are two delivery paths and need
+    # two owners (#174/#194): the exec input can die while telegraf stays
+    # healthy, so a host covered by the system_uptime rule alone is still
+    # unowned for power. Checked from this side for the same reason as above —
+    # the observability-side reconciler only runs when that stack deploys.
+    _telegraf_rapl_rule_hosts: >-
+      {{ _telegraf_rules_file | regex_findall('rapl_power_watts\{host="([^"]+)"') }}
   ansible.builtin.assert:
     that:
       - inventory_hostname in _telegraf_agent_rule_hosts
+      - not (telegraf_agent_rapl_power | bool)
+        or inventory_hostname in _telegraf_rapl_rule_hosts
     fail_msg: >-
-      {{ inventory_hostname }} runs a telegraf agent but has NO pinned absence
-      rule in roles/services/observability/files/data/grafana/provisioning/
-      alerting/telegraf-health.yaml (selectors found:
-      {{ _telegraf_agent_rule_hosts }}). Its agent could die and nothing would
-      page. Add the rule (mirror obs-telegraf-metrics-absent-eq12, pinned
-      selector, matching uid/title) AND deploy the observability stack in the
-      same change — the observability role's own guard enforces the exact set.
+      {{ inventory_hostname }} runs a telegraf agent but is MISSING a pinned
+      absence rule in roles/services/observability/files/data/grafana/
+      provisioning/alerting/telegraf-health.yaml. Agent-stream selectors found:
+      {{ _telegraf_agent_rule_hosts }}; RAPL-stream selectors found:
+      {{ _telegraf_rapl_rule_hosts }} (this host collects RAPL:
+      {{ telegraf_agent_rapl_power | bool }}). Whichever is absent, that stream
+      could stop and nothing would page — and they are INDEPENDENT: the exec
+      input can die while the agent stays healthy, so the agent rule does not
+      cover power. Add the rule (mirror obs-telegraf-metrics-absent-eq12 or
+      obs-rapl-power-absent-eq12, pinned selector, matching uid/title) AND deploy
+      the observability stack in the same change — the observability role's own
+      guard enforces the exact set and the RAPL threshold.
     quiet: true
 
 # --- Check-mode reality gate -------------------------------------------------
@@ -1244,8 +1259,11 @@
 #
 # `count by (domain)` rather than the raw series: it collapses each domain to one
 # row whatever the sample cadence, so the comparison is about the SET.
-# [5m] against a 60s interval — five collections of headroom, same shape as the
-# sensors and SMART proofs above.
+# [2m] against a 60s interval — two collections of headroom, and deliberately NOT
+# the shape of the sensors and SMART proofs above. Those are bare instant
+# `count(...)` PRESENCE checks; this one is a windowed SET EQUALITY, which is
+# what makes a stale sample inside the window able to fail it. The retry-budget
+# note on the task itself explains why the window may not be widened back.
 #
 # The failed_when:false + assert pairing here is the SAME shape as those proofs
 # and is safe for the same reason: the assert reads `status` and the JSON result,

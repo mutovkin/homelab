@@ -67,6 +67,20 @@ set -u
 
 root="${RAPL_SYSFS_ROOT:-/sys/class/powercap}"
 
+# The plausibility ceiling, in watts, validated HERE rather than trusted. awk
+# would take a non-numeric -v value as a STRING, and `watts > ceiling` would then
+# be a string comparison ("2.32" > "abc" is false), so every implausible reading
+# would sail through: the guard would fail OPEN, which is the wrong direction for
+# a guard (CLAUDE.md). Only reachable through the debug override, but a guard
+# that silently stops guarding is exactly the failure class this file is about.
+ceiling="${RAPL_MAX_PLAUSIBLE_WATTS:-1000}"
+case "$ceiling" in
+  '' | *[!0-9.]* | *.*.*)
+    echo "rapl_power.sh: RAPL_MAX_PLAUSIBLE_WATTS=$ceiling is not a number" >&2
+    exit 1
+    ;;
+esac
+
 # Space-delimited on both sides so a match is a WHOLE name: excluding `core`
 # must not also exclude a future `core-1`.
 excluded=" $* "
@@ -145,7 +159,7 @@ td=$(date +%s%N)
   printf '%s' "$meta" | sed 's/^/M /'
   printf '%s\n' "$first" | sed 's/^/A /'
   printf '%s\n' "$second" | sed 's/^/B /'
-} | awk -v ceiling="${RAPL_MAX_PLAUSIBLE_WATTS:-1000}" '
+} | awk -v ceiling="$ceiling" '
   $1 == "T" { t0 = ($2 + $3) / 2; t1 = ($4 + $5) / 2; next }
   # Emission order follows discovery order (package-0, core, uncore) rather than
   # awk hash order, so the exec output is stable enough to eyeball in a journal.

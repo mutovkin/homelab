@@ -118,10 +118,14 @@
 # read two real tachometers (measured 2026-08-25), but that is unpersisted, not
 # collected, and pending an operator decision — see docs/eq12.md.
 # Never graph or label this series as RPM.
+# Array argv and log_stderr for the same two reasons as the RAPL block below:
+# the joined-string form is removed in telegraf 1.45.0, and stderr from a
+# zero-exit run is discarded unless asked for.
 [[inputs.exec]]
-  commands = ["/usr/local/lib/telegraf/acpi_fan_state.sh"]
+  commands = [["/usr/local/lib/telegraf/acpi_fan_state.sh"]]
   timeout = "5s"
   data_format = "influx"
+  log_stderr = true
 {% endif %}
 {% if telegraf_agent_rapl_power | bool %}
 
@@ -154,8 +158,23 @@
 # domain passes that test and is exported). The role asserts these names are
 # bare tokens before templating them into this TOML string.
 # RAPL is PACKAGE power, never wall power.
+#
+# ARGV AS A NESTED ARRAY, not a joined string. telegraf deprecated the
+# space-joined form in 1.39.0 and REMOVES it in 1.45.0 — measured, both hosts log
+# `DeprecationWarning: ... Use array syntax instead` on every start. Past that
+# version the whole string is taken as one path and this input dies, so the form
+# that survives a pinned-version bump is the one written here.
+#
+# log_stderr because the script's diagnostics are otherwise THROWN AWAY on the
+# only path that produces them. inputs.exec surfaces stderr by itself only when
+# the command exits NON-ZERO; a partial failure (one domain rejected by the
+# plausibility ceiling, or a zone that vanished mid-sample) still exits 0 because
+# the other domains are fine. Without this the domain silently disappears and the
+# `journalctl -u telegraf | grep -i exec` that the alert runbook and the deploy
+# assert both tell the operator to run returns NOTHING.
 [[inputs.exec]]
-  commands = ["{{ (['/usr/local/lib/telegraf/rapl_power.sh'] + telegraf_agent_rapl_exclude_domains) | join(' ') }}"]
+  commands = [[{{ (['/usr/local/lib/telegraf/rapl_power.sh'] + telegraf_agent_rapl_exclude_domains) | map('to_json') | join(', ') }}]]
   timeout = "5s"
   data_format = "influx"
+  log_stderr = true
 {% endif %}
