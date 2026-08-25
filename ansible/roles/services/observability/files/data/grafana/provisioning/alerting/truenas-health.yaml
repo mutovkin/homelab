@@ -56,10 +56,12 @@ apiVersion: 1
 # without flapping.
 #
 # ── NoData POLICY, PER RULE ──────────────────────────────────────────────────
-# Absence is owned EXACTLY ONCE, by truenas-metrics-absent — the same convention
-# vector-health.yaml follows. The two thermal rules are noDataState: OK because
-# their series is sparse by nature; making them Alerting would page on every
-# ordinary gap between samples AND duplicate the liveness rule three times over.
+# Absence is owned exactly once PER DELIVERY PATH — the same convention
+# vector-health.yaml follows: truenas-metrics-absent owns the Graphite stream,
+# truenas-poller-absent owns the API poller (#174: two paths, two liveness
+# rules). The thermal rules are noDataState: OK because absence is the
+# liveness rules' job; making them Alerting would page on every ordinary gap
+# between samples AND duplicate the liveness rules.
 groups:
   - orgId: 1
     name: truenas-health
