@@ -3,11 +3,12 @@ apiVersion: 1
 # Grafana file-provisioned alerting — telegraf's own liveness and, specifically,
 # the CONTINUITY OF ITS host LABEL (#178).
 #
-# TWO rules, because the label reaches VictoriaMetrics by TWO INDEPENDENT PATHS
-# and a detector on one is blind to the other — the same "two delivery paths need
-# two liveness rules" lesson #174 learned the hard way:
-#   obs-telegraf-metrics-absent   — the AGENT path. [agent] hostname stops
-#       resolving (empty, unset, renamed) -> the expected series stops.
+# TWO DETECTOR SHAPES, because the label reaches VictoriaMetrics by TWO
+# INDEPENDENT PATHS and a detector on one is blind to the other — the same "two
+# delivery paths need two liveness rules" lesson #174 learned the hard way:
+#   obs-telegraf-metrics-absent[-<host>] — the AGENT path, one rule per agent
+#       (see THE COST below). [agent] hostname stops resolving (empty, unset,
+#       renamed) -> the expected series stops.
 #   obs-docker-metrics-unlabelled — the PER-PLUGIN FILTER path. [[inputs.docker]]
 #       `taginclude` is an allowlist over the FINAL tag set, so dropping "host"
 #       from it strips the label off every docker_* series while system_uptime —
@@ -55,10 +56,34 @@ apiVersion: 1
 # in the window, which is the mechanism that produced the transient. Precedent
 # for a pinned host in a static alert file: truenas-health.yaml, host="truenas".
 # THE COST, stated plainly so the next reader does not have to rediscover it:
-# this rule watches ONE name. If the observability stack ever also runs on
-# n5pro_docker, that host's telegraf is unmonitored until its name is added to
-# the selector below — a silent gap, not a loud one. Adding a host to this stack
-# means adding it here in the same change.
+# each of these rules watches ONE name, so a host with no rule of its own is
+# unmonitored — a silent gap, not a loud one. #186 is what made that concrete:
+# the two PHYSICAL Proxmox hosts now run NATIVE systemd telegraf agents
+# (roles/telegraf_agent, inventory group `telegraf_agents`), so the pinned set is
+# THREE rules — eq12_docker (the container agent that ships with this stack),
+# plus eq12 and n5pro (native). One absence owner per agent.
+#
+# That gap is no longer left to memory. The observability role now derives the
+# EXPECTED set from inventory — group `telegraf_agents` plus the host this stack
+# deploys to — and asserts it equals the set of pinned host selectors it parses
+# out of the `expr` lines in THIS file. (Note the shape of this sentence: it does
+# NOT quote one of those selectors verbatim, because the guard's anchor is a
+# literal and a comment carrying it would count as a fourth rule and fail the
+# deploy. That is deliberate on the guard's part — a first-match check would
+# instead read the comment and pass while the live selector said something else —
+# and it was measured here: the first draft of this paragraph tripped it.)
+# The guard lives in ansible/roles/services/observability/tasks/main.yml,
+# "Verify the telegraf alert rule's pinned host selector". Adding a host to
+# `telegraf_agents` now
+# FAILS the observability deploy until its rule exists here. Static check, so it
+# fails under --check before anything touches state.
+#
+# One more thing pinning buys, beyond the transient argued above: each host's
+# TOTAL disappearance is NoData -> Alerting for THAT host's rule, whereas a
+# shared regex selector (host=~"eq12|n5pro|…") would return only the surviving
+# hosts' series and self-RESOLVE once the dead one's last sample rolled out of
+# the lookbehind — the machine going away entirely is the case that must page
+# loudest, and it is exactly the case a regex selector goes quiet on.
 #
 # Why system_uptime and not one of the richer families: [[inputs.system]] emits
 # it every 60s unconditionally, it exists whenever the agent is running at all,
@@ -185,6 +210,267 @@ groups:
           # tick — nothing is evaluated between ticks, so up to 5m later — and
           # only then does `for: 5m` start, which also advances only at ticks.
           # Best case 15 min, worst case ~20. Same order as obs-http-probe-absent.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600
+
+
+      # ---------------------------------------------------------------------
+      # THE NATIVE-AGENT ABSENCE OWNERS (#186), one per physical Proxmox host.
+      #
+      # eq12 and n5pro run telegraf as a SYSTEMD SERVICE (roles/telegraf_agent),
+      # not as a container, and they are the machines every VM and LXC in the
+      # fleet sits on top of — before #186 neither exported a single non-vector_*
+      # series. These two rules are their absence owners, mirroring the container
+      # rule above one-for-one so the three read the same way.
+      #
+      # NO DEEP LINKS ON THESE TWO, DELIBERATELY. The natural link for a rule
+      # that says "a whole delivery path went dark" is the DASHBOARD, and a
+      # dashboard-only deep link is NOT REPRESENTABLE in file provisioning:
+      # Grafana validates __dashboardUid__ and __panelId__ as a mandatory PAIR
+      # and rejects the document otherwise — and that rejection is boot-fatal for
+      # ALL provisioned rules, not just the offending one (measured 2026-08-24:
+      # one unpaired annotation crash-looped Grafana, ten "Starting Grafana"
+      # lines, zero "HTTP Server Listen", all 22 rules withdrawn). Nothing
+      # repo-side can catch it — the file is valid YAML, lint-clean, and --check
+      # skips the Grafana restart entirely. So: add a link only as a real pair,
+      # pointing at a panel with a PINNED id. See
+      # docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md
+
+      # ---------------------------------------------------------------------
+      # WHEN THIS FIRES, on the host itself — this agent is native, so there is
+      # no `docker logs` to reach for:
+      #   ssh root@eq12 'systemctl status telegraf'
+      #   ssh root@eq12 'journalctl -u telegraf -n 100'
+      # The unit is Restart=always with StartLimitIntervalSec=0, so a wedged
+      # agent looks like a restart loop in the journal rather than a `failed`
+      # unit nobody polls — that is the intended shape, and it is why liveness
+      # lives here in an absence rule instead of in a systemd state.
+      #
+      # THE CONTAINER RULE'S FAILURE MODE DOES NOT EXIST HERE. On eq12_docker the
+      # host label comes from ${TELEGRAF_HOSTNAME} in the container env, which can
+      # go missing and be stamped LITERALLY. The native agent has no such
+      # indirection: `hostname = "eq12"` is templated from inventory_hostname
+      # straight into /etc/telegraf/telegraf.conf by roles/telegraf_agent. A wrong
+      # label here means that FILE changed — check it, and the role's template,
+      # before hunting for an environment problem there isn't one of.
+      #
+      # The [24h] lookbehind mirrors the rule above: a series with no sample
+      # inside the lookbehind is not returned AT ALL, so a shorter window would
+      # let a long-dead agent vanish from the query, Grafana mark the instance
+      # stale and RESOLVE the alert. relativeTimeRange below must stay >= it.
+      #
+      # NOTE for whoever renames this host on purpose: the rule is scoped to the
+      # name, so a deliberate rename makes it fire — update the selector, the
+      # `telegraf_agents` group and the title in the same change. The deploy-time
+      # assert in the observability role will insist on it anyway.
+      - uid: obs-telegraf-metrics-absent-eq12
+        title: Telegraf metrics stopped arriving for eq12
+        condition: C
+        for: 5m
+        # Alerting, not OK, and the #151 test is what settles it: [[inputs.system]]
+        # exports system_uptime every 60s UNCONDITIONALLY whether or not anything
+        # is wrong, so absence is NEVER its healthy state (unlike a counter such
+        # as vector_component_errors_total, which does not exist until it is
+        # non-zero and therefore must be OK on NoData). NoData here means the
+        # series is gone entirely — the native agent dead or the host down for
+        # longer than the lookbehind, VictoriaMetrics unreachable, or the host
+        # label no longer equal to "eq12" for longer than 24h — each of which is
+        # the fault this rule owns. A physical hypervisor disappearing completely
+        # is precisely the case that must page loudest.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: No telegraf samples tagged host=eq12 for over 10 minutes.
+          description: |-
+            The native systemd agent on the Proxmox host eq12: `systemctl status telegraf` then `journalctl -u telegraf -n 100` over ssh root@eq12.
+            Its host label is templated literally from inventory_hostname into /etc/telegraf/telegraf.conf, so a wrong label means that file changed — there is no env var to go missing here.
+        labels:
+          severity: critical
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # `min by (host)` around a selector that already pins one host is
+              # kept for symmetry with the rule above: it makes widening safe by
+              # construction, evaluating each host on its own rather than letting
+              # the healthiest mask a dead peer (#160).
+              expr: 'min by (host) (lag(system_uptime{host="eq12"}[24h]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not silently become 0 and read as
+          # "zero lag, all healthy" (#108). With no numeric value the rule falls
+          # through to noDataState, which is Alerting here on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 600s = ten missed 60s collections. Measured, not guessed: the live lag
+          # for host="eq12" was 11.2s immediately after the #186 deploy on
+          # 2026-08-25, so the healthy signal sits ~50x below the threshold and a
+          # telegraf restart cannot approach it. Detection latency is the same
+          # arithmetic as the rule above, and the group's 5m `interval` is the
+          # third term that is easy to forget: the lag must EXCEED 600s (10 min),
+          # that must then be OBSERVED at an evaluation tick — nothing is
+          # evaluated between ticks, so up to 5m later — and only then does
+          # `for: 5m` start, which also advances only at ticks. Best case 15 min,
+          # worst case ~20.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600
+
+      # ---------------------------------------------------------------------
+      # WHEN THIS FIRES, on the host itself — this agent is native, so there is
+      # no `docker logs` to reach for:
+      #   ssh root@n5pro 'systemctl status telegraf'
+      #   ssh root@n5pro 'journalctl -u telegraf -n 100'
+      # The unit is Restart=always with StartLimitIntervalSec=0, so a wedged
+      # agent looks like a restart loop in the journal rather than a `failed`
+      # unit nobody polls — that is the intended shape, and it is why liveness
+      # lives here in an absence rule instead of in a systemd state.
+      #
+      # THE CONTAINER RULE'S FAILURE MODE DOES NOT EXIST HERE. On eq12_docker the
+      # host label comes from ${TELEGRAF_HOSTNAME} in the container env, which can
+      # go missing and be stamped LITERALLY. The native agent has no such
+      # indirection: `hostname = "n5pro"` is templated from inventory_hostname
+      # straight into /etc/telegraf/telegraf.conf by roles/telegraf_agent. A wrong
+      # label here means that FILE changed — check it, and the role's template,
+      # before hunting for an environment problem there isn't one of.
+      #
+      # The [24h] lookbehind mirrors the rule above: a series with no sample
+      # inside the lookbehind is not returned AT ALL, so a shorter window would
+      # let a long-dead agent vanish from the query, Grafana mark the instance
+      # stale and RESOLVE the alert. relativeTimeRange below must stay >= it.
+      #
+      # NOTE for whoever renames this host on purpose: the rule is scoped to the
+      # name, so a deliberate rename makes it fire — update the selector, the
+      # `telegraf_agents` group and the title in the same change. The deploy-time
+      # assert in the observability role will insist on it anyway.
+      - uid: obs-telegraf-metrics-absent-n5pro
+        title: Telegraf metrics stopped arriving for n5pro
+        condition: C
+        for: 5m
+        # Alerting, not OK, and the #151 test is what settles it: [[inputs.system]]
+        # exports system_uptime every 60s UNCONDITIONALLY whether or not anything
+        # is wrong, so absence is NEVER its healthy state (unlike a counter such
+        # as vector_component_errors_total, which does not exist until it is
+        # non-zero and therefore must be OK on NoData). NoData here means the
+        # series is gone entirely — the native agent dead or the host down for
+        # longer than the lookbehind, VictoriaMetrics unreachable, or the host
+        # label no longer equal to "n5pro" for longer than 24h — each of which is
+        # the fault this rule owns. A physical hypervisor disappearing completely
+        # is precisely the case that must page loudest.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: No telegraf samples tagged host=n5pro for over 10 minutes.
+          description: |-
+            The native systemd agent on the Proxmox host n5pro: `systemctl status telegraf` then `journalctl -u telegraf -n 100` over ssh root@n5pro.
+            Its host label is templated literally from inventory_hostname into /etc/telegraf/telegraf.conf, so a wrong label means that file changed — there is no env var to go missing here.
+        labels:
+          severity: critical
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # `min by (host)` around a selector that already pins one host is
+              # kept for symmetry with the rule above: it makes widening safe by
+              # construction, evaluating each host on its own rather than letting
+              # the healthiest mask a dead peer (#160).
+              expr: 'min by (host) (lag(system_uptime{host="n5pro"}[24h]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not silently become 0 and read as
+          # "zero lag, all healthy" (#108). With no numeric value the rule falls
+          # through to noDataState, which is Alerting here on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # 600s = ten missed 60s collections. Measured, not guessed: the live lag
+          # for host="n5pro" was 11.2s immediately after the #186 deploy on
+          # 2026-08-25, so the healthy signal sits ~50x below the threshold and a
+          # telegraf restart cannot approach it. Detection latency is the same
+          # arithmetic as the rule above, and the group's 5m `interval` is the
+          # third term that is easy to forget: the lag must EXCEED 600s (10 min),
+          # that must then be OBSERVED at an evaluation tick — nothing is
+          # evaluated between ticks, so up to 5m later — and only then does
+          # `for: 5m` start, which also advances only at ticks. Best case 15 min,
+          # worst case ~20.
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:

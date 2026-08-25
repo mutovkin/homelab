@@ -92,78 +92,100 @@
     quiet: true
   when: observability_ha_scrape | default(false) | bool
 
-# #178: obs-telegraf-metrics-absent is scoped to ONE host name, written into the
-# rule file as `system_uptime{host="eq12_docker"}` (that file's own comment argues
+# #178: the telegraf absence rules are scoped to ONE host name each, written into
+# the rule file as `system_uptime{host="<name>"}` (that file's own comment argues
 # why pinning beats the host-agnostic form, and states the cost). The cost is that
-# the rule cannot follow the stack: move this role to another host, or rename
-# eq12_docker, and the rule keeps watching a name nothing exports — it goes
-# permanently NoData -> Alerting on the old name while the NEW host's telegraf
-# agent stream has no absence owner at all. Silence, not a page, and every deploy
-# stays green. That is exactly the class of defect #178 exists to end.
+# a pinned rule cannot follow the fleet: move this role to another host, rename a
+# host, or stand up a NEW telegraf agent, and the rules keep watching the names
+# they were written with — a renamed host goes permanently NoData -> Alerting on
+# a name nothing exports, while the new host's telegraf agent stream has no
+# absence owner at all. Silence, not a page, and every deploy stays green. That
+# is exactly the class of defect #178 exists to end.
+#
+# #186 widened the coupling from one name to a SET. The two physical Proxmox
+# hosts now run NATIVE systemd telegraf agents (roles/telegraf_agent, inventory
+# group `telegraf_agents`); eq12_docker is deliberately not in that group because
+# its agent is the CONTAINER this stack itself deploys. So the expected set is
+# DERIVED rather than hardcoded: group `telegraf_agents` PLUS this stack's own
+# host, and every member must have a pinned rule in telegraf-health.yaml. Adding
+# a host to that group therefore FAILS this deploy until its rule exists.
 #
 # THIS ASSERT IS WHAT A FUTURE OPERATOR TRIPS INSTEAD OF DISCOVERING THAT
-# SILENCE — it forces the selector edit into the same change that moves or
-# renames the host. Static (control-machine lookup + inventory_hostname only), so
-# it runs under --check and fails before anything touches state.
+# SILENCE — it forces the rule edit into the same change that adds a host to
+# `telegraf_agents`, or that moves or renames this stack's host. Static
+# (control-machine lookup + inventory only), so it runs under --check and fails
+# before anything touches state.
 #
-# The value is parsed OUT OF the deployed rule file, like the datasource-uid check
-# further down, so the guard cannot drift from what is actually provisioned.
+# The values are parsed OUT OF the deployed rule file, like the datasource-uid
+# check further down, so the guard cannot drift from what is actually provisioned.
 #
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
-# quoted the expr verbatim in a comment ABOVE the real one, the guard would read
+# quoted an expr verbatim in a comment ABOVE the real one, the guard would read
 # the COMMENT and pass while the live selector said something else: a guard
-# shadowed by prose. Asserting the anchor is unique closes that, and it fails
-# loud in both directions — zero matches (file restructured, or the rule widened
-# to a regex matcher like host=~"a|b", which this literal anchor cannot read) and
-# more than one (anchor no longer unique). Widening the rule to two hosts is a
-# deliberate design change that must widen THIS guard in the same commit.
+# shadowed by prose. Asserting the count closes that, and it fails loud in both
+# directions — too FEW matches (a host has no rule, the file was restructured, or
+# a rule was widened to a regex matcher like host=~"a|b", which this literal
+# anchor cannot read) and too MANY (a duplicate anchor, which is what a verbatim
+# comment quote produces). Changing the shape of these selectors is a deliberate
+# design change that must teach THIS guard the new shape in the same commit.
 - name: Verify the telegraf alert rule's pinned host selector
   vars:
     _telegraf_rule_hosts: >-
       {{ lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
          | regex_findall('system_uptime\{host="([^"]+)"') }}
+    # This stack's own host runs the CONTAINER agent and is deliberately NOT in
+    # `telegraf_agents` (that group is the native-agent hosts); adding it here is
+    # what makes the two delivery paths one expected set.
+    _telegraf_expected_hosts: "{{ ([inventory_hostname] + groups['telegraf_agents']) | sort }}"
   block:
-    - name: Assert the telegraf alert rule exposes exactly one pinned host selector
+    - name: Assert the telegraf alert rules expose one pinned host selector each
       ansible.builtin.assert:
         that:
-          - _telegraf_rule_hosts | length == 1
+          - _telegraf_rule_hosts | length == _telegraf_expected_hosts | length
         fail_msg: >-
-          Expected exactly ONE `system_uptime{host="..."` selector in
-          files/data/grafana/provisioning/alerting/telegraf-health.yaml, found
+          Expected {{ _telegraf_expected_hosts | length }} `system_uptime{host="..."`
+          selectors in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml — one per
+          expected agent host {{ _telegraf_expected_hosts }} — but found
           {{ _telegraf_rule_hosts | length }}: {{ _telegraf_rule_hosts }}.
-          ZERO means this guard can no longer read the file — either it was
-          restructured, or obs-telegraf-metrics-absent was widened to a regex
-          matcher (host=~"a|b"), which this literal anchor cannot parse. MORE
-          THAN ONE means the anchor is no longer unique, usually because a
-          comment now quotes the expr verbatim; that is dangerous rather than
-          merely untidy, because a first-match check would read the comment and
-          pass while the live selector said something else. Either way the fix
-          belongs in the same change: make the anchor unique again, or teach
-          this assert the new shape. Do not delete the guard to get past it.
+          TOO FEW means a host has no absence rule, or this guard can no longer
+          read the file — it was restructured, or a rule was widened to a regex
+          matcher (host=~"a|b"), which this literal anchor cannot parse. TOO MANY
+          means an anchor is no longer unique, usually because a comment now
+          quotes an expr verbatim; that is dangerous rather than merely untidy,
+          because a first-match check would read the comment and pass while the
+          live selector said something else. Either way the fix belongs in the
+          same change: add the missing rule, make the anchors unique again, or
+          teach this assert the new shape. Do not delete the guard to get past it.
         quiet: true
 
-    - name: Assert the telegraf alert rule's pinned host selector matches this host
+    - name: Assert the telegraf alert rules cover exactly the expected agent hosts
       ansible.builtin.assert:
         that:
-          - _telegraf_rule_hosts | first == inventory_hostname
+          - _telegraf_rule_hosts | sort == _telegraf_expected_hosts
         fail_msg: >-
-          The alert rule obs-telegraf-metrics-absent is scoped to the host
-          selector "{{ _telegraf_rule_hosts | first }}", but this play is
-          deploying the observability stack to
-          inventory_hostname={{ inventory_hostname }}. That rule is the only
-          absence owner for telegraf's AGENT metric stream (system_uptime), and
-          unlike obs-vector-metrics-absent it is NOT host-agnostic — it never
-          picks up a new or renamed host on its own. Left as-is,
-          {{ inventory_hostname }}'s telegraf can die, or start stamping a
-          container id / the literal ${TELEGRAF_HOSTNAME} as its host label, and
-          nothing pages: every other telegraf-fed rule aggregates the host
-          dimension away. You get silence, not an alert. Fix by editing the
-          `expr` in files/data/grafana/provisioning/alerting/telegraf-health.yaml
-          in THIS change — to {{ inventory_hostname }} if this is a rename. If
-          the stack now runs in two places, widening that expr to a regex
-          selector also means widening this assert in the same change; the
-          uniqueness check above fails first and says so.
+          The telegraf absence rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
+          to {{ _telegraf_rule_hosts | sort }}, but the expected set is
+          {{ _telegraf_expected_hosts }} — every host in inventory group
+          `telegraf_agents` (the NATIVE systemd agents, roles/telegraf_agent) plus
+          this stack's own host inventory_hostname={{ inventory_hostname }} (the
+          CONTAINER agent this role deploys). Those rules are the only absence
+          owners for telegraf's AGENT metric stream (system_uptime), and unlike
+          obs-vector-metrics-absent they are NOT host-agnostic — they never pick
+          up a new or renamed host on their own. Left as-is, the unmatched host's
+          telegraf can die, or start stamping a container id / the literal
+          ${TELEGRAF_HOSTNAME} as its host label, and nothing pages: every other
+          telegraf-fed rule aggregates the host dimension away. You get silence,
+          not an alert. ADDING A HOST TO `telegraf_agents` MEANS ADDING ITS RULE
+          IN THE SAME CHANGE — this assert is what a future operator trips
+          instead of silently getting no coverage. Fix by adding or editing the
+          `expr` (with a matching uid and title) in that file, to
+          {{ inventory_hostname }} if this is a rename of this stack's host.
+          Widening an expr to a regex selector instead also means widening this
+          assert in the same change; the count check above fails first and says
+          so. Do not delete the guard to get past it.
         quiet: true
 
 # #188: the notification policy's `group_by` and the rules' `by (...)` clauses
