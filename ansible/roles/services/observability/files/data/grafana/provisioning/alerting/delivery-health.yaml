@@ -73,7 +73,7 @@ groups:
         # silenced it would be indistinguishable from a delivery failure.
         noDataState: Alerting
         execErrState: Alerting
-        isPaused: false
+        isPaused: true
         annotations:
           summary: Daily delivery test — this arriving means this channel works.
           description: |-
