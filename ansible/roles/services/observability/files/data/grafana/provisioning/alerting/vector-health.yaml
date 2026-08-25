@@ -47,6 +47,24 @@ groups:
     interval: 5m
     rules:
       # ---------------------------------------------------------------------
+      # NOT a full disk buffer: this config sets `when_full: block`, so a full
+      # buffer applies BACK-PRESSURE and stalls the sources rather than
+      # discarding — that surfaces as obs-vector-buffer-filling and then as an
+      # ingest stall, never here. Only `when_full: drop_newest` discards, and
+      # nothing in this stack uses it. Discards come from the #153 self-ingestion
+      # throttle engaging on a flood, or a sink dropping a batch.
+      # component_id=`throttle_vector_own` with intentional=true means Vector is
+      # flooding its own stderr and the throttle is bounding the amplification
+      # loop: the throttle firing IS the flood alarm, so the job is "find the
+      # flood", never "raise the threshold". Anything else is real pipeline loss.
+      # ONE MORE READING, and it is the likeliest false lead: a Vector CRASH LOOP
+      # trips the same throttle with no stderr flood at all. Each start emits
+      # ~15-25 lines and docker's restart backoff fits several attempts into a
+      # minute, which clears 30/60s on its own. Disambiguate with the OTHER
+      # rules, not this one — if obs-log-ingest-stalled or
+      # obs-vector-metrics-absent is firing at the same time, the condition is a
+      # crash loop and this alert is a symptom of it; if both are Normal, Vector
+      # is up and genuinely flooding.
       - uid: obs-vector-discarding-events
         title: Vector is discarding events
         condition: C
@@ -65,40 +83,10 @@ groups:
         isPaused: false
         annotations:
           summary: Vector discarded events in the last 15 minutes — log data was lost.
-          description: >-
-            component_discarded_events_total increased for
-            {{ $labels.component_id }}. Discards come from the #153
-            self-ingestion throttle engaging on a flood, or a sink dropping a
-            batch. NOT from a full disk buffer: this config sets
-            `when_full: block`, so a full buffer applies BACK-PRESSURE and stalls
-            the sources rather than discarding — that surfaces as
-            obs-vector-buffer-filling and then as an ingest stall, never here. Only
-            `when_full: drop_newest` discards, and nothing in this stack uses it.
-            The series carries an `intentional` tag ({{ $labels.intentional }} on
-            this instance): true for a throttle, false for real loss — read it
-            first, it answers the question faster than any log.
-            component_id=`throttle_vector_own` with intentional=true means Vector
-            is flooding its own stderr and the throttle is bounding the
-            amplification loop: the throttle firing IS the flood alarm, so the job
-            is "find the flood", never "raise the threshold". Anything else is
-            real pipeline loss.
-            ONE MORE READING, and it is the likeliest false lead: a Vector CRASH
-            LOOP trips the same throttle with no stderr flood at all. Each start
-            emits ~15-25 lines and docker's restart backoff fits several attempts
-            into a minute, which clears 30/60s on its own. Disambiguate with the
-            OTHER rules, not this one — if obs-log-ingest-stalled or
-            obs-vector-metrics-absent is firing at the same time, the condition is
-            a crash loop and this alert is a symptom of it; if both are Normal,
-            Vector is up and genuinely flooding.
-            NOTE, measured on 0.57.0 rather than assumed: a VRL remap ABORT does
-            NOT land here — it increments component_errors_total instead
-            (error_type=conversion_failed, stage=processing), so
-            obs-vector-component-errors is the rule that covers #143's
-            silent-abort-drop hazard. Do not read a quiet discard counter as proof
-            no events are being dropped by a remap.
-            Check `docker logs vector` on eq12_docker. If the disk buffer is the
-            cause, the runbook is
-            docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+          description: |-
+            {{ $labels.component_id }}, intentional={{ $labels.intentional }}.
+            true: the self-ingestion throttle is bounding a flood — find the flood, never raise the threshold. false: real pipeline loss — `docker logs vector` on eq12_docker.
+            If an ingest-stalled or metrics-absent alert fires alongside, this is a crash loop, not a flood.
         labels:
           severity: critical
           component: log-pipeline
@@ -159,6 +147,18 @@ groups:
                       - 0
 
       # ---------------------------------------------------------------------
+      # The abort-vs-discard split the header records, in full: an aborted VRL
+      # remap DROPS the event (drop_on_abort defaults true, nothing is rerouted,
+      # there is no dead-letter), and measured on 0.57.0 that drop does NOT appear
+      # in component_discarded_events_total. So a transform component_id here with
+      # error_type=conversion_failed is silent data loss, and this rule is the only
+      # thing that sees it — which is exactly the blindness #143 left behind when
+      # it swapped the fallible `!` coercions for defaulted forms. This counter
+      # also covers connection failures, encoding errors and source-side read
+      # errors.
+      # Cross-check that the destination actually has the data: `_time:10m |
+      # count()` in VictoriaLogs, and vector_component_sent_events_total in
+      # VictoriaMetrics.
       - uid: obs-vector-component-errors
         title: Vector component errors
         condition: C
@@ -169,27 +169,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: A Vector component reported errors in the last 15 minutes.
-          description: >-
-            component_errors_total increased for {{ $labels.component_id }},
-            error_type={{ $labels.error_type }}. THIS IS THE COUNTER THAT FIRES ON
-            SINK AUTH FAILURES — the exact signature of the ~30-day silent 401 in
-            docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md,
-            where Vector kept running, kept reporting healthy, and every batch was
-            rejected.
-            IT IS ALSO THE COUNTER FOR A VRL REMAP ABORT, which matters more than
-            it looks: an aborted remap DROPS the event (drop_on_abort defaults
-            true, nothing is rerouted, there is no dead-letter), and measured on
-            0.57.0 that drop does NOT appear in component_discarded_events_total.
-            So a transform component_id here with
-            error_type=conversion_failed is silent data loss, and this rule is the
-            only thing that sees it — which is exactly the blindness #143 left
-            behind when it swapped the fallible `!` coercions for defaulted forms.
-            Also covers connection failures, encoding errors and source-side read
-            errors. Check `docker logs vector` on eq12_docker for the error text,
-            then confirm the destination actually has the data: `_time:10m |
-            count()` in VictoriaLogs, and vector_component_sent_events_total in
-            VictoriaMetrics.
+          summary: Vector component {{ $labels.component_id }} reported errors ({{ $labels.error_type }}).
+          description: |-
+            This counter catches sink auth failures — the shape of the 30-day silent 401 — and VRL remap aborts, both of which drop data silently.
+            `docker logs vector` has the error text; then confirm lines are still landing in VictoriaLogs.
+          runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md
         labels:
           severity: critical
           component: log-pipeline
@@ -267,29 +251,28 @@ groups:
         # The [24h] window is what makes a stopped host visible at all: its series
         # stops receiving samples but remains in the lookback, so lag() keeps
         # climbing for it — a host absent for more than 24h leaves the result set
-        # entirely, and only the whole-query NoData below still covers that.
+        # entirely, and only the whole-query NoData below still covers that. The
+        # relativeTimeRange below must stay >= the lookbehind; this mirrors
+        # obs-http-probe-absent's reasoning.
+        #
+        # On a whole-family NoData firing, $labels.host renders empty — that is the
+        # "every exporter gone" case.
+        #
+        # There is no `docker exec` on a distroless image, so to check that
+        # VM_AUTH_USERNAME/VM_AUTH_PASSWORD actually reached the vector container,
+        # read /data/deploy/observability/.env instead.
+        #
+        # This is ALSO what fires when Vector is simply gone — total death and
+        # metrics-only death both land here; the body leads with the partial
+        # case because it is the one nothing else catches.
         noDataState: Alerting
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Vector's internal metrics have stopped arriving in VictoriaMetrics.
-          description: >-
-            No vector_uptime_seconds sample in over 10 minutes while Vector scrapes
-            its own internals every 60s. This is the partial failure the whole #151
-            rule group exists for: Vector can be shipping LOGS perfectly while its
-            metrics sink 401s against VictoriaMetrics, and nothing else would
-            notice — the log-ingest rules stay Normal throughout. It is also what
-            fires if Vector is simply gone.
-            The [24h] lookbehind mirrors obs-http-probe-absent's reasoning: a
-            series with no sample inside the lookbehind is not returned AT ALL, so
-            a shorter window makes a long-dead exporter vanish from the query,
-            Grafana marks the instance stale and RESOLVES the alert, and the
-            failure goes invisible again. relativeTimeRange below must stay >= the
-            lookbehind.
-            Check `docker logs vector` for vector_metrics_out sink errors, and that
-            VM_AUTH_USERNAME/VM_AUTH_PASSWORD reached the vector container (there
-            is no `docker exec` on a distroless image — read
-            /data/deploy/observability/.env instead).
+          summary: Vector on {{ $labels.host }} stopped exporting internal metrics for over 10 minutes.
+          description: |-
+            Logs may still be flowing — the metrics sink can fail alone (bad VM_AUTH credential, sink 401) and nothing else notices.
+            Check the vector logs on that host for vector_metrics_out sink errors.
         labels:
           severity: critical
           component: log-pipeline
@@ -345,6 +328,10 @@ groups:
                       - 600
 
       # ---------------------------------------------------------------------
+      # The 128MB in the annotation is half of the 256MB disk buffer configured in
+      # files/data/vector/vector.yaml (max_size: 268435488). CHANGE BOTH TOGETHER
+      # — this threshold is 50% of that number and nothing enforces the
+      # relationship.
       - uid: obs-vector-buffer-filling
         title: Vector disk buffer filling
         condition: C
@@ -356,20 +343,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: A Vector disk buffer is over half full — the sink is blocked or slow.
-          description: >-
-            vector_buffer_byte_size for {{ $labels.component_id }} is above 128MB,
-            half of the 256MB disk buffer configured in
-            files/data/vector/vector.yaml (max_size: 268435488). CHANGE BOTH
-            TOGETHER — this threshold is 50% of that number and nothing enforces
-            the relationship. A filling buffer is the LEADING indicator of the
-            wedge that
-            docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
-            recovers from: the sink is rejecting or stalling, Vector is holding
-            events on disk, and when_full is `block`, so once it is full the
-            sources stop reading and events are lost at the source instead. Fix
-            the sink before it gets there — check VictoriaLogs is up and
-            authenticating (`docker logs vector` will name the error).
+          summary: Vector buffer {{ $labels.component_id }} is over half full (128MB of 256MB).
+          description: |-
+            The sink is rejecting or stalling; when the buffer fills, sources stop reading and events are lost at the source.
+            Fix the sink before that — check VictoriaLogs is up and authenticating; `docker logs vector` names the error.
+          runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
         labels:
           severity: warning
           component: log-pipeline

@@ -40,7 +40,13 @@ apply; the nftables drop counter stayed at `0`, which is the proof it was not a
 firewall problem — the appliance never sent a packet to drop.
 
 Delivery began only after several minutes and an `enabled` false→true cycle
-through the role.
+through the role — which is what `truenas-metrics-absent`'s notification means by
+"cycle the exporter off and on":
+
+```bash
+ansible-playbook playbooks/truenas.yml -e truenas_exporter_enabled=false
+ansible-playbook playbooks/truenas.yml
+```
 
 **So a green deploy proves nothing here.** The evidence is a query against
 VictoriaMetrics, never the playbook recap, and the durable control is the

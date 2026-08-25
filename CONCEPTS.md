@@ -374,6 +374,31 @@ failure by construction, and the compensating control belongs in the deploy rath
 in the monitoring, because monitoring that queries through the frozen object shares its
 fault and cannot report it.
 
+### All-or-nothing provisioning
+An import of declarative configuration that an application validates as a single
+document at start-up, so that one rejected entry withdraws every entry in the set —
+and, where the importer is a start-up dependency, prevents the application from
+serving at all.
+
+It is the opposite boundary from a Frozen provisioned object: there the file stops
+governing a running object, here the file governs so completely that a defect in one
+line of it removes the whole capability. The consequence worth planning around is that
+blast radius does not track the size of the mistake. A single mistyped annotation on a
+single rule is indistinguishable, in effect, from deleting the directory. Where the
+withdrawn capability is the alerting stack itself, the failure also removes the thing
+that would have reported it.
+
+The failure is loud at the process level and mute about its cause: the only statement
+of which entry was rejected is in the application's own log, so an operator sees a
+service that will not start and no indication that a configuration file is why. It is
+not a Silent-green failure — nothing claims success — but it defeats the same class of
+checks, because a document can be well-formed in the deploying repository's terms and
+still be rejected by the application's schema, which no repository-side parser or lint
+knows. Two rules follow. A deploy that installs such a document must gate on the
+application actually serving afterwards, since the installing step reports on writing
+the file rather than on the application accepting it. And a dry run is not a test:
+the step that would have exposed the defect is precisely the one a dry run skips.
+
 ### Inventory-name label
 The identity a per-host signal is tagged with, which is by convention the name the
 inventory uses for that host and not any name the host can discover about itself.

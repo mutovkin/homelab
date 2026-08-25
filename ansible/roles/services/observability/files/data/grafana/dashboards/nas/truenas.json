@@ -25,6 +25,7 @@
   },
   "panels": [
     {
+      "id": 1,
       "type": "row",
       "title": "Disk health",
       "collapsed": false,
@@ -37,6 +38,7 @@
       "panels": []
     },
     {
+      "id": 2,
       "type": "stat",
       "title": "Hottest HDD",
       "description": "Maximum temperature across the spinning disks. Scoped by media=\"hdd\", which #174's poller derives from ROTATION RATE rather than the API's `type` field \u2014 the QEMU virtual boot disk reports type=HDD with no rotation rate and no SMART, and its temperature reads as a fabricated 0. Thresholds are the #176 alert thresholds exactly, so panel and alert can never disagree.",
@@ -101,6 +103,7 @@
       }
     },
     {
+      "id": 3,
       "type": "timeseries",
       "title": "Disk temperature",
       "description": "Per-device temperature from the TrueNAS API (#174), keyed by real device name and polled every 60s \u2014 dense, unlike the Graphite stream's sparse, serial-keyed series. Disks with no SMART (the virtual boot disk) are absent rather than reported as 0: the poller skips unknown gauges instead of zeroing them, because a fabricated reading is worse than a gap.",
@@ -161,6 +164,7 @@
       }
     },
     {
+      "id": 4,
       "type": "row",
       "title": "Pool",
       "collapsed": false,
@@ -173,6 +177,7 @@
       "panels": []
     },
     {
+      "id": 5,
       "type": "stat",
       "title": "Pool status",
       "datasource": {
@@ -229,6 +234,7 @@
       }
     },
     {
+      "id": 6,
       "type": "gauge",
       "title": "Pool used",
       "datasource": {
@@ -292,6 +298,7 @@
       }
     },
     {
+      "id": 7,
       "type": "stat",
       "title": "Days since scrub",
       "datasource": {
@@ -356,6 +363,7 @@
       }
     },
     {
+      "id": 8,
       "type": "timeseries",
       "title": "Pool capacity",
       "datasource": {
@@ -425,6 +433,7 @@
       }
     },
     {
+      "id": 9,
       "type": "row",
       "title": "Disk I/O",
       "collapsed": false,
@@ -437,6 +446,7 @@
       "panels": []
     },
     {
+      "id": 10,
       "type": "timeseries",
       "title": "Disk reads",
       "description": "Per-drive read throughput as reported by netdata's TrueNAS disk collector.",
@@ -496,6 +506,7 @@
       }
     },
     {
+      "id": 11,
       "type": "timeseries",
       "title": "Disk writes",
       "description": "Per-drive write throughput. A sustained write across all five HDDs at once is usually a resilver or a large ingest.",
@@ -555,6 +566,7 @@
       }
     },
     {
+      "id": 12,
       "type": "row",
       "title": "ZFS ARC",
       "collapsed": false,
@@ -567,6 +579,7 @@
       "panels": []
     },
     {
+      "id": 13,
       "type": "timeseries",
       "title": "ARC size and memory",
       "description": "ARC size against available and free memory. The VM has 24GB; a healthy ARC grows to fill what it is allowed and stays there.",
@@ -650,6 +663,7 @@
       }
     },
     {
+      "id": 14,
       "type": "timeseries",
       "title": "ARC hit ratios",
       "description": "Cache effectiveness. Metadata hit rate matters most for a media library: it is what makes directory traversal fast. A sustained collapse in demand-data hit rate usually means a working set larger than ARC, not a fault.",
@@ -735,6 +749,7 @@
       }
     },
     {
+      "id": 15,
       "type": "row",
       "title": "System",
       "collapsed": false,
@@ -747,6 +762,7 @@
       "panels": []
     },
     {
+      "id": 16,
       "type": "timeseries",
       "title": "CPU usage",
       "description": "VM 200 is allocated 4 cores. Sustained saturation during a scrub is normal; sustained saturation at idle is not.",
@@ -855,6 +871,7 @@
       }
     },
     {
+      "id": 17,
       "type": "timeseries",
       "title": "Memory",
       "description": "Total vs available memory. On ZFS, low 'available' is usually ARC doing its job rather than pressure \u2014 read it together with the ARC panel.",
