@@ -35,13 +35,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: No log lines reached VictoriaLogs in the last 5 minutes.
-          description: >-
-            The `_time:5m | count()` row count in VictoriaLogs is 0, so nothing is
-            being ingested — Vector is wedged, cannot authenticate, or is not
-            running. Check `docker logs vector` on eq12_docker. If the disk buffer is
-            the cause, the reset runbook is
-            docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md.
+          summary: No log lines reached VictoriaLogs in the last 5 minutes — from any host or source.
+          description: |-
+            The whole ingest path is down: Vector on eq12_docker is wedged, cannot authenticate, or is not running.
+            Check `docker logs vector` on eq12_docker; a wedged disk buffer has its own runbook (linked).
+          runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
         labels:
           severity: critical
           component: log-pipeline
@@ -155,6 +153,28 @@ groups:
       # affected and stays live: measured over the same 24h it had ZERO empty 5m
       # buckets with a MINIMUM of 88 records per bucket — an ~88x margin, not a 1x
       # one. Docker traffic is genuinely continuous. Do not pause it by analogy.
+      #
+      # MECHANISM: the usual cause is rsyslog no longer routing to
+      # /var/log/structured.log — the file every Vector in the fleet tails for ALL
+      # host logs since #143. It is written by
+      # /etc/rsyslog.d/40-vector-structured.conf; the human-facing /var/log/syslog
+      # and /var/log/auth.log are written by separate rules and can keep growing
+      # while this one is dead, so their size proves nothing. Confirm the drop-in
+      # is present, and that no drop-in sorting before it ends the ruleset with
+      # `stop`.
+      #
+      # SCOPE, since #134: this query spans ALL FOUR hosts (eq12, eq12_docker,
+      # n5pro, n5pro_docker), so for it to reach zero every shipper in the fleet
+      # must be silent — which points at VictoriaLogs itself or at something
+      # fleet-wide, not at one host's rsyslog. ONE dead host is
+      # obs-host-log-ingest-stalled-per-host's job and names the host in its
+      # summary; this rule firing while that one is quiet is the fleet-wide case.
+      #
+      # Re-running a host's deploy re-asserts the whole path — it writes a
+      # `logger` marker and waits for it to come back out of VictoriaLogs:
+      # `--tags observability --limit eq12_docker` for the container,
+      # `ansible-playbook playbooks/log-agents.yml --limit <host>` for the three
+      # native agents.
       - uid: obs-host-log-ingest-stalled
         title: Host log ingest stalled
         condition: C
@@ -165,30 +185,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: No host syslog lines reached VictoriaLogs in the last 10 minutes.
-          description: >-
-            `_time:10m source:host | count()` is 0. Docker logs may still be
-            flowing, which is why the all-sources rule does not catch this. The
-            usual cause is rsyslog no longer routing to /var/log/structured.log —
-            the file every Vector in the fleet tails for ALL host logs since #143.
-            It is written by /etc/rsyslog.d/40-vector-structured.conf; the
-            human-facing /var/log/syslog and /var/log/auth.log are written by
-            separate rules and can keep growing while this one is dead, so their
-            size proves nothing.
-            SCOPE, since #134: this query spans ALL FOUR hosts (eq12, eq12_docker,
-            n5pro, n5pro_docker), so for it to reach zero every shipper in the fleet
-            must be silent — which points at VictoriaLogs itself or at something
-            fleet-wide, not at one host's rsyslog. ONE dead host is
-            obs-host-log-ingest-stalled-per-host's job and names the host in its
-            summary; this rule firing while that one is quiet is the fleet-wide
-            case.
-            Check `systemctl status rsyslog` on the affected host(s), confirm the
-            drop-in is present, and confirm no drop-in sorting before it ends the
-            ruleset with `stop`. Re-running that host's deploy re-asserts the whole
-            path — it writes a `logger` marker and waits for it to come back out of
-            VictoriaLogs: `--tags observability --limit eq12_docker` for the
-            container, `ansible-playbook playbooks/log-agents.yml --limit <host>`
-            for the three native agents.
+          summary: No host syslog reached VictoriaLogs in 10 minutes — from any of the four hosts.
+          description: |-
+            Every shipper silent at once points at VictoriaLogs or something fleet-wide; a single dead host fires the per-host heartbeat rule instead.
+            Check `systemctl status rsyslog` and that /var/log/structured.log is still growing on any host.
         labels:
           severity: critical
           component: log-pipeline
@@ -278,6 +278,12 @@ groups:
       #
       # `source:pkg` deliberately gets NO twin: those files are quiet by nature
       # and an absence rule on them would be noise. #154 says so explicitly.
+      #
+      # WHERE TO LOOK: usual causes are Vector's docker_logs source wedged, the
+      # docker socket bind-mount lost or its permissions changed, or Vector itself
+      # down. `docker logs vector` on eq12_docker is the first stop — the
+      # container's own stderr is ALSO in VictoriaLogs as container_name:vector,
+      # and that copy survives a recreate.
       - uid: obs-docker-log-ingest-stalled
         title: Docker log ingest stalled
         condition: C
@@ -288,19 +294,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: No docker container lines reached VictoriaLogs in the last 10 minutes.
-          description: >-
-            `_time:10m source:docker | count()` is 0. Host syslog may still be
-            flowing, which is why neither the all-sources rule nor the source:host
-            rule catches this. Measured floor in health is 712 records per 10m
-            window, so zero means collection stopped, not that the containers went
-            quiet. Usual causes: Vector's docker_logs source wedged, the docker
-            socket bind-mount lost or its permissions changed, or Vector itself
-            down. Check `docker logs vector` on eq12_docker (the container's own
-            stderr is also in VictoriaLogs as container_name:vector, and that copy
-            survives a recreate), and that /var/run/docker.sock is still mounted.
-            SCOPE: source:docker comes from eq12_docker AND n5pro_docker, so this
-            firing means BOTH stopped; one alone keeps it Normal.
+          summary: No docker container logs reached VictoriaLogs in 10 minutes.
+          description: |-
+            Healthy floor is ~700 lines per 10 minutes, so collection stopped — and this only fires when both docker hosts stop at once.
+            Check `docker logs vector` and that /var/run/docker.sock is still mounted.
         labels:
           severity: critical
           component: log-pipeline
