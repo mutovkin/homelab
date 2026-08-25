@@ -114,12 +114,15 @@ groups:
                 uid: P4169E866C3094E38
               # last_over_time, NOT an instant read — see property 1 in the header.
               # `by (devname)` keeps one alert instance per drive so a notification
-              # names WHICH disk. NOTE: the notification policy's group_by still
-              # says `disk`, a pre-#174 label the expr no longer produces — two
-              # drives firing together therefore collapse into one [FIRING:2]
-              # notification; tracked in #188. Do NOT "fix" the expr to by
-              # (disk) to match the policy — that would empty every
-              # {{ $labels.devname }} in the summaries.
+              # names WHICH disk. The notification policy's group_by now carries
+              # `devname` too (#188 — it said `disk`, a pre-#174 label this expr
+              # has never produced, so two drives firing together collapsed into
+              # one [FIRING:2] naming neither). The two files are a MATCHED PAIR:
+              # if they ever diverge again, fix the POLICY, never this expr —
+              # rewriting it to by (disk) would empty every $labels.devname
+              # interpolation in the summaries. The deploy-time group_by assert
+              # in the role's tasks/main.yml is what makes such a divergence
+              # loud instead of silent.
               expr: >-
                 max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas",
                 media="hdd"}[10m]))
