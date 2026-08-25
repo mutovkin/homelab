@@ -281,15 +281,70 @@ series of its own; a second docker-metrics collector is a separate decision.
 
 **Collected:** `cpu` (per-core and total), `mem`, `swap`, `disk`, `diskio`,
 `net`, `netstat`, `kernel`, `processes`, `system` (load/uptime), `zfs` (ARC
-kstats from `/proc/spl/kstat/zfs`), `sensors` (below), and `smart` (NVMe wear,
-available spare, power-on hours, media errors — 14 `smart_device_*` series).
-Interval 60 s.
+kstats from `/proc/spl/kstat/zfs`), `sensors` (below), `smart` (NVMe wear,
+available spare, power-on hours, media errors — 14 `smart_device_*` series), and
+RAPL package power (below, #194). Interval 60 s.
 
-**Power** is partially covered: `amdgpu`'s `power1_average` / `power1_input` come
-through the `sensors` input, so iGPU package draw is measured. CPU-package RAPL
-(`energy_uj`) is **not** — it is deferred to #194, which the agent's privilege
-model already accommodates as a config addition. No fan input exists here at all;
-see the negative result below.
+No fan input exists here at all; see the negative result below.
+
+### Power (RAPL + amdgpu PPT, #194)
+
+Two independent power surfaces are measured on this machine, and they are **not
+additive**:
+
+- **CPU package**, from `/sys/class/powercap` via the RAPL exec input (#194).
+- **iGPU package tracking power**, from `amdgpu`'s `power1_average` /
+  `power1_input` through the `sensors` input that #186 already deployed — the
+  host-side view of what CT 201's VAAPI workloads cost. #194 added no collection
+  for this; the dashboard consumes the series that were already flowing.
+
+`/sys/class/powercap` exposes **two** RAPL domains here (the AMD box included:
+`intel_rapl_msr` drives it), enumerated 2026-08-25. The `domain` tag comes from
+the sysfs `name` file, never the index.
+
+| sysfs node | `name` | `max_energy_range_uj` | measured idle |
+| ---------- | ------ | --------------------- | ------------- |
+| `intel-rapl:0` | `package-0` | 65532610987 | 5.7–5.8 W |
+| `intel-rapl:0:0` | `core` | 65532610987 | 0.04 W |
+
+There is **no `uncore` domain** on this Zen5 part. Nothing may assume eq12's
+three-domain shape here, or this one there.
+
+**The 0.04 W core reading is REAL — this is the negative of a negative, and it
+was measured rather than argued.** A domain reading ~0 W looks exactly like the
+fabricated `vddgfx`/`vddnb` zeros this host drops at the source, so it was
+load-tested on 2026-08-25:
+
+| state | `package-0` | `core` |
+| ----- | ----------- | ------ |
+| idle | 5.79 W | 0.04 W |
+| 6 s single-core busy loop | 22.44 W | 4.41 W |
+| idle again | ~5.8 W | ~0.04 W |
+
+A fabricated reading is flat; this tracks load faithfully. The 0.04 W idle is
+genuine Zen5 core power-gating — idle package power here is SoC/fabric/iGPU, not
+cores. The domain is exported.
+
+**The wrap math, and why it matters more on this box.** `max_energy_range_uj` is
+**65532610987 µJ (65.5 kJ)**, a quarter of eq12's 262.1 kJ range on the host
+that also idles nearly three times higher. At the measured 5.8 W idle that is a
+rollover roughly every **3 hours**; at the measured 22 W load, under an hour —
+against eq12's day and a half. A raw counter plus PromQL `rate()` would therefore be
+correct for a while and then cliff at every wrap, repeatedly — Prometheus reset
+semantics assume a reset to zero, and a modulo wrap loses `(max − e0)`. So
+[`roles/telegraf_agent/files/rapl_power.sh`](../ansible/roles/telegraf_agent/files/rapl_power.sh)
+samples twice 2 s apart and corrects **inside its own window**: a negative delta
+there is exactly one wrap (a double wrap in 2 s would need >16 kW), so it adds
+the domain's own `max_energy_range_uj` and exports watts.
+
+**RAPL is CPU package power, NOT wall power.** It excludes the NVMe, the fans,
+PSU losses and — the big one on this machine — the five drive bays. There is no
+machine total for n5pro anywhere in this stack. Dashboard: `hosts-power`
+("Hosts — CPU package power").
+
+Reading `energy_uj` needs privilege (`-r-------- root root`) and gets it from the
+ambient `CAP_DAC_OVERRIDE` the unit already carries for NVMe SMART — no unit or
+privilege change was made for this.
 
 ### Measured sensor surface
 
