@@ -1,0 +1,269 @@
+{
+  "uid": "hosts-power",
+  "title": "Hosts — CPU package power",
+  "description": "RAPL package/domain power and amdgpu PPT. This is CPU PACKAGE power, not wall power — it excludes NVMe, fans, PSU loss and (n5pro) the five drive bays. No machine total exists here.",
+  "tags": [
+    "hosts",
+    "power",
+    "telegraf"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "",
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU package power (RAPL package-0)",
+      "description": "The package-0 RAPL domain of each physical Proxmox host, in watts, from the native telegraf agent's exec input (#194). This is CPU PACKAGE power, not wall power — it excludes NVMe, fans, PSU loss and (n5pro) the five drive bays. No machine total exists here. Every rapl_power_watts sample is a 2 s spot measurement taken once per 60 s collection interval, not a 60 s average (files/rapl_power.sh is deliberately stateless — a state file would add reboot and stale-state failure classes, since a boot resets energy_uj and wrap-correction would turn that into a fabricated spike). Short bursts between samples are therefore invisible.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "rapl_power_watts{domain=\"package-0\"}",
+          "legendFormat": "{{host}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 180000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Package power now",
+      "description": "Latest package-0 reading per host. This is CPU PACKAGE power, not wall power — it excludes NVMe, fans, PSU loss and (n5pro) the five drive bays. No machine total exists here. No thresholds: neither board has a measured package-power ceiling here that a colour could honestly mean, and no alert rule is paired with this dashboard — per-family absence design belongs to #202.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "rapl_power_watts{domain=\"package-0\"}",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "RAPL domains — 2 s spot sample per minute",
+      "description": "Every domain each host exposes, tagged from the sysfs `name` file rather than the (boot-unstable) index: eq12 reports package-0, core and uncore, n5pro package-0 and core — the shapes genuinely differ and nothing here hard-wires either. n5pro's core reading of roughly 0.04 W at idle is REAL, not a fabricated zero: it is Zen5 core power-gating, and a 6 s single-core load moved it to 4.41 W while the package went 5.79 → 22.44 W (measured 2026-08-25). eq12's uncore sitting at 0 at idle is likewise real — an idle iGPU. A domain that cannot be READ is absent rather than zero. Every rapl_power_watts sample is a 2 s spot measurement taken once per 60 s collection interval, not a 60 s average (files/rapl_power.sh is deliberately stateless — a state file would add reboot and stale-state failure classes, since a boot resets energy_uj and wrap-correction would turn that into a fabricated spike). Short bursts between samples are therefore invisible.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "rapl_power_watts",
+          "legendFormat": "{{host}} — {{domain}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 180000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "n5pro iGPU (amdgpu PPT)",
+      "description": "The host-side cost of CT-201's VAAPI workloads (Frigate, Immich), from the amdgpu chip's ppt feature via the sensors input that #186 already deployed — this panel adds no collection. It is the iGPU package tracking power, separate from and not additive with the RAPL domains above. eq12 has no equivalent series: it is an Intel N100 whose iGPU power is inside the package-0 domain.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sensors_power1_average{chip=\"amdgpu-pci-c700\", host=\"n5pro\"}",
+          "legendFormat": "iGPU PPT",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 180000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max",
+            "mean"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}
