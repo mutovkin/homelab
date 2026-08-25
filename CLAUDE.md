@@ -446,6 +446,16 @@ Hard-won lessons — check here before debugging from scratch.
   `delta + max >= 0`), and a counter RESET was therefore converted into a measured
   261339.76 W from a 6 W part. Excluded domains are dropped, not relabelled: a per-core
   series sharing a metric name with `package-0` invites a sum that is always wrong.
+  Two more from the same issue, both generalisable. **A bound that fails OPEN when its own
+  input is unvalidated is not a bound:** a plausibility ceiling passed to awk as a
+  non-numeric `-v` value made `watts > ceiling` a STRING comparison, so every implausible
+  reading passed and the guard silently stopped guarding — a guard's inputs are part of the
+  guard. **A pinned dependency's own deprecation warnings are the bump-blocker list:** the
+  hosts had been logging `inputs.exec ... deprecated since 1.39.0 and will be removed in
+  1.45.0` on every start for the deployment's whole life, unread because everything worked;
+  where a version is pinned and bumped deliberately, a deprecation is a scheduled outage.
+  And the deprecation was of the value FORM, not of embedded whitespace — a single-token
+  command warned identically, so don't assume the simple case is exempt.
   See [docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md](docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md).
 
 ## Conventions

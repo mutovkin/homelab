@@ -118,9 +118,11 @@
 # read two real tachometers (measured 2026-08-25), but that is unpersisted, not
 # collected, and pending an operator decision — see docs/eq12.md.
 # Never graph or label this series as RPM.
-# Array argv and log_stderr for the same two reasons as the RAPL block below:
-# the joined-string form is removed in telegraf 1.45.0, and stderr from a
-# zero-exit run is discarded unless asked for.
+# Array argv and log_stderr for the same two reasons as the RAPL block below.
+# NOTE the deprecation is NOT about spaces: what 1.39.0 deprecated is the FLAT
+# element form `commands = ["cmd"]` as such, and this single-token command warned
+# on every start exactly like the RAPL one with its argument (measured on eq12).
+# A future third exec input with a one-word command needs the nested form too.
 [[inputs.exec]]
   commands = [["/usr/local/lib/telegraf/acpi_fan_state.sh"]]
   timeout = "5s"
@@ -159,11 +161,16 @@
 # bare tokens before templating them into this TOML string.
 # RAPL is PACKAGE power, never wall power.
 #
-# ARGV AS A NESTED ARRAY, not a joined string. telegraf deprecated the
-# space-joined form in 1.39.0 and REMOVES it in 1.45.0 — measured, both hosts log
-# `DeprecationWarning: ... Use array syntax instead` on every start. Past that
-# version the whole string is taken as one path and this input dies, so the form
-# that survives a pinned-version bump is the one written here.
+# ARGV AS A NESTED ARRAY. telegraf deprecated the FLAT element form
+# (`commands = ["cmd"]`) in 1.39.0 and REMOVES it in 1.45.0 — measured, both
+# hosts logged `DeprecationWarning: ... Use array syntax instead` on every start,
+# including for a command with NO arguments and no spaces. The deprecation is of
+# the value FORM, not of embedded whitespace; do not conclude a one-word command
+# is exempt. Past 1.45.0 this input stops loading, so the form written here is
+# the one that survives the next telegraf_agent_version bump.
+#
+# A pinned dependency's own deprecation warnings are the bump-blocker list: read
+# the journal of the version you pinned, not just the release notes of the next.
 #
 # log_stderr because the script's diagnostics are otherwise THROWN AWAY on the
 # only path that produces them. inputs.exec surfaces stderr by itself only when

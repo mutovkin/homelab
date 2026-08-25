@@ -246,8 +246,9 @@ advancing* — a domain the driver still exposes while the firmware has stopped
 updating it. Measured: with `energy_uj` static across both passes the script
 emits `power_watts=0.000000`, which is a faithful reading of the counter (energy
 consumed in the window really was below 1 uJ) and is therefore NOT suppressed at
-the source — eq12's `uncore` legitimately reads exactly that at idle, and its
-24 h max is 0.000182 W. But the two absence rules count DOMAINS, and a frozen
+the source — eq12's `uncore` legitimately reads exactly that at idle (24 h max
+0.000182 W measured 2026-08-25, 0.000243 W on a re-read the same day — the figure
+drifts, the point does not: the counter advances, so the domain is live). But the two absence rules count DOMAINS, and a frozen
 domain is still present, so neither fires. `package-0` can never legitimately be
 0 W on a running host, so the detector would be a rule of the shape
 `max_over_time(rapl_power_watts{domain="package-0"}[6h]) == 0` with

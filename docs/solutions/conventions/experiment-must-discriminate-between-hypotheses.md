@@ -158,6 +158,25 @@ single-quoted shell string, and an apostrophe inside an awk **comment** (the wor
 interpreters against the interpreter **on the host**, and when awk reports an unbalanced
 brace, look for a quote before you look for a brace.
 
+**A bound that fails OPEN when its own input is unvalidated.** The plausibility ceiling
+added above was passed to awk as `-v ceiling="$RAPL_MAX_PLAUSIBLE_WATTS"`. awk takes a
+non-numeric `-v` value as a **string**, so `watts > ceiling` silently became a string
+comparison (`"2.32" > "abc"` is false) and every implausible reading passed. The guard
+stopped guarding without any sign. A guard's own inputs are part of the guard: validate
+them, and prefer failing closed. (Measured: `RAPL_MAX_PLAUSIBLE_WATTS=abc` → all domains
+emitted, nothing rejected.)
+
+**A pinned dependency's deprecation warnings are the bump-blocker list.** The same change
+shipped `commands = ["/path/script arg"]` to telegraf, which had deprecated that form in
+1.39.0 and removes it in **1.45.0** — and said so in the hosts' own journal on every single
+start, for the whole life of the deployment. Nobody had read it, because everything worked.
+This repo pins `telegraf_agent_version` and bumps deliberately, which is exactly the setup
+where a deprecation is a scheduled outage rather than a warning. Read the journal of the
+version you pinned, not just the release notes of the version you are moving to. A related
+trap in the same finding: the deprecation was of the *value form*, not of embedded
+whitespace, so a single-token command warned identically — do not assume the simple case is
+exempt from a deprecation you have only seen on the complex one.
+
 The thing that caught both was the role's existing pre-flight assert — it runs
 `telegraf --test` and requires each declared family in the **output**, so a collector that
 parses on the author's laptop and dies on the host fails the deploy instead of quietly

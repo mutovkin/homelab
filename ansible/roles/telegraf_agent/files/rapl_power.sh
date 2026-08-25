@@ -73,10 +73,16 @@ root="${RAPL_SYSFS_ROOT:-/sys/class/powercap}"
 # would sail through: the guard would fail OPEN, which is the wrong direction for
 # a guard (CLAUDE.md). Only reachable through the debug override, but a guard
 # that silently stops guarding is exactly the failure class this file is about.
+# No '' arm: `:-` substitutes the default for unset AND null, so $ceiling is
+# never empty here and such an arm could never fire — the same unfalsifiable
+# shape this file just deleted from the wrap branch. '.' IS reachable (one dot,
+# no other characters) and is rejected by name; without it awk would take "." as
+# a string, every comparison would be a string compare, and the script would
+# discard everything and exit 1 — failing closed, but with a baffling message.
 ceiling="${RAPL_MAX_PLAUSIBLE_WATTS:-1000}"
 case "$ceiling" in
-  '' | *[!0-9.]* | *.*.*)
-    echo "rapl_power.sh: RAPL_MAX_PLAUSIBLE_WATTS=$ceiling is not a number" >&2
+  '.' | *[!0-9.]* | *.*.*)
+    echo "rapl_power.sh: RAPL_MAX_PLAUSIBLE_WATTS=$ceiling must be a plain decimal number (no exponent, no sign)" >&2
     exit 1
     ;;
 esac

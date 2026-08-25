@@ -200,6 +200,13 @@ telegraf_agent_forbidden_test_output: []
 # a CPU0-only counter could not see. That is the positive control for the n5pro
 # negative: same sysfs path, same domain name, different board, opposite answer.
 #
-# uncore is the iGPU. It is flat at idle because there is nothing drawing, not
-# because it is unsupported.
+# uncore is the iGPU. Its counter DOES advance — measured 2026-08-25, 122 uJ over
+# 10 s and 488 uJ over 60 s (~10 uW), and a 24 h max of 0.000243 W in
+# VictoriaMetrics — so it is live rather than frozen or unsupported. At the
+# script's ~1 s sample window that is well under the counter's quantum, so most
+# samples read exactly 0.000000: a real reading of a headless idle iGPU.
+# NOT ESTABLISHED: whether it TRACKS a real render load. That needs the same
+# load-placement discipline applied to /dev/dri (a VAAPI/render job on this box),
+# which was not run — no GPU workload tool is installed and installing one is a
+# host change. Do not upgrade this to "tracks iGPU power" without that test.
 telegraf_agent_rapl_expected_domains: [package-0, core, uncore]

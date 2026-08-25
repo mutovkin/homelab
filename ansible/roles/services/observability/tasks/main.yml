@@ -262,15 +262,24 @@
         _threshold: >-
           {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
              .model.conditions[0].evaluator.params[0] }}
+        _evaluator: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.type }}
       ansible.builtin.assert:
         that:
           - _threshold | int == hostvars[_host].telegraf_agent_rapl_expected_domains | length
+          # The COUNT alone is not the rule: `lt` is what makes a low count mean
+          # "domains went missing". An lt->gt edit would invert the rule into one
+          # that fires whenever collection is HEALTHY and never when it breaks,
+          # while the count still matched and this guard still passed.
+          - _evaluator == 'lt'
         fail_msg: >-
-          Alert rule {{ item.uid }} fires below {{ _threshold }} domains, but
+          Alert rule {{ item.uid }} fires {{ _evaluator }} {{ _threshold }} domains, but
           {{ _host }} declares
           {{ hostvars[_host].telegraf_agent_rapl_expected_domains | length }}
           ({{ hostvars[_host].telegraf_agent_rapl_expected_domains }}) in its
-          host_vars. These are two copies of one fact and they have drifted. If
+          host_vars, with comparison `{{ _evaluator }}` (must be `lt`). These are
+          two copies of one fact and they have drifted. If
           the domain set changed, the threshold moves WITH it in the same change:
           a threshold above the real count fires forever, one below it stops
           detecting partial loss — the failure the count shape exists to catch.

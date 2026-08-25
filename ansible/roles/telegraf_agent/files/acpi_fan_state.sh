@@ -16,8 +16,23 @@
 for d in /sys/class/thermal/cooling_device*; do
   [ -r "$d/type" ] || continue
   [ "$(cat "$d/type")" = "Fan" ] || continue
-  cur=$(cat "$d/cur_state" 2>/dev/null) || continue
-  case "$cur" in ''|*[!0-9]*) continue ;; esac
+  # A device that IS a Fan but whose state cannot be read is a PARTIAL LOSS: the
+  # series thins by one and the deploy's 5-object count is the only thing that
+  # would ever notice, once, at deploy time. Say so on stderr — telegraf's exec
+  # input is configured with log_stderr, so this reaches the journal even though
+  # the script exits 0 (it does NOT surface stderr from a zero exit otherwise).
+  # The two filters above are deliberately silent: most cooling_device* nodes are
+  # legitimately not fans, and warning about them would be noise, not signal.
+  if ! cur=$(cat "$d/cur_state" 2>/dev/null); then
+    echo "acpi_fan_state.sh: ${d##*/} is a Fan but cur_state is unreadable; emitting nothing for it" >&2
+    continue
+  fi
+  case "$cur" in
+    '' | *[!0-9]*)
+      echo "acpi_fan_state.sh: ${d##*/} cur_state is not an integer ($cur); emitting nothing for it" >&2
+      continue
+      ;;
+  esac
   printf 'acpi_fan_state,device=%s state=%si\n' "${d##*/}" "$cur"
 done
 exit 0
