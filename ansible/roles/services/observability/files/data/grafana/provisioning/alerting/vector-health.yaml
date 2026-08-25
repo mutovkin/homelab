@@ -261,6 +261,10 @@ groups:
         # There is no `docker exec` on a distroless image, so to check that
         # VM_AUTH_USERNAME/VM_AUTH_PASSWORD actually reached the vector container,
         # read /data/deploy/observability/.env instead.
+        #
+        # This is ALSO what fires when Vector is simply gone — total death and
+        # metrics-only death both land here; the body leads with the partial
+        # case because it is the one nothing else catches.
         noDataState: Alerting
         execErrState: Alerting
         isPaused: false
