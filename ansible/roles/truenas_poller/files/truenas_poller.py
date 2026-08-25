@@ -200,7 +200,7 @@ def collect(client):
     # (1) alert/source/smart.py defines EXACTLY the four SMART* alert classes
     #     pinned above, levels included; (2) no SMARTUnrecognizedAlertClass
     #     exists, so this synthetic klass cannot collide with a real one. Both
-    #     checks were run across all 73 alert/source/*.py at that tag (148
+    #     checks were run across all 70 alert/source/*.py at that tag (148
     #     AlertClass definitions), not just smart.py, because the klass
     #     namespace is global — AlertClass.class_by_name is keyed on the class
     #     name minus "AlertClass" (alert/base.py).

@@ -59,9 +59,10 @@ data. Klass→level pairs are pinned in `SMART_ALERT_KLASSES` (from middleware
 `release/26.0.0-BETA.2`); extending coverage is a deliberate code change.
 Dismissing an alert in the TrueNAS UI zeroes the series — dismissal is the ack
 mechanism. The `truenas-smart-degradation` rule over this series is
-deliberately NOT in this change: it lands with the alerting-file work batched
-behind #187 (see #183's deferral comment), and must inherit the dismissal
-semantics by firing on value > 0.
+deliberately NOT in this change: deferred 2026-08-24 to the alerting-file work
+batched behind #187 (which rewrites `alerting/*.yaml` wholesale); #183 stays
+open until it lands, and the rule must inherit the dismissal semantics by
+firing on value > 0.
 
 **Five series: 4 pinned + 1 catch-all.** `SMARTUnrecognized` counts un-dismissed
 alerts whose klass starts with `SMART` but is not one of the four. The pinned map
@@ -70,9 +71,19 @@ all four series at a healthy `0` while the real alert fired under a name nothing
 counted — silent, and shaped exactly like health. The catch-all makes drift and
 newly added SMART classes fire instead. Its residual is the prefix heuristic
 itself: a klass renamed *away* from `SMART` evades it. Verified 2026-08-24
-against `release/26.0.0-BETA.2` across all 73 `alert/source/*.py` (148 alert
+against `release/26.0.0-BETA.2` across all 70 `alert/source/*.py` (148 alert
 classes): exactly four `SMART*` classes exist, and no `SMARTUnrecognized`
 collision.
+
+**Two of the four pinned klasses are structurally 0 on this appliance, and their
+zeros are not evidence of drive health.** `SMARTSpareBlockCount` and
+`SMARTEraseCycleCount` are raised only by `micron_phison_check()`, which returns
+early unless the system is enterprise-licensed AND the drive model starts with
+`Micron_5210` or `QSP`. Verified 2026-08-24: this appliance runs Seagate Exos
+`ST26000NM000C` HDDs, consumer `WD_BLACK SN850X` NVMe and a `QEMU_HARDDISK`
+virtual disk, so the model gate alone pins both series to 0 forever regardless
+of licence. `SMARTUncorrectedErrors` and `SMARTFailedSelfTest` are the two that
+`check_sync()` raises unconditionally per disk — they are the live ones here.
 
 **Two operator actions zero these series, and only one is visible.**
 (a) Per-alert **dismissal** — an explicit ack, above. (b) A class-wide
