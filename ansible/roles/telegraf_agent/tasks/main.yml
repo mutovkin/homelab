@@ -810,13 +810,23 @@
 # modes — a missing lm-sensors binary, a renamed chip, a filter that dropped more
 # than it meant to. The --test assert above proves the AGENT produced them; this
 # proves they reached STORAGE, which is a different claim.
+#
+# THE STORED NAMES CARRY THE NUMBER, MEASURED 2026-08-25 on the live store during
+# the first eq12 apply. `remove_numbers = false` in telegraf.conf.j2 is there to
+# keep eq12's core_0..core_3 from merging into one series — but it keeps the
+# digit in the FIELD name as well as in the feature tag, so prometheusremotewrite
+# names the series sensors_temp1_input .. sensors_temp5_input (plus the _max /
+# _crit / _alarm siblings). There is NO `sensors_temp_input` in the store and
+# there never was; a query for that bare name is a guaranteed empty result, which
+# is exactly how this assert first failed — correctly, and for the reason its own
+# fail_msg named. Hence the regex over __name__ rather than a literal.
 - name: Wait for this host's sensor temperatures to reach VictoriaMetrics
   ansible.builtin.uri:
     url: "{{ victoriametrics_query_endpoint }}"
     method: POST
     body_format: form-urlencoded
     body:
-      query: 'count(sensors_temp_input{host="{{ inventory_hostname }}"})'
+      query: 'count({__name__=~"sensors_temp[0-9]+_input", host="{{ inventory_hostname }}"})'
     url_username: "{{ vault_vm_auth_username }}"
     url_password: "{{ vault_vm_auth_password }}"
     force_basic_auth: true
@@ -837,14 +847,17 @@
       - telegraf_agent_sensors_arrival.status | default(0) == 200
       - telegraf_agent_sensors_arrival.json.data.result | default([]) | length > 0
     fail_msg: >-
-      sensors_temp_input{host="{{ inventory_hostname }}"} has no series in
+      No sensors_temp<N>_input series for host="{{ inventory_hostname }}" in
       VictoriaMetrics, although `telegraf --test` produced the declared chips on
       this host (the assert above passed). So the thermal surface exists at the
       agent and is not arriving — check `journalctl -u telegraf -n 100` for
-      output errors, and confirm the stored metric NAME with
+      output errors, and confirm the stored metric NAMES with
       `curl -su "$U:$P" '{{ victoriametrics_query_endpoint | regex_replace('/query$', '') }}/label/__name__/values'`
-      | grep sensors — prometheusremotewrite names a series
-      <measurement>_<field>, so a telegraf-side rename would move it.
+      | grep sensors. prometheusremotewrite names a series
+      <measurement>_<field>, and with remove_numbers=false the field keeps its
+      digit — measured 2026-08-25, the real names are sensors_temp1_input ..
+      sensors_temp5_input. If a telegraf-side change moved them, fix the regex
+      above to the measured form rather than widening it to match anything.
       HTTP status was {{ telegraf_agent_sensors_arrival.status | default('none') }}.
     quiet: true
   when: not ansible_check_mode
