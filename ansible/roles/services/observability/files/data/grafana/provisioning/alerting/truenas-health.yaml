@@ -71,6 +71,8 @@ groups:
     interval: 1m
     rules:
       # ---------------------------------------------------------------------
+      # warning = look when convenient; the deep link lands on the Disk temperature panel.
+      # 47C on a 26TB Exos is still well inside the drive's rated operating range.
       - uid: truenas-hdd-temp-warning
         title: TrueNAS HDD temperature above 47C
         condition: C
@@ -83,19 +85,11 @@ groups:
         annotations:
           summary: >-
             TrueNAS disk {{ $labels.devname }} is at {{ $values.B }}C (warning above 47C).
-          description: >-
-            A 26TB Exos drive is running warmer than its normal 38-41C band.
-            This is an EARLY WARNING, well inside the drive's rated operating
-            range — it means look, not act. Common benign causes: a scrub or
-            resilver driving sustained load, or high ambient temperature.
-            Check the NAS dashboard for whether the whole array rose together
-            (ambient/airflow) or one drive diverged (that drive, or its slot).
-            If several drives cross together, suspect chassis airflow before
-            suspecting the disks.
-            The critical companion rule fires at 52C.
-            Drives are selected by media="hdd", which #174's poller derives from
-            the disk's rotation rate — so a replaced drive is picked up
-            automatically and needs no change here.
+          description: |-
+            Normal band is 38-41C; the critical rule fires at 52C.
+            Likely a scrub/resilver or ambient heat — several drives rising together points at chassis airflow, one drive alone at that disk or its slot.
+          __dashboardUid__: nas-truenas
+          __panelId__: "3"
         labels:
           severity: warning
           # Routed to BOTH channels by the nas-thermal route in
@@ -161,6 +155,8 @@ groups:
                     params:
                       - 47
       # ---------------------------------------------------------------------
+      # Sustained operation at this temperature shortens drive life. The 47C
+      # warning rule will already have fired for this drive.
       - uid: truenas-hdd-temp-critical
         title: TrueNAS HDD temperature above 52C
         condition: C
@@ -170,15 +166,12 @@ groups:
         isPaused: false
         annotations:
           summary: >-
-            TrueNAS disk {{ $labels.devname }} is at {{ $values.B }}C (CRITICAL above 52C).
-          description: >-
-            Act now. Sustained operation at this temperature shortens drive life
-            and, across an array, raises the chance of a second failure during a
-            resilver — the scenario that turns a degraded pool into a lost one.
-            Check chassis airflow and fans first; if a scrub or resilver is
-            running, consider pausing it until temperature returns to the normal
-            38-41C band.
-            The 47C warning rule will already have fired for this drive.
+            TrueNAS disk {{ $labels.devname }} is at {{ $values.B }}C (critical above 52C).
+          description: |-
+            Act now: check chassis fans and airflow, and pause any running scrub or resilver until it cools toward the 38-41C band.
+            Heat like this during a resilver is how a degraded pool becomes a lost one.
+          __dashboardUid__: nas-truenas
+          __panelId__: "3"
         labels:
           # critical routes to homelab-critical = both channels, unconditionally.
           severity: critical
@@ -234,6 +227,20 @@ groups:
                     params:
                       - 52
       # ---------------------------------------------------------------------
+      # Since #174 the thermal+pool rules read the API poller — this stream feeds DASHBOARDS; its loss is a telemetry outage, not thermal blindness (that is truenas-poller-absent's job).
+      #
+      # KNOWN CAUSE, measured in #173: TrueNAS reports the reporting exporter as
+      # enabled and correct while netdata has NOT loaded it, and nothing reachable
+      # with REPORTING_WRITE forces a reload. Reading the config back therefore
+      # proves nothing. What worked was toggling it through Ansible and waiting a
+      # few minutes:
+      #   ansible-playbook playbooks/truenas.yml -e truenas_exporter_enabled=false
+      #   ansible-playbook playbooks/truenas.yml
+      # Also check, in order: the exporter still exists (playbooks/truenas.yml is
+      # green), telegraf is up on eq12_docker and listening on :2003, and the
+      # nftables allowlist still grants 192.168.30.20/32 — that grant is a source
+      # /32, so if the NAS ever moves address its metrics are dropped silently with
+      # no application-level error.
       - uid: truenas-metrics-absent
         title: TrueNAS metrics stopped arriving
         condition: C
@@ -254,27 +261,12 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: TrueNAS has not delivered metrics for 10 minutes — the thermal alerts are BLIND.
-          description: >-
-            No samples from the TrueNAS Graphite exporter. While this fires, the
-            47C and 52C disk-temperature rules cannot fire at all: no data means
-            no breach detected, so treat this as a thermal-monitoring outage and
-            not merely a missing dashboard.
-            KNOWN CAUSE, measured in #173: TrueNAS reports the reporting exporter
-            as enabled and correct while netdata has NOT loaded it, and nothing
-            reachable with REPORTING_WRITE forces a reload. Reading the config
-            back therefore proves nothing. What worked was toggling it through
-            Ansible and waiting a few minutes:
-              ansible-playbook playbooks/truenas.yml -e truenas_exporter_enabled=false
-              ansible-playbook playbooks/truenas.yml
-            Also check, in order: the exporter still exists
-            (playbooks/truenas.yml is green), telegraf is up on eq12_docker and
-            listening on :2003, and the nftables allowlist still grants
-            192.168.30.20/32 — that grant is a source /32, so if the NAS ever
-            moves address its metrics are dropped silently with no
-            application-level error.
-            Runbook:
-            docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md
+          summary: TrueNAS has sent no Graphite metrics for 10 minutes.
+          description: |-
+            The NAS dashboard is going dark (ARC, CPU, I/O, capacity). Disk-temperature and pool alerts are unaffected — they read the API poller, which has its own liveness rule.
+            Known cause: the appliance accepts the exporter config but never loads it — cycle the exporter off and on (runbook).
+          __dashboardUid__: nas-truenas
+          runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md
         labels:
           severity: critical
           component: nas-thermal
@@ -331,6 +323,17 @@ groups:
                     params:
                       - 1
       # ---------------------------------------------------------------------
+      # THE LIVENESS RULE FOR THE TEMPERATURE ALERTS, separate from
+      # truenas-metrics-absent on purpose. Since #174 the 47C and 52C rules query
+      # truenas_disk_temperature_celsius, which the POLLER supplies — not the
+      # Graphite stream. So the poller can die while the stream keeps flowing:
+      # truenas-metrics-absent would stay green and the thermal rules would go
+      # quiet with nothing to say so. Two delivery paths, two liveness rules.
+      # The poller pushes NOTHING on a failed cycle, deliberately — a partial
+      # scrape pushed as if complete would look like a healthy pool with missing
+      # disks. So absence, not a zero, is the failure signal.
+      # The privilege roles a failed cycle usually lacks: pool.query needs
+      # POOL_READ, disk.query needs DISK_READ (the ansible-ctrl privilege).
       - uid: truenas-poller-absent
         title: TrueNAS API poller has stopped
         condition: C
@@ -339,22 +342,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: The TrueNAS API poller has not reported for 10 minutes — the disk temperature alerts are BLIND.
-          description: >-
-            THIS IS THE LIVENESS RULE FOR THE TEMPERATURE ALERTS, and it is separate
-            from truenas-metrics-absent on purpose. Since #174 the 47C and 52C rules
-            query truenas_disk_temperature_celsius, which the POLLER supplies — not
-            the Graphite stream. So the poller can die while the stream keeps
-            flowing: truenas-metrics-absent would stay green and the thermal rules
-            would go quiet with nothing to say so. Two delivery paths, two liveness
-            rules.
-            The poller pushes NOTHING on a failed cycle, deliberately — a partial
-            scrape pushed as if complete would look like a healthy pool with missing
-            disks. So absence, not a zero, is the failure signal.
-            Check: `systemctl status truenas-poller.timer` and
-            `journalctl -u truenas-poller.service -n 30` on eq12_docker. Usual causes
-            are a revoked API key, or a role missing from the ansible-ctrl privilege
-            (pool.query needs POOL_READ, disk.query needs DISK_READ).
+          summary: The TrueNAS API poller has not reported for 10 minutes — disk-temperature and pool alerts are blind until it returns.
+          description: |-
+            The Graphite stream may still be flowing; this is the poller's own delivery path.
+            Check `systemctl status truenas-poller.timer` and `journalctl -u truenas-poller -n 30` on eq12_docker — usual causes are a revoked API key or a missing privilege role.
+          __dashboardUid__: nas-truenas
         labels:
           severity: critical
           component: nas-thermal
@@ -407,6 +399,11 @@ groups:
                     params:
                       - 1
       # ---------------------------------------------------------------------
+      # min(truenas_pool_healthy) < 1 means ZFS considers the pool unhealthy —
+      # DEGRADED, FAULTED, or carrying errors.
+      # noDataState is OK because absence is owned by the two liveness rules
+      # (truenas-poller-absent and truenas-metrics-absent); duplicating it here
+      # would page three times for one outage.
       - uid: truenas-pool-degraded
         title: TrueNAS pool is not healthy
         condition: C
@@ -415,15 +412,12 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: TrueNAS pool {{ $labels.pool }} is not reporting healthy.
-          description: >-
-            ZFS considers the pool unhealthy — DEGRADED, FAULTED, or carrying errors.
-            Act on this before anything else on the NAS: a degraded pool has already
-            lost redundancy, and a second failure during the resilver is what turns
-            it into data loss. Check `zpool status -v` on the appliance.
-            noDataState is OK because absence is owned by the two liveness rules
-            (truenas-poller-absent and truenas-metrics-absent); duplicating it here
-            would page three times for one outage.
+          summary: TrueNAS pool {{ $labels.pool }} is reporting unhealthy.
+          description: |-
+            Redundancy may already be lost — this outranks everything else on the NAS.
+            Run `zpool status -v` on the appliance to see which vdev; avoid stressing the pool until it is healthy again.
+          __dashboardUid__: nas-truenas
+          __panelId__: "5"
         labels:
           severity: critical
           component: nas-thermal
@@ -476,6 +470,14 @@ groups:
                     params:
                       - 1
       # ---------------------------------------------------------------------
+      # A scrub is what detects silent corruption before it is read back.
+      # 35 days, not 30: the default schedule is monthly, and a 30-day threshold
+      # would fire every month on ordinary scheduling jitter — an alert that
+      # cries wolf on its own cadence is one nobody reads. Measured at the time
+      # of writing: last scrub finished 14.3 days ago, 0 errors.
+      # for: 1h because this is a slow-moving condition; there is nothing to
+      # gain from reacting inside the hour and something to lose from flapping
+      # around the boundary.
       - uid: truenas-scrub-overdue
         title: TrueNAS pool scrub is overdue
         condition: C
@@ -485,17 +487,11 @@ groups:
         isPaused: false
         annotations:
           summary: TrueNAS pool {{ $labels.pool }} has not completed a scrub in over 35 days.
-          description: >-
-            A scrub is what detects silent corruption before it is read back. TrueNAS
-            schedules them, so this firing usually means the schedule was disabled or
-            has been failing rather than that a single run was missed.
-            35 days, not 30: the default schedule is monthly, and a 30-day threshold
-            would fire every month on ordinary scheduling jitter — an alert that
-            cries wolf on its own cadence is one nobody reads. Measured at the time
-            of writing: last scrub finished 14.3 days ago, 0 errors.
-            for: 1h because this is a slow-moving condition; there is nothing to
-            gain from reacting inside the hour and something to lose from flapping
-            around the boundary.
+          description: |-
+            The monthly schedule has likely been disabled or is failing, rather than one run being missed.
+            Check the scrub task under Data Protection on the appliance, or start one manually.
+          __dashboardUid__: nas-truenas
+          __panelId__: "7"
         labels:
           severity: warning
           # NOT nas-thermal: that component label is what routes a warning to
