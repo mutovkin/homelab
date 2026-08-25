@@ -110,16 +110,78 @@
 [[inputs.smart]]
   path_smartctl = "/usr/sbin/smartctl"
   attributes = true
-
 {% if telegraf_agent_acpi_fan_state | bool %}
+
 # eq12 only. BINARY ACPI fan state (0/1) — NOT a fan speed, and not this board's
 # tachometer. Under the DEFAULT driver set the board exposes no fan*_input and no
 # pwm* (measured #186); a forced binding of the stock in-kernel it87 module DOES
 # read two real tachometers (measured 2026-08-25), but that is unpersisted, not
 # collected, and pending an operator decision — see docs/eq12.md.
 # Never graph or label this series as RPM.
+# Array argv and log_stderr for the same two reasons as the RAPL block below.
+# NOTE the deprecation is NOT about spaces: what 1.39.0 deprecated is the FLAT
+# element form `commands = ["cmd"]` as such, and this single-token command warned
+# on every start exactly like the RAPL one with its argument (measured on eq12).
+# A future third exec input with a one-word command needs the nested form too.
 [[inputs.exec]]
-  commands = ["/usr/local/lib/telegraf/acpi_fan_state.sh"]
+  commands = [["/usr/local/lib/telegraf/acpi_fan_state.sh"]]
   timeout = "5s"
   data_format = "influx"
+  log_stderr = true
+{% endif %}
+{% if telegraf_agent_rapl_power | bool %}
+
+# RAPL package power, in WATTS (#194). Both hosts load intel_rapl_msr +
+# intel_rapl_common — yes, the AMD box too — and expose /sys/class/powercap;
+# `energy_uj` is `-r-------- root root` and the unit reaches it through ambient
+# CAP_DAC_OVERRIDE, not root (see the drop-in).
+#
+# WHY NOT [[inputs.intel_powerstat]] — the negative belongs HERE, where the next
+# person would "simplify" to the plugin. Measured 2026-08-25 with
+# `telegraf --test` under the real unit user and capabilities:
+#   * n5pro — the plugin will not initialise: "failed to initialize metric
+#     fetcher interface: host processor is not supported". It cannot serve this
+#     machine at all.
+#   * eq12 — it runs, and its FIRST gather emits
+#     current_power_consumption_watts=826963607.79: a first-sample artefact with
+#     no prior read to delta against, i.e. a garbage spike at every restart.
+# Running the plugin on eq12 and the script on n5pro would export two metric
+# names for one signal — the coretemp/k10temp divergence trap. One script, both
+# hosts.
+#
+# The script converts to watts AT THE SOURCE because these counters wrap fast
+# (65.5 kJ on n5pro: ~3 h idle, ~20 min loaded), so a rate() over the raw
+# counter would spike negative at every rollover. Each sample is a ~1 s
+# instantaneous snapshot taken once per 60 s interval, NOT a 60 s average.
+# The script runs ~1 s; timeout is 5 s.
+#
+# Arguments are the domains to EXCLUDE (n5pro: `core` — measured by load
+# PLACEMENT to cover CPU0 alone, not the package's cores; eq12's same-named
+# domain passes that test and is exported). The role asserts these names are
+# bare tokens before templating them into this TOML string.
+# RAPL is PACKAGE power, never wall power.
+#
+# ARGV AS A NESTED ARRAY. telegraf deprecated the FLAT element form
+# (`commands = ["cmd"]`) in 1.39.0 and REMOVES it in 1.45.0 — measured, both
+# hosts logged `DeprecationWarning: ... Use array syntax instead` on every start,
+# including for a command with NO arguments and no spaces. The deprecation is of
+# the value FORM, not of embedded whitespace; do not conclude a one-word command
+# is exempt. Past 1.45.0 this input stops loading, so the form written here is
+# the one that survives the next telegraf_agent_version bump.
+#
+# A pinned dependency's own deprecation warnings are the bump-blocker list: read
+# the journal of the version you pinned, not just the release notes of the next.
+#
+# log_stderr because the script's diagnostics are otherwise THROWN AWAY on the
+# only path that produces them. inputs.exec surfaces stderr by itself only when
+# the command exits NON-ZERO; a partial failure (one domain rejected by the
+# plausibility ceiling, or a zone that vanished mid-sample) still exits 0 because
+# the other domains are fine. Without this the domain silently disappears and the
+# `journalctl -u telegraf | grep -i exec` that the alert runbook and the deploy
+# assert both tell the operator to run returns NOTHING.
+[[inputs.exec]]
+  commands = [[{{ (['/usr/local/lib/telegraf/rapl_power.sh'] + telegraf_agent_rapl_exclude_domains) | map('to_json') | join(', ') }}]]
+  timeout = "5s"
+  data_format = "influx"
+  log_stderr = true
 {% endif %}

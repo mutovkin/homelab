@@ -281,15 +281,79 @@ series of its own; a second docker-metrics collector is a separate decision.
 
 **Collected:** `cpu` (per-core and total), `mem`, `swap`, `disk`, `diskio`,
 `net`, `netstat`, `kernel`, `processes`, `system` (load/uptime), `zfs` (ARC
-kstats from `/proc/spl/kstat/zfs`), `sensors` (below), and `smart` (NVMe wear,
-available spare, power-on hours, media errors — 14 `smart_device_*` series).
-Interval 60 s.
+kstats from `/proc/spl/kstat/zfs`), `sensors` (below), `smart` (NVMe wear,
+available spare, power-on hours, media errors — 14 `smart_device_*` series), and
+RAPL package power (below). Interval 60 s. No fan input exists here at all; see
+the negative result further down.
 
-**Power** is partially covered: `amdgpu`'s `power1_average` / `power1_input` come
-through the `sensors` input, so iGPU package draw is measured. CPU-package RAPL
-(`energy_uj`) is **not** — it is deferred to #194, which the agent's privilege
-model already accommodates as a config addition. No fan input exists here at all;
-see the negative result below.
+### Package power (RAPL, #194)
+
+Two powercap domains, named from the sysfs `name` files and **never** from the
+node indices: `intel-rapl:0` = `package-0` and `intel-rapl:0:0` = `core`. There
+is **no `uncore` domain** here, unlike EQ12 — a panel or rule hard-wired to that
+three-domain shape reads empty for this host. `max_energy_range_uj` is
+65532610987 (65.5 kJ), which wraps roughly every 3 h at idle and every ~20 min
+under load; the agent therefore exports `rapl_power_watts{domain=…}` in **watts,
+converted and wrap-corrected at the source** by
+`roles/telegraf_agent/files/rapl_power.sh`. Each sample is a **~1 s instantaneous
+snapshot taken once per 60 s interval, not a 60 s average**.
+
+**`core` is deliberately NOT exported: it covers CPU0 alone, not the package's
+cores.** The discriminating test is *load placement*. A busy-loop pinned to CPU0
+raises `core` whether the domain is a real all-core aggregate or only CPU0's
+counter — both hypotheses predict the same rise, so that test settles nothing.
+Put the load on cores the domain would see *only* if it were an aggregate.
+Measured 2026-08-25, two independent runs, 6 s windows (run 2 in parentheses):
+
+| placement | package | core |
+| --------- | ------- | ---- |
+| idle | 5.93 W (5.83) | 0.06 W (0.05) |
+| busy-loop on CPU0 | 21.96 W (22.84) | 15.83 W (16.59) |
+| busy-loop on CPU20 | 11.21 W (11.88) | 0.16 W (0.13) |
+| busy-loop on CPU2+14+20 | 33.93 W (33.78) | 0.12 W (0.24) |
+| idle again | 6.32 W (6.16) | 0.09 W (0.11) |
+
+`core` stays flat at ~0.12 W while `package-0` climbs 28 W under a three-core
+load containing no CPU0, and moves only when CPU0 itself is loaded. On this
+Zen 5 board `intel-rapl:0:0` is one physical core of twelve (24 logical CPUs).
+
+Two earlier readings of this domain were both wrong, in opposite directions, and
+both came from evidence that could not have distinguished the hypotheses:
+
+- An idle-time cross-check against the AMD core-energy MSRs found powercap
+  `core` matching CPU0's `MSR_AMD_CORE_ENERGY_STATUS` to 0.06%. True, and
+  uninformative — **at idle an aggregate approximates its busiest core**, so the
+  match is what you would see either way.
+- A single-core load test found `core` rising 0.04 → 11 W and concluded the
+  domain was real and merely power-gated at idle. Also true, and also
+  uninformative — that load ran on CPU0.
+
+The lesson is not "measure more carefully"; both measurements were careful.
+**An experiment that cannot distinguish between the hypotheses is not evidence,
+however careful it looks.** Ask what result would falsify the alternative, then
+design for that.
+
+It is **dropped rather than relabelled** `domain="cpu0"`. One core out of twelve
+answers no question anyone asks here, and a per-core series living under the
+same metric name as `package-0` invites a sum that is always wrong. This is not
+a fabricated zero — it is a real reading of the wrong thing, which is worse,
+because it looks measured. If per-core power is ever genuinely wanted, that is a
+deliberate feature with its own design.
+
+Contrast **eq12**, where the same sysfs path and the same domain name pass this
+same test (`core` tracks package to within 0.08 W at every placement) and are
+exported — see [eq12.md](eq12.md).
+
+**`amdgpu`'s `power1_average` / `power1_input` already come through the `sensors`
+input**, so iGPU package draw is measured too — but it is **not additive** with
+the RAPL package series: the iGPU sits inside the same SoC package, so summing
+the two double-counts it.
+
+**None of this is wall power.** RAPL excludes NVMe, fans, PSU conversion loss and
+— on this machine specifically — the five drive bays and the whole NAS side of
+the box, and there is no wall meter here. Grafana:
+`Homelab / hosts / Hosts — CPU package power` (uid `host-power`); liveness is
+`obs-rapl-power-absent-n5pro`, on the domain count.
 
 ### Measured sensor surface
 

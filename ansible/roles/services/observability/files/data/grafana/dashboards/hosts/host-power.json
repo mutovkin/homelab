@@ -1,0 +1,304 @@
+{
+  "uid": "host-power",
+  "title": "Hosts — CPU package power",
+  "description": "Package power for the two physical Proxmox hosts, from the RAPL energy counters read by the native telegraf agents (roles/telegraf_agent, #194), plus n5pro's amdgpu iGPU reading. Every panel here is a COMPONENT of machine power, never a machine total: RAPL measures the CPU PACKAGE, not the wall socket. It excludes NVMe, fans, PSU conversion loss, and on n5pro the five drive bays and the whole NAS side of the box. There is no wall-power meter on either machine (#194: that would need a metered PDU or a smart plug per host, a hardware purchase). Nothing on this dashboard may be summed into a “power consumption” figure — the iGPU series in particular is part of the same SoC package the RAPL package series already measures.",
+  "tags": [
+    "hosts",
+    "power",
+    "rapl"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "",
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "CPU package power",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Package power now",
+      "description": "Latest package-domain reading per host, one row each — the panel is written for BOTH board shapes rather than either one, so neither host produces an empty panel. Each sample is a ~1 s instantaneous snapshot taken once per 60 s collection interval, NOT a 60 s average: files/rapl_power.sh in roles/telegraf_agent takes two energy_uj reads about a second apart and divides by the actual elapsed time. RAPL measures the CPU PACKAGE, not the wall socket. It excludes NVMe, fans, PSU conversion loss, and on n5pro the five drive bays and the whole NAS side of the box. There is no wall-power meter on either machine (#194: that would need a metered PDU or a smart plug per host, a hardware purchase).",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "rapl_power_watts{domain=\"package-0\"}",
+          "legendFormat": "{{host}}",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "CPU package power (RAPL)",
+      "description": "The `package-0` domain on each physical Proxmox host. This is PACKAGE power only. RAPL measures the CPU PACKAGE, not the wall socket. It excludes NVMe, fans, PSU conversion loss, and on n5pro the five drive bays and the whole NAS side of the box. There is no wall-power meter on either machine (#194: that would need a metered PDU or a smart plug per host, a hardware purchase). The counters wrap fast (65.5 kJ on n5pro, ~3 h at idle and ~20 min under load), so the agent converts to watts at the source and wrap-corrects each delta — a rate() over the raw counter would spike negative at every rollover.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 18,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "rapl_power_watts{domain=\"package-0\"}",
+          "legendFormat": "{{host}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 300000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "Domain breakdown and iGPU",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "RAPL domains",
+      "description": "Every exported powercap domain, both hosts in one panel because the two boards genuinely differ and a per-host panel would be empty for the other. eq12 (Intel N100) has three domains — package-0, core, uncore (the iGPU, flat at idle but real: 0.000182 W max over 24 h, so a real reading rather than a fabricated zero). n5pro (Ryzen AI 9 HX 370) has two, package-0 and core, and NO uncore — and its `core` is deliberately NOT exported because it covers CPU0 ALONE. Measured 2026-08-25 by LOAD PLACEMENT, the only test that discriminates: under a busy-loop on CPU2+14+20, package rose to 33.93 W while core stayed at 0.12 W; it moves only when CPU0 itself is loaded. eq12's identically-named domain passes that same test (it tracks package to within 0.08 W at every placement) and IS exported — coverage is a property of the board, never of the name. Domain labels come from the sysfs `name` file, never the node index. Sub-domains are components OF package-0, not additions to it — do not sum them.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "rapl_power_watts",
+          "legendFormat": "{{host}} {{domain}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 300000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "n5pro iGPU power (amdgpu ppt)",
+      "description": "The amdgpu package-power-tracking reading from the lm-sensors input — the only host-side view of what CT 201's VAAPI workloads (Frigate, Immich) actually cost. n5pro only: eq12's iGPU has no such sensor, and its uncore RAPL domain is the nearest equivalent. THIS IS NOT ADDITIVE WITH THE RAPL PACKAGE SERIES — the iGPU sits inside the same SoC package, so summing the two double-counts it. There is deliberately no total-power panel on this dashboard for that reason.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "sensors_power1_average{chip=\"amdgpu-pci-c700\", feature=\"ppt\"}",
+          "legendFormat": "{{host}} iGPU ppt",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 300000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}
