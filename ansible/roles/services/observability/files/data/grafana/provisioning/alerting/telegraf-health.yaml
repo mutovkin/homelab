@@ -79,6 +79,30 @@ groups:
     interval: 5m
     rules:
       # ---------------------------------------------------------------------
+      # READ THE TWO CAUSES IN THIS ORDER when this fires, because the second is
+      # the one nothing else in this stack can see.
+      #   (1) Telegraf is down or wedged — `docker ps` and `docker logs telegraf`
+      #       on eq12_docker settle it in seconds, and obs-http-probe-absent will
+      #       usually be firing alongside.
+      #   (2) Telegraf is UP and its host label is wrong. This is the #178
+      #       regression the file header opens with, and this rule is the only
+      #       thing that sees it. Confirm with `count by (host) (system_uptime)`:
+      #       a row labelled with a 12-char container id means TELEGRAF_HOSTNAME
+      #       resolved EMPTY, and a row reading literally `${TELEGRAF_HOSTNAME}`
+      #       means the variable is not in the container env at all (the measured
+      #       1.39.3 table for both is in the header). Both are one missing line
+      #       in ansible/roles/services/observability/files/compose.yaml, whose
+      #       value is templated from inventory_hostname by templates/env.j2.
+      #
+      # The [24h] lookbehind mirrors obs-vector-metrics-absent and
+      # obs-http-probe-absent: a series with no sample inside the lookbehind is
+      # not returned AT ALL, so a shorter window would let a long-dead agent
+      # vanish from the query, Grafana mark the instance stale and RESOLVE the
+      # alert. relativeTimeRange below must stay >= the lookbehind.
+      #
+      # NOTE for whoever renames this host on purpose: the rule is scoped to the
+      # name, so a deliberate rename makes it fire — update the selector in the
+      # same change that does the rename.
       - uid: obs-telegraf-metrics-absent
         title: Telegraf metrics stopped arriving for eq12_docker
         condition: C
@@ -102,33 +126,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Telegraf's metrics have stopped arriving for host eq12_docker — or its host label changed.
-          description: >-
-            No system_uptime sample tagged host="eq12_docker" in over 10 minutes,
-            while telegraf collects every 60s. READ THE TWO CAUSES IN THIS ORDER,
-            because the second is the one nothing else in this stack can see.
-            (1) Telegraf is down or wedged — `docker ps` and `docker logs telegraf`
-            on eq12_docker settle it in seconds, and obs-http-probe-absent will
-            usually be firing alongside.
-            (2) Telegraf is UP and its host label is wrong. This is the #178
-            regression, and every other telegraf-fed rule aggregates host away, so
-            this rule is the only thing that sees it. Confirm with
-            `count by (host) (system_uptime)` in VictoriaMetrics: a row labelled
-            with a 12-char container id means TELEGRAF_HOSTNAME resolved EMPTY, and
-            a row reading literally `${TELEGRAF_HOSTNAME}` means the variable is
-            not in the container env at all (measured on 1.39.3: telegraf emits the
-            literal string, exit 0, agent healthy — 1.38+ strict env handling does
-            not catch it). Both are one missing line in
-            ansible/roles/services/observability/files/compose.yaml, whose value is
-            templated from inventory_hostname by templates/env.j2.
-            The [24h] lookbehind mirrors obs-vector-metrics-absent and
-            obs-http-probe-absent: a series with no sample inside the lookbehind is
-            not returned AT ALL, so a shorter window would let a long-dead agent
-            vanish from the query, Grafana mark the instance stale and RESOLVE the
-            alert. relativeTimeRange below must stay >= the lookbehind.
-            NOTE for whoever renames this host on purpose: the rule is scoped to
-            the name, so a deliberate rename makes it fire — update the selector in
-            the same change that does the rename.
+          summary: No telegraf samples tagged host=eq12_docker for over 10 minutes.
+          description: |-
+            Telegraf is down, or running with a broken host tag. `docker logs telegraf` on eq12_docker settles the first.
+            For the second, `count by (host) (system_uptime)`: a container-id or literal ${TELEGRAF_HOSTNAME} row means the env var went missing.
         labels:
           severity: critical
           component: metrics-pipeline
@@ -201,6 +202,21 @@ groups:
                       - 600
 
       # ---------------------------------------------------------------------
+      # WHERE TO LOOK, and it is almost certainly one word: `taginclude` under
+      # [[inputs.docker]] in
+      # ansible/roles/services/observability/files/data/telegraf/telegraf.conf.
+      # Check that line first. The mechanism — an ALLOWLIST over the FINAL tag
+      # set, applied AFTER the agent adds `host` and [global_tags] — is in this
+      # file's header, and at length in telegraf.conf's own comment on that
+      # line, together with the measured 448-series consequence and why losing
+      # `host` matters (container_name is not unique across machines, so two
+      # hosts' per-container series become label-identical and merge).
+      #
+      # Confirm from the query side with
+      # `count by (host) ({__name__=~"docker_.+"})`: one row with an EMPTY label
+      # set means the label is gone entirely — a label-less result is NOT the
+      # same as one host, which is the trap that hid this defect for the life of
+      # the deployment.
       - uid: obs-docker-metrics-unlabelled
         title: Docker metrics have lost their host label
         condition: C
@@ -243,28 +259,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Docker container metrics are arriving with no host label — telegraf's tag filter is stripping it.
-          description: >-
-            One or more docker_* series reached VictoriaMetrics with no `host`
-            label. THIS IS A REGRESSION OF #178 AND IT IS INVISIBLE TO EVERY
-            OTHER RULE: obs-telegraf-metrics-absent watches system_uptime, which
-            is agent-tagged and completely unaffected by the docker input's tag
-            filter, so telegraf stays healthy, every deploy stays green, and all
-            448 per-container series quietly lose their machine dimension.
-            The cause is almost certainly one word: `taginclude` in
-            [[inputs.docker]] in
-            ansible/roles/services/observability/files/data/telegraf/telegraf.conf
-            is an ALLOWLIST over the FINAL tag set, applied AFTER the agent adds
-            `host` and [global_tags]. Dropping "host" from that list strips it
-            back off. Check that line first; the file's own comment explains it.
-            Confirm from the query side with
-            `count by (host) ({__name__=~"docker_.+"})`: one row with an EMPTY
-            label set means the label is gone entirely (a label-less result is
-            NOT the same as one host, which is the trap that hid this defect for
-            the life of the deployment).
-            Why this matters beyond tidiness: `container_name` is not unique
-            across machines, so without `host` two hosts' per-container series
-            are label-identical and merge silently.
+          summary: docker_* metrics are arriving with no host label.
+          description: |-
+            Telegraf's taginclude allowlist in the docker input is stripping the host tag — check that line first; without it two hosts' container series merge silently.
+            Every other rule aggregates host away, so nothing else sees this.
         labels:
           severity: critical
           component: metrics-pipeline
