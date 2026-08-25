@@ -252,17 +252,16 @@ groups:
       # nftables allowlist still grants 192.168.30.20/32 — that grant is a source
       # /32, so if the NAS ever moves address its metrics are dropped silently with
       # no application-level error.
-      #
-      # Routing question (critical/nas-thermal vs the dashboards-only
-      # meaning): #193.
       - uid: truenas-metrics-absent
         title: TrueNAS metrics stopped arriving
         condition: C
         # 10m: three missed 60s pushes would be 3m, but the exporter buffers on
         # failure (buffer_on_failures: 10) and a brief blip self-heals. 10m is
         # long enough not to page on one, short enough that a genuinely dead
-        # stream is caught well before the thermal rules have been blind for an
-        # hour.
+        # stream is caught the same day, well before anyone reaches for a
+        # dashboard that has silently gone dark. (It used to say "before the
+        # thermal rules have been blind for an hour" — those rules stopped
+        # reading this stream in #174.)
         for: 10m
         # THE ONE RULE THAT OWNS ABSENCE, and the only one here that may be
         # Alerting on NoData. Its sentinel is deliberately NOT the disk
@@ -288,8 +287,14 @@ groups:
           __panelId__: "13"
           runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md
         labels:
-          severity: critical
-          component: nas-thermal
+          # warning, not critical, and NOT nas-thermal — decided in #193. Since
+          # #174 this stream feeds DASHBOARDS only; thermal and pool blindness is
+          # owned by truenas-poller-absent (critical). If the appliance itself is
+          # down the poller dies too, so the page still happens — through the rule
+          # that means it. nas-metrics matches no route on purpose: warning +
+          # unmatched component = root policy = email only.
+          severity: warning
+          component: nas-metrics
         data:
           - refId: A
             datasourceUid: P4169E866C3094E38
