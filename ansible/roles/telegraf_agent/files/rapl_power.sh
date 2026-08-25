@@ -123,7 +123,20 @@ tc=$(date +%s%N)
 second=$(for zone in $zones; do printf '%s %s\n' "$zone" "$(cat "$zone/energy_uj" 2>/dev/null)"; done)
 td=$(date +%s%N)
 
-# awk carries the arithmetic because POSIX sh has no floats. The nanosecond
+# awk carries the arithmetic because POSIX sh has no floats.
+#
+# TWO EDITING TRAPS, both measured in #194, both of which report as an awk error
+# while being something else:
+#
+# 1. THE AWK PROGRAM IS A SINGLE-QUOTED SHELL STRING, so it may not contain an
+#    APOSTROPHE anywhere — not even inside an awk comment. One in the word
+#    "N100's" ended the shell string 40 lines early and mawk reported
+#    `line 33: missing } near end of file`, pointing at a comment. If awk claims
+#    an unbalanced brace, look for a quote before you look for a brace.
+# 2. Target dialect is mawk 1.3.4 (what Debian ships as `awk`). Syntax-check any
+#    edit against mawk ON A HOST: BSD awk on the operator Mac accepts programs
+#    mawk refuses, so a local check is a different dialect and proves nothing.
+# The nanosecond
 # stamps (~1.8e18) and the energy counters (<= 2.6e11) both sit inside a double's
 # exact-enough range for this: the ulp at 1.8e18 is ~256 ns against a ~1e9 ns
 # window, i.e. a relative error of 3e-7.
@@ -163,13 +176,15 @@ td=$(date +%s%N)
       # measured on this host, a 1000000 -> 0 reset on eq12 printed 261339.76 W.
       # That is the same artefact class this script rejects [[inputs.intel_powerstat]]
       # for, so it is bounded by PHYSICS instead: no package here can draw `ceiling`
-      # watts (default 1000 W, ~40x the N100's ceiling and ~12x the Ryzen's), so a
-      # corrected value above it is a reset or garbage, never a reading.
+      # watts (default 1000 W, roughly 40x the N100 ceiling and 12x the Ryzen
+      # one), so a corrected value above it is a reset or garbage, not a reading.
+      # NOTE: no APOSTROPHES anywhere below -- see the dialect note above.
       if (delta < 0) { delta += max[z] }
       watts = delta / 1000000 / elapsed
       if (watts > ceiling) {
-        print "rapl_power.sh: " z " (" name[z] ") implausible " watts " W over " elapsed \
-              "s (counter reset, not a wrap?); emitting nothing for it" > "/dev/stderr"
+        msg = "rapl_power.sh: " z " (" name[z] ") implausible " watts " W over "
+        msg = msg elapsed "s (counter reset, not a wrap?); emitting nothing for it"
+        print msg > "/dev/stderr"
         continue
       }
       printf "rapl,domain=%s power_watts=%.6f\n", name[z], watts
