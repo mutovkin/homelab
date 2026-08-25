@@ -286,11 +286,15 @@ ssh root@192.168.25.15 'docker logs grafana --since 10m | grep -c "HTTP Server L
 #    health check sets one, in this role's tasks/main.yml).
 #    The credentials live in the deploy dir's .env, NOT in root's login shell — without
 #    sourcing it the single-quoted command expands them to empty and the call just 401s.
+#    -f and the isinstance assert are both load-bearing. MEASURED against a
+#    deliberately wrong password: without them the check prints **5** and exits 0
+#    — the key count of the 401's JSON error object, a small plausible integer
+#    that reads as a rule count and is not one. With them it exits 1.
 ssh root@192.168.25.15 \
   'set -a; . /data/deploy/observability/.env; set +a;
-   curl -su "$GRAFANA_USER:$GRAFANA_PASSWORD" -H "Host: $GRAFANA_DOMAIN" \
+   curl -fsu "$GRAFANA_USER:$GRAFANA_PASSWORD" -H "Host: $GRAFANA_DOMAIN" \
      http://127.0.0.1:3000/api/v1/provisioning/alert-rules \
-   | python3 -c "import json,sys; print(len(json.load(sys.stdin)))"'
+   | python3 -c "import json,sys; d=json.load(sys.stdin); assert isinstance(d,list), d; print(len(d))"'
 # expect 22 — the sum of the per-file rule counts under
 # files/data/grafana/provisioning/alerting/ (delivery 3, ingest 3, per-host-ingest 1,
 # probe 3, telegraf 2, truenas 6, vector 4).
