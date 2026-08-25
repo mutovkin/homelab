@@ -350,7 +350,8 @@ groups:
       # scrape pushed as if complete would look like a healthy pool with missing
       # disks. So absence, not a zero, is the failure signal.
       # The privilege roles a failed cycle usually lacks: pool.query needs
-      # POOL_READ, disk.query needs DISK_READ (the ansible-ctrl privilege).
+      # POOL_READ, disk.query needs DISK_READ, and alert.list needs
+      # ALERT_LIST_READ (all carried by the ansible-ctrl privilege).
       - uid: truenas-poller-absent
         title: TrueNAS API poller has stopped
         condition: C
