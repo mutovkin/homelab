@@ -122,6 +122,47 @@ board, not of the name.**
   invites a sum that is always wrong. It is not a fabricated zero — it is a real reading of
   the wrong thing, which is worse, because it looks measured.
 
+## The count, stated plainly: five times, on one question, by everyone who touched it
+
+This is the most important part of this document, and it is not a confession — it is the
+evidence for why the rule has to be procedural.
+
+**Five instances of the same error, all on the single question "is n5pro's `core` domain
+real?", by four agents and the operator:**
+
+1. **The issue text** — "0.04 W beside a 6 W package has the exact signature of an
+   unsupported reading". Magnitude is not a mechanism; a power-gated aggregate reads this.
+2. **Branch A** — an idle-time match between powercap `core` and CPU0's energy MSR, to
+   0.06%. True, and uninformative: at idle an aggregate approximates its busiest core.
+3. **Branch B** — exported the domain on the strength of the above being wrong, without
+   testing it either.
+4. **The operator** — a single-core load moved `core` 0.04 → 11.46 W, concluded "SETTLED by
+   measurement", and wrote that into the implementing agent's brief. The load ran on CPU0,
+   which the domain covers under *both* hypotheses.
+5. **The implementing agent — inside this very change, in the act of writing this
+   document** — asserted that eq12's `uncore` "is flat at idle because there is nothing
+   drawing, not because it is unsupported", with no discriminating test. Both hypotheses
+   predict flat-at-zero. Caught in review; the claim is now limited to what was measured
+   (the counter advances, so it is live) with load-tracking marked explicitly untested.
+
+And a sixth, in the sibling family: the same agent deleted an unreachable `if (delta < 0)`
+guard for being unfalsifiable, then **two commits later reintroduced the identical shape**
+— an unreachable `''` arm in a `case` whose input `${VAR:-default}` can never be empty.
+
+**None of this was carelessness.** Every one of those measurements was carefully taken and
+correctly reported. That is the whole point: **a confounded test feels exactly like
+evidence from the inside.** There is no amount of care that fixes it, and "be more
+rigorous" is not a control — everyone involved here was already being rigorous.
+
+The control is procedural, and it is one sentence:
+
+> Before believing a measurement, state what result would have **falsified the
+> alternative**, and check that your test could actually have produced that result.
+
+If your experiment could not have come out the other way, it is not evidence, no matter how
+clean the number is. Write the falsifier down *before* the measurement, because afterwards
+the number will look like it settles the question.
+
 ## A postscript, because it happened again inside this very issue
 
 While verifying the collector, the dead-zone test used `chmod 000` on a stub file **while

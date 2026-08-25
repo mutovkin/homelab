@@ -456,6 +456,14 @@ Hard-won lessons — check here before debugging from scratch.
   where a version is pinned and bumped deliberately, a deprecation is a scheduled outage.
   And the deprecation was of the value FORM, not of embedded whitespace — a single-token
   command warned identically, so don't assume the simple case is exempt.
+  **Five instances of this error landed on that one question** — the issue text, two
+  branches, the operator's own load test, and the implementing agent *in the act of writing
+  the lesson down* (asserting eq12's `uncore` was "flat because nothing is drawing" with no
+  discriminating test). None was carelessness; a confounded test feels exactly like evidence
+  from the inside, so "be more rigorous" is not a control. The control is procedural:
+  **before believing a measurement, state what result would have FALSIFIED the alternative,
+  and check your test could actually have produced it** — and write that falsifier down
+  before measuring, because afterwards the number looks like it settles the question.
   See [docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md](docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md).
 
 ## Conventions
