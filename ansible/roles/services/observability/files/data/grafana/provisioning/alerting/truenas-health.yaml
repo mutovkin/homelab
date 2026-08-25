@@ -268,6 +268,12 @@ groups:
             The NAS dashboard is going dark (ARC, CPU, I/O, capacity). Disk-temperature and pool alerts are unaffected — they read the API poller, which has its own liveness rule.
             Known cause: the appliance accepts the exporter config but never loads it — cycle the exporter off and on (runbook).
           __dashboardUid__: nas-truenas
+          # Grafana REJECTS __dashboardUid__ without __panelId__ ("both annotations
+          # ... must be specified") and refuses to start — a dashboard-only deep
+          # link is not representable. 13 = ARC size and memory, the first panel
+          # this rule's own description names as going dark, and Graphite-fed
+          # (truenas_arcstats_*) like the stream this rule watches.
+          __panelId__: "13"
           runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md
         labels:
           severity: critical
@@ -349,6 +355,10 @@ groups:
             The Graphite stream may still be flowing; this is the poller's own delivery path.
             Check `systemctl status truenas-poller.timer` and `journalctl -u truenas-poller -n 30` on eq12_docker — usual causes are a revoked API key or a missing privilege role.
           __dashboardUid__: nas-truenas
+          # Same Grafana constraint as truenas-metrics-absent above. 3 = Disk
+          # temperature, the poller-fed series (truenas_disk_temperature_celsius)
+          # whose blindness this rule reports.
+          __panelId__: "3"
         labels:
           severity: critical
           component: nas-thermal
