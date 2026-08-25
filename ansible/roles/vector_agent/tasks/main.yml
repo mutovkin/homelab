@@ -260,10 +260,12 @@
     - not (vector_agent_controller_fetch.failed | default(true))
 
 # LEG 2, the fallback: the target fetches for itself, but ONLY if the controller
-# could not. On n5pro this leg would fail, and that is fine — leg 1 already
-# delivered the file. This leg is REACHABLE only because leg 1 uses
-# ignore_errors rather than failed_when:false (read leg 1's note; that is the
-# defect #186's review round measured in the telegraf copy cloned from here).
+# could not. n5pro has no route to GitHub by operator policy, so if this leg is
+# ever selected there on an unconverged host it will fail — that is the
+# both-legs-failed case the arrival assert below names. This leg is REACHABLE
+# only because leg 1 uses ignore_errors rather than failed_when:false (read leg
+# 1's note; that is the defect #186's review round measured in the telegraf copy
+# cloned from here).
 # ignore_errors here for the same two reasons: the assert below owns the
 # diagnosis, and it reads the real `.failed` values to say which leg broke. A
 # failed leg shows as failed(ignored) in the recap.
