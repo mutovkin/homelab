@@ -1,0 +1,19 @@
+---
+# Native telegraf metrics agents for the physical Proxmox hosts (#186): eq12,
+# n5pro. eq12_docker is deliberately not in this group — it runs telegraf as a
+# container inside roles/services/observability.
+#
+# Run: ansible-playbook playbooks/metrics-agents.yml
+# One host: ansible-playbook playbooks/metrics-agents.yml --limit n5pro
+# Dry run:  ansible-playbook playbooks/metrics-agents.yml --check --diff --limit n5pro
+# Or:       task deploy:metricsagents / task deploy:metricsagents:check
+#
+# ORDER MATTERS, same as log-agents.yml: the role's final assertion queries
+# VictoriaMetrics on eq12_docker, deployed by deploy-services.yml. Judge an agent
+# before its sink exists and every first-ever run fails on a condition that is
+# not the agent's fault.
+- name: Deploy fleet metrics agents
+  hosts: telegraf_agents
+  become: true
+  roles:
+    - telegraf_agent

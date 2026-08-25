@@ -4,6 +4,7 @@
 # 2. Configure Docker inside guest VMs/LXCs
 # 3. Deploy Docker Compose services
 # 4. Deploy the native Vector log shippers (#134)
+# 5. Deploy the native telegraf metrics agents (#186)
 # Run: ansible-playbook playbooks/site.yml
 # Or: task deploy:full
 
@@ -23,6 +24,11 @@
 # that has nothing to do with the agent.
 - name: Deploy fleet log shippers
   ansible.builtin.import_playbook: log-agents.yml
+
+# Same load-bearing ordering as log-agents above: the telegraf_agent role's final
+# assertion polls VictoriaMetrics, which deploy-services.yml creates (#186).
+- name: Deploy fleet metrics agents
+  ansible.builtin.import_playbook: metrics-agents.yml
 
 # AFTER deploy-services, and the order is load-bearing the same way log-agents'
 # is. This playbook tells TrueNAS to start pushing its metrics to telegraf's

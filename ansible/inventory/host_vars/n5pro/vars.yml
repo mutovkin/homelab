@@ -246,3 +246,26 @@ proxmox_lxcs:
       (Immich/Frigate/NextCloud/PostgreSQL planned).
       net0: vmbr1 (LAN), net1: vmbr2 (host-only NFS).
       Boots after TrueNAS (order=2).
+
+# --- telegraf_agent (#186) ---------------------------------------------------
+# No ACPI fan objects on this board at all (measured 2026-08-24) — there is no
+# fan signal of any kind here, and nothing must pretend otherwise.
+telegraf_agent_acpi_fan_state: false
+# Entries are matched as LITERAL SUBSTRINGS of `telegraf --test`'s output, not
+# as regexes — a `.` or `-` here is that character, nothing more.
+telegraf_agent_expected_test_output:
+  - "chip=k10temp-pci-00c3" # Tctl — ONE value, no per-core on Zen5
+  - "chip=spd5118-i2c-0-50" # DDR5 DIMM temp, module 0
+  - "chip=spd5118-i2c-0-51" # DDR5 DIMM temp, module 1
+  - "chip=amdgpu-pci-c700" # iGPU edge temp + power (host-side view of CT-201 VAAPI load)
+  - "chip=nvme-pci-c200"
+  - "smart_device,"
+# Fabricated zeros (CLAUDE.md): amdgpu vddgfx/vddnb read 0.000 V — unsupported,
+# not measured. THE EXCLUSION: what the sensors tagdrop in telegraf.conf.j2 drops
+# at the source.
+telegraf_agent_sensors_tagdrop_features: [vddgfx, vddnb]
+# THE PROOF, a separate list on purpose (#186 review round): what must then be
+# absent from telegraf's own output, asserted every deploy. Literal substrings.
+telegraf_agent_forbidden_test_output:
+  - "feature=vddgfx"
+  - "feature=vddnb"

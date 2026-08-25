@@ -156,3 +156,19 @@ proxmox_lxcs:
     tags:
       - nginx-proxy-manager
     description: "Nginx Proxy Manager — reverse proxy and SSL management"
+
+# --- telegraf_agent (#186) ---------------------------------------------------
+# eq12 is the one host with ACPI fan objects (five, binary cur_state 0/1 —
+# measured 2026-08-24; NOT tachometers, there is no RPM on this board).
+telegraf_agent_acpi_fan_state: true
+# Substrings that MUST appear in `telegraf --test` output on this host — the
+# input's OWN output, per CLAUDE.md's ping lesson. chip names measured 2026-08-24.
+# Matched as LITERAL SUBSTRINGS, not as regexes: a `.` or `-` here is that
+# character, nothing more.
+telegraf_agent_expected_test_output:
+  - "chip=coretemp-isa-0000" # 5 CPU temps (Package + Core 0..3)
+  - "chip=acpitz-acpi-0"
+  - "chip=nvme-pci-0300" # root NVMe Composite
+  - "smart_device," # inputs.smart is actually producing
+  - "acpi_fan_state," # the exec fan-state script is actually producing
+telegraf_agent_forbidden_test_output: []

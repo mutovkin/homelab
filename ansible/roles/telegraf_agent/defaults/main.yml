@@ -1,0 +1,47 @@
+---
+# Native telegraf metrics agent for the physical Proxmox hosts (#186).
+# VERSION + CHECKSUM PINNED IN ONE PLACE, bumped deliberately — get_url hashes the
+# on-disk file, skips on match, re-downloads on mismatch; NO stat-exists gate
+# (CLAUDE.md). sha256 verified against the checksum table in the v1.39.3 GitHub
+# release notes AND the downloaded artefact, 2026-08-24. 1.39.3 is also what the
+# eq12_docker telegraf CONTAINER runs today — a coincidence of timing, not a
+# mechanism (the container floats on :latest; this pin does not).
+telegraf_agent_version: "1.39.3"
+telegraf_agent_deb_sha256: "5e61a873cc488b216ac07d6c7c2a730ce8e78d44655a37ceb24ccd29bba796c7"
+telegraf_agent_deb_url: "https://dl.influxdata.com/telegraf/releases/telegraf_{{ telegraf_agent_version }}-1_amd64.deb"
+
+# Cached outside /tmp so a converged re-run is cheap (vector_agent precedent).
+telegraf_agent_deb_cache_dir: /var/cache/telegraf
+telegraf_agent_deb_filename: "telegraf_{{ telegraf_agent_version }}-1_amd64.deb"
+telegraf_agent_deb_path: "{{ telegraf_agent_deb_cache_dir }}/{{ telegraf_agent_deb_filename }}"
+
+# Controller-side cache: the controller fetches once and ships to each host —
+# kept even though both hypervisors currently reach dl.influxdata.com (measured
+# 2026-08-24), because n5pro's github refusal proved upstream policy can be
+# selective and the two-leg shape costs nothing (vector_agent precedent).
+telegraf_agent_controller_cache: "{{ lookup('env', 'HOME') }}/.cache/homelab/telegraf_agent"
+
+# Export eq12's five binary ACPI fan objects (0/1 STATE, never RPM). Default off;
+# true only in host_vars/eq12/vars.yml. `| bool` at every use site — a quoted
+# "false" from host_vars is a truthy string (vector_agent precedent).
+telegraf_agent_acpi_fan_state: false
+
+# Features the sensors input must EXCLUDE AT THE SOURCE — readings the chip
+# fabricates rather than measures (n5pro: amdgpu's vddgfx/vddnb, 0.000 V). This
+# is deliberately INDEPENDENT of telegraf_agent_forbidden_test_output below,
+# which is the PROOF list verified against `telegraf --test`'s own output: one
+# shapes the config, the other verifies the result, and one variable meaning both
+# made a host unable to prove an exclusion it did not also perform (or the
+# reverse). The two will usually name the same features — keeping them in sync is
+# a deliberate per-host act, not something the role infers (#186 review round).
+telegraf_agent_sensors_tagdrop_features: []
+
+# Per-host proof lists for the pre-flight `telegraf --test` (host_vars). The
+# expected list MUST be non-empty for every host in the group — an empty list
+# would turn the input-output proof into `assert: true`.
+telegraf_agent_expected_test_output: []
+telegraf_agent_forbidden_test_output: []
+
+# Let a restarted telegraf run long enough to crash on a bad config before the
+# liveness assert reads it (same reasoning/value as vector_agent).
+telegraf_agent_settle_seconds: 15

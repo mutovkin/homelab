@@ -1,0 +1,1141 @@
+---
+# Native telegraf metrics agent — eq12, n5pro (#186).
+#
+# eq12_docker is deliberately NOT in this role's group: it runs telegraf as a
+# container inside the observability compose stack, and nothing here touches that.
+# See README.md for the shape, the shipped-unit traps the drop-in fixes, and the
+# measured capability staircase behind the privilege model.
+
+# --- Credentials -------------------------------------------------------------
+# Same filter chain, and the same reasoning, as roles/vector_agent (#134) and the
+# credential assert at the top of roles/services/observability (#88). The loop item
+# is the variable NAME, never its value: quiet:true trims success output, and on
+# failure the assertion is reported as a literal expression while fail_msg names the
+# variable — so no value prints either way. It runs under --check, so a dry run
+# against a host that cannot see these vars reports the var BY NAME instead of a
+# Jinja trace.
+#
+# Filter by filter: default('', true) because a defined-but-null `vault_x:` is None
+# and `None | length` crashes with a raw Jinja error; | string because an unquoted
+# integer crashes trim the same way; | trim because a whitespace-only value used to
+# pass.
+#
+# Only the vm_* pair here. This agent writes metrics and nothing else — there is no
+# VictoriaLogs leg — so pulling vl_* into the loop would assert a dependency this
+# role does not have.
+- name: Assert the VictoriaMetrics credentials are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined, so this host cannot authenticate to
+      VictoriaMetrics and telegraf would come up, stay up, and silently drop every
+      batch on a 401 — the shape of
+      docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md.
+      The pair lives in ansible/inventory/group_vars/all/vault.yml (moved there by
+      #160 because host_vars are invisible to other hosts) —
+      `task vault:edit -- inventory/group_vars/all/vault.yml`.
+    quiet: true
+  loop:
+    - vault_vm_auth_username
+    - vault_vm_auth_password
+
+# systemd's EnvironmentFile parser strips ONE surrounding pair of double quotes and
+# takes the contents literally. A value that itself contains a `"` would therefore
+# be truncated or would swallow the rest of the line, and an embedded newline would
+# be read as the start of a new assignment — either way the credential telegraf
+# holds is not the credential in the vault, and the only symptom is a silent 401.
+#
+# THE CHARACTER SET IS MEASURED (#134), and the boundary is "what systemd's parser
+# actually transforms" rather than a defensive guess. One probe value through
+# systemd's own EnvironmentFile parser, bytes read back with od -c:
+#
+#   on disk    P_BS="tab\there-nl\nend-lit\qX-dq\"Y-bs\\Z"
+#   systemd -> tab\there-nl\nend-lit\qX-dq"Y-bs\Z
+#
+# So `\t`, `\n`, `\q` pass through UNTOUCHED — systemd does not do C-escape
+# expansion — but `\"` collapsed to `"` and `\\` collapsed to `\`, so a BACKSLASH is
+# consumed when it escapes a quote or another backslash. Hence backslash is rejected
+# alongside `"`, CR and LF.
+#
+# `$` and backticks are deliberately NOT rejected. systemd does not interpolate
+# inside double quotes, and nothing but systemd parses this file — the pre-flight
+# `--test` runs through `systemd-run --property=EnvironmentFile=`, never a shell.
+#
+# NONE OF THIS IS THE REAL GUARANTEE. The character class only covers mangling
+# someone thought to look for; the /proc/<pid>/environ digest assert further down
+# compares what the running process holds against the vault value byte for byte.
+# Do not weaken that one.
+- name: Assert the VictoriaMetrics credentials are representable in a systemd EnvironmentFile
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | string is not search('["\r\n\\\\]')
+    fail_msg: >-
+      {{ item }} contains a double quote, a newline or a backslash.
+      /etc/telegraf/telegraf.env is a systemd EnvironmentFile whose values are
+      double-quoted, and systemd's parser transforms all three: a `"` truncates or
+      swallows the rest of the line, a newline starts a new assignment, and a
+      backslash is consumed when it escapes a quote or another backslash. telegraf
+      would then 401 against VictoriaMetrics while staying up. Rotate the credential
+      to one without those characters — `$` and backticks ARE allowed.
+    quiet: true
+  loop:
+    - vault_vm_auth_username
+    - vault_vm_auth_password
+
+# Both defined in group_vars/all/vars.yml, derived from eq12_docker's inventory
+# address and the :8428 publish in roles/services/observability/files/compose.yaml.
+# Asserted here so a rename fails BY NAME rather than templating an empty URL into
+# telegraf.conf (which telegraf accepts at parse time and then fails on at runtime)
+# or into the arrival probe (which would then prove nothing).
+- name: Assert the VictoriaMetrics endpoints are set and non-empty
+  ansible.builtin.assert:
+    that:
+      - lookup('vars', item, default='') | default('', true) | string | trim | length > 0
+    fail_msg: >-
+      {{ item }} is empty or undefined. Both endpoints are defined in
+      ansible/inventory/group_vars/all/vars.yml.
+    quiet: true
+  loop:
+    - victoriametrics_ingest_endpoint
+    - victoriametrics_query_endpoint
+
+# --- What this host claims its own hardware produces --------------------------
+# The pre-flight below checks `telegraf --test`'s output against this list. An
+# EMPTY list would make that loop iterate zero times and report ok — turning the
+# one guard that proves the inputs actually produce anything into `assert: true`.
+# A guard you have not seen fail is not a guard (CLAUDE.md), and a guard that
+# cannot fail is worse, because it reads green forever.
+- name: Assert this host declares what telegraf --test must prove
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_expected_test_output | length > 0
+    fail_msg: >-
+      telegraf_agent_expected_test_output is empty for {{ inventory_hostname }},
+      which would turn the pre-flight input-output proof into `assert: true` — a
+      guard that has never been seen to fail is not a guard (CLAUDE.md). Declare
+      the measured sensor chips for this host in
+      ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml.
+    quiet: true
+
+# The absence rules live in the OBSERVABILITY role's provisioning files, and its
+# deploy-time guard derives the expected host set from group `telegraf_agents` —
+# but that guard only runs when the observability stack deploys, which can be
+# weeks after a new agent host is added. This is the same tripwire from the
+# AGENT side: a metrics-agents-only deploy of a host with no pinned absence rule
+# fails HERE, loudly, instead of leaving the new agent unowned (#186 review
+# round). Static file+inventory check; runs under --check.
+- name: Assert this host has an absence owner in the observability alert rules
+  vars:
+    _telegraf_agent_rule_hosts: >-
+      {{ lookup('file', role_path ~ '/../services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+         | regex_findall('system_uptime\{host="([^"]+)"') }}
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in _telegraf_agent_rule_hosts
+    fail_msg: >-
+      {{ inventory_hostname }} runs a telegraf agent but has NO pinned absence
+      rule in roles/services/observability/files/data/grafana/provisioning/
+      alerting/telegraf-health.yaml (selectors found:
+      {{ _telegraf_agent_rule_hosts }}). Its agent could die and nothing would
+      page. Add the rule (mirror obs-telegraf-metrics-absent-eq12, pinned
+      selector, matching uid/title) AND deploy the observability stack in the
+      same change — the observability role's own guard enforces the exact set.
+    quiet: true
+
+# --- Check-mode reality gate -------------------------------------------------
+# Neither of these stats changes anything; both return real on-disk state even
+# under --check, which is exactly what is needed here. They run BEFORE the download
+# for the reason spelled out below.
+- name: Stat the cached telegraf .deb
+  ansible.builtin.stat:
+    path: "{{ telegraf_agent_deb_path }}"
+  register: telegraf_agent_deb_stat
+
+- name: Stat the telegraf configuration directory
+  ansible.builtin.stat:
+    path: /etc/telegraf
+  register: telegraf_agent_etc_stat
+
+# READ THIS BEFORE ASSUMING IT IS THE STAT GATE CLAUDE.md FORBIDS. That rule bans
+# gating the DOWNLOAD on the artefact already existing, because it makes the
+# checksum decorative — a corrupt cached .deb would satisfy the guard forever. This
+# flag is FALSE on every real run (`ansible_check_mode` is the first term), so the
+# download below is completely ungated when it matters and always re-verifies.
+#
+# What this flag is for is what `--check` can HONESTLY preview on a host where
+# telegraf has never been installed. The same three failures vector_agent measured
+# on a virgin host apply verbatim here:
+#
+#   * `get_url` under --check still fetches the file to a temp path to compare it,
+#     and then fails because the cache directory task above it was, correctly,
+#     only previewed.
+#   * `apt: deb: <path>` OPENS the .deb to read its version, and nothing
+#     downloaded it.
+#   * the `--test` pre-flight needs an installed binary and a rendered config.
+#
+# All of those are artefacts of dry-running a first install, not defects in the
+# play. So: on a converged host --check --diff previews everything, including a
+# real content diff of telegraf.conf — the run that actually matters, because that
+# is when someone is reviewing a config change. On a virgin host, or on the first
+# --check after a version bump, it previews the plan in a debug message instead of
+# failing.
+- name: Decide whether check mode can preview the install
+  ansible.builtin.set_fact:
+    telegraf_agent_preview_only: >-
+      {{ ansible_check_mode
+         and not (telegraf_agent_etc_stat.stat.isdir | default(false)
+                  and telegraf_agent_deb_stat.stat.exists) }}
+
+# --- What the inputs shell out to --------------------------------------------
+# `sensors` and `smartctl` were both MEASURED PRESENT on eq12 and n5pro
+# (2026-08-24) — but "measured present" is not a guarantee, and neither arrives
+# from anything this role controls. lm-sensors is installed by `proxmox_host`, a
+# DIFFERENT playbook that a metrics-agents-only run never touches, and
+# smartmontools is here only because PVE pulls it in. Either could be absent on a
+# rebuilt host, or on the next host added to this group, and the failure would be
+# quiet in exactly the way this role is built to prevent: telegraf stays `active`
+# and the sensors/smart families simply stop existing. So the role encodes its own
+# dependencies (#186 review round).
+- name: Install the sensor and SMART tooling the inputs shell out to
+  ansible.builtin.apt:
+    name:
+      - lm-sensors
+      - smartmontools
+    state: present
+  when: not telegraf_agent_preview_only
+
+# --- The pinned package ------------------------------------------------------
+- name: Create the telegraf package cache directory
+  ansible.builtin.file:
+    path: "{{ telegraf_agent_deb_cache_dir }}"
+    state: directory
+    mode: "0755"
+  when: not telegraf_agent_preview_only
+
+# --- Getting the artefact onto the host: TWO LEGS, controller first ----------
+#
+# THE TARGET IS NOT ASSUMED TO REACH THE INTERNET. Both hypervisors DO reach
+# dl.influxdata.com today (measured 2026-08-24), so unlike vector_agent this is not
+# working around a live defect — it is keeping the shape that already proved
+# necessary once. n5pro has NO ROUTE TO GITHUB: github.com:443 is REFUSED in 2ms
+# from that host while deb.debian.org and enterprise.proxmox.com answer 200, and
+# eq12 reaches GitHub fine. An instant refusal on a host whose own repos work is
+# selective upstream policy on the operator's network, and it can just as easily
+# appear in front of a different domain tomorrow.
+#
+# So: the CONTROLLER fetches once (`run_once`) into its own cache and ships the
+# file to each host; a direct download on the target is the FALLBACK, used only
+# when the controller could not get it.
+#
+# BOTH legs keep `checksum:` and NEITHER has a stat-exists gate (CLAUDE.md).
+# get_url hashes whatever is already on disk, skips the fetch on a match and
+# re-downloads on a mismatch, so a re-run is cheap AND a corrupted or tampered
+# cache is repaired rather than trusted. The `telegraf_agent_preview_only`
+# conditions are NOT that guard: they are false on every real run.
+#
+# CONSIDERED AND REJECTED — InfluxData's APT repository. It floats the version
+# unless separately pinned, which fights the single-place version+sha256 pin this
+# role is built on, and it needs exactly the HTTPS egress to a non-Debian host that
+# the controller leg exists to stop depending on. Recorded so the next person does
+# not re-derive it.
+- name: Create the controller-side package cache
+  ansible.builtin.file:
+    path: "{{ telegraf_agent_controller_cache }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  when: not ansible_check_mode
+
+# LEG 1. `ignore_errors: true`, and the difference from `failed_when: false` is
+# not stylistic — it is CLAUDE.md's measured trap, found here by #186's review
+# round. `failed_when: false` does not "let the result through": it ASSIGNS
+# failed=False to the register. Leg 1b's
+# `not (telegraf_agent_controller_fetch.failed | default(true))` therefore read
+# False for a fetch that had just FAILED — so 1b ran on a .deb the controller
+# never got, and leg 2, whose condition is the same term inverted, could never be
+# selected: the fallback leg was unreachable dead code for the life of this role.
+# `ignore_errors: true` records the REAL failed=True, which is also what the
+# WHICH-LEG-FAILED diagnosis in the arrival assert below reads to name the leg
+# that broke. A leg that does fail now shows as failed(ignored) in the recap's
+# `ignored` column — honest, and the loud failure still belongs to that assert.
+- name: Fetch the pinned telegraf .deb on the controller
+  ansible.builtin.get_url:
+    url: "{{ telegraf_agent_deb_url }}"
+    dest: "{{ telegraf_agent_controller_cache }}/{{ telegraf_agent_deb_filename }}"
+    checksum: "sha256:{{ telegraf_agent_deb_sha256 }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: telegraf_agent_controller_fetch
+  ignore_errors: true
+  when: not ansible_check_mode
+
+# LEG 1b. `copy` compares checksums and transfers only on a difference, so this
+# is idempotent and costs nothing on a converged host.
+- name: Ship the controller-cached .deb to the target
+  ansible.builtin.copy:
+    src: "{{ telegraf_agent_controller_cache }}/{{ telegraf_agent_deb_filename }}"
+    dest: "{{ telegraf_agent_deb_path }}"
+    mode: "0644"
+  register: telegraf_agent_deb_shipped
+  when:
+    - not telegraf_agent_preview_only
+    - telegraf_agent_controller_fetch is not skipped
+    - not (telegraf_agent_controller_fetch.failed | default(true))
+
+# LEG 2, the fallback: the target fetches for itself, but ONLY if the controller
+# could not — and this leg is REACHABLE only because leg 1 uses ignore_errors
+# rather than failed_when:false (read leg 1's note; that is the defect #186's
+# review round measured). ignore_errors here for the same two reasons: the assert
+# below owns the diagnosis, and it reads the real `.failed` values to say which
+# leg broke. A failed leg shows as failed(ignored) in the recap.
+- name: Download the pinned telegraf .deb on the target (fallback)
+  ansible.builtin.get_url:
+    url: "{{ telegraf_agent_deb_url }}"
+    dest: "{{ telegraf_agent_deb_path }}"
+    checksum: "sha256:{{ telegraf_agent_deb_sha256 }}"
+    mode: "0644"
+  register: telegraf_agent_deb_direct
+  ignore_errors: true
+  when:
+    - not telegraf_agent_preview_only
+    # `not ansible_check_mode` is NOT redundant with preview_only. The controller
+    # leg above is check-mode-gated, so under --check it is always "skipped",
+    # which would otherwise make this fallback the chosen leg on every CONVERGED
+    # host — and get_url fetches for real even in check mode. A dry run would then
+    # pull the artefact per host. Under --check neither leg runs and the arrival
+    # assert below still verifies the artefact already on disk, which is the
+    # honest thing for a dry run to check.
+    - not ansible_check_mode
+    - telegraf_agent_controller_fetch is skipped or (telegraf_agent_controller_fetch.failed | default(true))
+
+# VERIFY ON ARRIVAL. This is NOT the forbidden stat-exists gate: it gates
+# nothing, it is a POST-CONDITION. A transfer that reported success is not
+# evidence the bytes are right, and `apt` is about to install whatever sits at
+# this path — so the pinned sha256 is checked against the file that actually
+# landed, by whichever leg landed it.
+- name: Checksum the .deb that actually arrived on the target
+  ansible.builtin.stat:
+    path: "{{ telegraf_agent_deb_path }}"
+    checksum_algorithm: sha256
+  register: telegraf_agent_deb_arrived
+  when: not telegraf_agent_preview_only
+
+- name: Assert the pinned telegraf package is on the target and intact
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_deb_arrived.stat.exists
+      - telegraf_agent_deb_arrived.stat.checksum == telegraf_agent_deb_sha256
+    fail_msg: >-
+      {{ telegraf_agent_deb_filename }} is missing or corrupt on
+      {{ inventory_hostname }}, so nothing may be installed from it.
+      Present: {{ telegraf_agent_deb_arrived.stat.exists | default(false) }}.
+      Expected sha256 {{ telegraf_agent_deb_sha256 }},
+      found {{ telegraf_agent_deb_arrived.stat.checksum | default('none') }}.
+      WHICH LEG FAILED --
+      controller fetch:
+      {{ 'skipped' if telegraf_agent_controller_fetch is skipped
+         else ('ok' if not (telegraf_agent_controller_fetch.failed | default(true))
+               else 'FAILED: ' ~ (telegraf_agent_controller_fetch.msg | default('?'))) }};
+      ship to target:
+      {{ 'not attempted' if telegraf_agent_deb_shipped is skipped else 'attempted' }};
+      direct download on target:
+      {{ 'not attempted' if telegraf_agent_deb_direct is skipped
+         else ('ok' if not (telegraf_agent_deb_direct.failed | default(true))
+               else 'FAILED: ' ~ (telegraf_agent_deb_direct.msg | default('?'))) }}.
+      If BOTH legs failed, neither this controller nor {{ inventory_hostname }}
+      can reach {{ telegraf_agent_deb_url }} -- note n5pro is already known to be
+      refused by github.com under operator network policy, which is exactly why
+      the controller leg exists.
+    quiet: true
+  when: not telegraf_agent_preview_only
+
+# Every version bump otherwise leaves another artefact in the cache forever.
+# Deleting the superseded ones is the role's job, not a line in a bump procedure
+# someone has to remember — but ONLY the superseded ones: the current file is what
+# makes a re-run cheap and what `apt` installs from.
+- name: Find superseded telegraf packages in the cache
+  ansible.builtin.find:
+    paths: "{{ telegraf_agent_deb_cache_dir }}"
+    patterns: "telegraf_*_amd64.deb"
+    excludes: "{{ telegraf_agent_deb_filename }}"
+  register: telegraf_agent_stale_debs
+  when: not telegraf_agent_preview_only
+
+- name: Remove superseded telegraf packages from the cache
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ telegraf_agent_stale_debs.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not telegraf_agent_preview_only
+
+- name: Report what a real run would do here (check mode, telegraf not installed yet)
+  ansible.builtin.debug:
+    msg: >-
+      CHECK MODE, and telegraf is not installed on {{ inventory_hostname }} yet
+      (/etc/telegraf present: {{ telegraf_agent_etc_stat.stat.isdir | default(false) }},
+      {{ telegraf_agent_deb_filename }} cached:
+      {{ telegraf_agent_deb_stat.stat.exists }}). A real run WILL: download and
+      install telegraf {{ telegraf_agent_version }} from the pinned .deb; write
+      /etc/telegraf/telegraf.conf, /etc/telegraf/telegraf.env (0600) and
+      /etc/systemd/system/telegraf.service.d/10-homelab.conf
+      {{ '(plus /usr/local/lib/telegraf/acpi_fan_state.sh)'
+         if telegraf_agent_acpi_fan_state | bool else '' }};
+      run `telegraf --test` as the unit user with the unit's capabilities and
+      refuse to continue unless every family in
+      telegraf_agent_expected_test_output appears in ITS OWN output; enable and
+      start telegraf.service; and then refuse to finish unless this host's
+      metrics come back out of VictoriaMetrics labelled
+      host={{ inventory_hostname }}.
+  when: telegraf_agent_preview_only
+
+# --- Configuration, written BEFORE the package is installed ------------------
+# Ordering note, load-bearing rather than tidy, with the .deb's actual maintainer
+# scripts read rather than assumed (1.39.3, inspected 2026-08-24):
+#
+#   * FIRST install: the postinst copies the SAMPLE config to
+#     /etc/telegraf/telegraf.conf only if that file is ABSENT. Writing ours first
+#     means the 8000-line sample is never on disk and never active.
+#   * UPGRADE (every version bump from here on): `deb-systemd-invoke try-restart`
+#     restarts telegraf.service from inside the apt task, onto whatever config is
+#     on disk at that moment. Writing the config, the env file and the drop-in
+#     first is what makes that restart land on OUR file with OUR unit properties
+#     already in force.
+#
+# systemd reads drop-ins for units that do not exist yet, so
+# /etc/systemd/system/telegraf.service.d can be populated up front.
+- name: Create the telegraf configuration directory
+  ansible.builtin.file:
+    path: /etc/telegraf
+    state: directory
+    mode: "0755"
+
+# No secrets in this file — the credentials are `${VM_AUTH_*}` placeholders that
+# telegraf resolves from the process environment — so the diff is left ON. That
+# diff is the whole point of `--check --diff` on a converged host.
+- name: Deploy the telegraf agent configuration
+  ansible.builtin.template:
+    src: telegraf.conf.j2
+    dest: /etc/telegraf/telegraf.conf
+    mode: "0644"
+  register: telegraf_agent_config
+  when: not telegraf_agent_preview_only
+
+# diff:false because this file carries the VictoriaMetrics credential; the task
+# still reports changed, its content just never renders into the transcript
+# (#88, #117). Deliberately NOT no_log: no_log also censors an undefined-variable
+# failure, and that loud failure is itself a control.
+#
+# 0600 root:root: systemd reads EnvironmentFile as the MANAGER, before it drops to
+# User=telegraf, so the telegraf user never needs to read it. Do not widen the
+# mode "so telegraf can read it" — that would be a real regression for no gain.
+- name: Deploy the telegraf agent systemd environment file
+  ansible.builtin.template:
+    src: telegraf.env.j2
+    dest: /etc/telegraf/telegraf.env
+    owner: root
+    group: root
+    mode: "0600"
+  diff: false
+  register: telegraf_agent_env
+  when: not telegraf_agent_preview_only
+
+- name: Create the telegraf systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/telegraf.service.d
+    state: directory
+    mode: "0755"
+
+- name: Deploy the telegraf systemd drop-in
+  ansible.builtin.template:
+    src: telegraf-systemd-dropin.conf.j2
+    dest: /etc/systemd/system/telegraf.service.d/10-homelab.conf
+    mode: "0644"
+  register: telegraf_agent_dropin
+  when: not telegraf_agent_preview_only
+
+# eq12 only, and the gate is the host_vars flag rather than a fact probe: n5pro
+# has NO ACPI fan objects at all (measured 2026-08-24), so there is nothing here
+# to collect and nothing must pretend otherwise. `| bool` at every use site — a
+# host_vars value written as "false" is a non-empty string and therefore truthy.
+- name: Create the telegraf helper script directory
+  ansible.builtin.file:
+    path: /usr/local/lib/telegraf
+    state: directory
+    mode: "0755"
+  when: telegraf_agent_acpi_fan_state | bool
+
+- name: Deploy the ACPI fan-state exec script (binary state, not RPM)
+  ansible.builtin.copy:
+    src: acpi_fan_state.sh
+    dest: /usr/local/lib/telegraf/acpi_fan_state.sh
+    mode: "0755"
+  register: telegraf_agent_fan_script
+  when: telegraf_agent_acpi_fan_state | bool
+
+# --- The package -------------------------------------------------------------
+# `deb:` rather than a repository: a pinned, checksummed file is what makes this
+# reproducible, and InfluxData's apt repo would float the version. dpkg reports
+# changed only when the installed version differs, so a converged host reports ok
+# and nothing restarts.
+- name: Install the pinned telegraf package
+  ansible.builtin.apt:
+    deb: "{{ telegraf_agent_deb_path }}"
+  register: telegraf_agent_pkg
+  when: not telegraf_agent_preview_only
+
+# --- Pre-flight: do the INPUTS actually produce anything? ---------------------
+# THE BAR CLAUDE.md SETS, applied to the one failure shape this role is most
+# exposed to. `telegraf --test` parses the config, runs every input EXACTLY ONCE
+# and prints the resulting metrics to stdout without sending them anywhere. So a
+# config error is rc != 0 (loud, and deliberately not softened with ignore_errors),
+# and — more importantly — the stdout is the INPUTS' OWN OUTPUT rather than
+# evidence that a process started.
+#
+# That distinction is the entire lesson from the container telegraf losing
+# /usr/bin/ping to no_new_privs: eight metrics went to NO DATA while the container
+# stayed healthy, every process-level check green. `[[inputs.smart]]` here is
+# exactly that shape — if the capabilities are wrong, smartctl fails to open the
+# device, telegraf logs it once and carries on serving every other input.
+#
+# RUN THROUGH systemd-run, NOT THROUGH A SHELL, and with the SAME properties the
+# unit runs under. Two reasons, both measured in #134:
+#
+#  1. WRONG USER/PRIVILEGE. The play is `become: true` and ansible.cfg sets
+#     become_user=root, so a bare `telegraf --test` would run as ROOT and prove
+#     nothing about whether User=telegraf plus the ambient capability pair can
+#     reach /dev/nvme*. The whole point of this task is that it fails when the
+#     privilege model is wrong. Hence User/Group/AmbientCapabilities/
+#     NoNewPrivileges are mirrored from the drop-in here.
+#  2. WRONG PARSER. /etc/telegraf/telegraf.env is written for SYSTEMD's grammar,
+#     in which a double-quoted value is literal. Bash's `.` expands $VAR, $( ) and
+#     backticks inside double quotes — measured in #134, a probe value's backtick
+#     EXECUTED as root. systemd-run parses the env file with systemd's own parser,
+#     with no shell anywhere in the path.
+#
+# The ProtectSystem/ProtectHome/PrivateTmp/RestrictAddressFamilies hardening from
+# the drop-in is deliberately NOT mirrored here: this rehearsal exists to prove
+# the INPUTS can read what they need, and confinement of the output path is proven
+# afterwards by the unit actually running and the metrics actually arriving.
+#
+# NOT PROVABLE BY --check, structurally: it needs an installed binary and a
+# rendered config, neither of which exists until a real apply. It is therefore in
+# the class of task whose first execution is its first test — verify any edit
+# against the binary on a host, never against a dry run (CLAUDE.md).
+- name: Run telegraf --test as the unit user with the unit environment
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-run
+      - --pipe
+      - --wait
+      - --collect
+      - --quiet
+      - --property=User=telegraf
+      - --property=Group=telegraf
+      - "--property=AmbientCapabilities=CAP_DAC_OVERRIDE CAP_SYS_ADMIN"
+      - --property=NoNewPrivileges=yes
+      - --property=EnvironmentFile=/etc/telegraf/telegraf.env
+      - /usr/bin/telegraf
+      - --config
+      - /etc/telegraf/telegraf.conf
+      - --test
+  register: telegraf_agent_test
+  changed_when: false
+  when:
+    - not telegraf_agent_preview_only
+    - not ansible_check_mode
+
+- name: Assert every declared sensor family appears in telegraf's own output
+  ansible.builtin.assert:
+    that:
+      # Plain substring, NOT a regex: the host_vars entries are literals like
+      # `chip=nvme-pci-0300`, in which `.` and `-` would otherwise be regex
+      # metacharacters quietly widening the match (#186 review round).
+      - item in telegraf_agent_test.stdout
+    fail_msg: >-
+      `telegraf --test` on {{ inventory_hostname }} did not produce a metric
+      matching '{{ item }}'. The agent would start green and ship everything
+      EXCEPT this family — the ping-metrics failure shape (CLAUDE.md): verify
+      the input's own output, not that the process runs. Inspect
+      `telegraf --config /etc/telegraf/telegraf.conf --test` on the host; if the
+      hardware surface genuinely changed, update
+      telegraf_agent_expected_test_output in this host's host_vars in the same
+      change that explains why.
+    quiet: true
+  loop: "{{ telegraf_agent_expected_test_output }}"
+  when:
+    - not telegraf_agent_preview_only
+    - not ansible_check_mode
+
+# The other half of the fabricated-zero rule: proving what must NOT be there.
+# A tagdrop that silently stopped matching would be invisible from every
+# process-level check, and the symptom would be a 0 V reading dragging min()/avg()
+# panels to the floor — the _devicename_sda lesson, one input over. Loops zero
+# times on eq12, which declares no forbidden features, and that is correct: eq12
+# has no amdgpu.
+- name: Assert the fabricated-zero features never leave this host
+  ansible.builtin.assert:
+    that:
+      # Plain substring, for the same reason as the expected list above — and it
+      # matters more on a NEGATIVE assert, where an over-wide regex reads as
+      # "the exclusion is working" (#186 review round).
+      - item not in telegraf_agent_test.stdout
+    fail_msg: >-
+      `telegraf --test` on {{ inventory_hostname }} emitted '{{ item }}', an
+      unsupported always-zero reading this role exists to exclude (amdgpu
+      vddgfx/vddnb measure 0.000 V — fabricated zeros drag min()/avg() panels
+      to the floor, the _devicename_sda lesson). The sensors tagdrop in
+      telegraf.conf.j2 is not working — fix the filter, do not delete this
+      assert.
+    quiet: true
+  loop: "{{ telegraf_agent_forbidden_test_output }}"
+  when:
+    - not telegraf_agent_preview_only
+    - not ansible_check_mode
+
+# --- systemd -----------------------------------------------------------------
+# Single source of truth for the restart decision (vector_agent/postgresql
+# precedent). Deliberately NO default() on ANY of the five: if one is renamed this
+# must fail loudly rather than silently decide no restart is needed, which would
+# leave telegraf running the OLD config while the play reports converged — the
+# do-nothing failure #78/#139 are about.
+#
+# And none is NEEDED anywhere, which is where this comment used to be wrong
+# (#186 review round). A task skipped by its `when` STILL REGISTERS — the skip
+# result is stored and `changed` is false — so every one of these five variables
+# exists on every host in the group. That is as true of the fan-script task,
+# gated on telegraf_agent_acpi_fan_state and therefore skipped on n5pro, as it is
+# of the four preview_only-gated tasks above it; a `when`-gated task is not
+# "never reached", it is skipped, which is the very mechanism the paragraph above
+# relies on. Reading the term bare is therefore uniform, and a renamed register
+# fails loudly instead of silently voting "no restart".
+- name: Determine whether telegraf must be restarted
+  ansible.builtin.set_fact:
+    telegraf_agent_needs_restart: >-
+      {{ telegraf_agent_pkg.changed
+         or telegraf_agent_config.changed
+         or telegraf_agent_env.changed
+         or telegraf_agent_dropin.changed
+         or telegraf_agent_fan_script.changed }}
+
+- name: Preview the telegraf restart (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      Config change WILL RESTART telegraf on a real apply — at most one 60s
+      collection interval of this host's metrics is lost. Nothing else on the
+      host is affected; this is a read-only collector.
+  when:
+    - ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+- name: Reload systemd units for the telegraf drop-in
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_dropin.changed or telegraf_agent_pkg.changed
+
+# Defensive, and cheap. Nothing in a first install is expected to leave the unit
+# `failed`, but the state this clears is reachable in normal operation: a
+# VictoriaMetrics outage at the wrong moment, or a hand-edited config on the host,
+# can consume the shipped start limit and latch `failed` — and `systemctl start`
+# on such a unit answers "start request repeated too quickly" rather than starting
+# it. The drop-in removes the limit going forward; this clears state already
+# latched under the old one, so the healing run is not the one that cannot heal.
+# Same shape as the nftables RemainAfterExit trap in CLAUDE.md: `state: started`
+# cannot see, and cannot repair, a condition invalidated from outside.
+- name: Clear any latched failed state on telegraf.service
+  ansible.builtin.command: systemctl reset-failed telegraf.service
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+# UNGATED on purpose — no `changed` condition. The restart below only fires when
+# something in this run changed. If telegraf is dead on an otherwise converged
+# host, nothing else here would start it and this host silently stops reporting
+# while every task reports ok.
+- name: Ensure telegraf is enabled and running
+  ansible.builtin.systemd_service:
+    name: telegraf
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+# The freshness gate below compares stored-sample timestamps against this
+# instant. Host clock, not controller clock: telegraf stamps samples with the
+# host's clock, so the comparison must use the same one.
+- name: Record the host clock immediately before the restart
+  ansible.builtin.command: date +%s
+  register: telegraf_agent_restart_epoch
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+- name: Restart telegraf for changed package or configuration
+  ansible.builtin.systemd_service:
+    name: telegraf
+    state: restarted
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+# The wait is the load-bearing part: telegraf exits within a second or so of a
+# malformed config or an unresolvable ${VAR}, so an is-active issued immediately
+# after the restart lands inside the crash window about as often as not, and
+# `active` there means nothing.
+- name: Let a restarted telegraf run long enough to crash on a bad config
+  ansible.builtin.wait_for:
+    timeout: "{{ telegraf_agent_settle_seconds }}"
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+# --- Prove the unit is up AND that the drop-in actually took ------------------
+# `systemd_service` with a name and no state/enabled/daemon_reload does not act: it
+# reports changed:false and returns `status`, the parsed output of
+# `systemctl show <unit>` — i.e. the EFFECTIVE, MERGED unit. That is the only
+# honest answer to "did the override apply", and it is why this is one task rather
+# than a `systemctl` command (which ansible-lint rejects, correctly).
+- name: Read the effective telegraf unit properties
+  ansible.builtin.systemd_service:
+    name: telegraf
+  register: telegraf_agent_unit
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert telegraf is running
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_unit.status.ActiveState == 'active'
+    fail_msg: >-
+      telegraf.service on {{ inventory_hostname }} is
+      '{{ telegraf_agent_unit.status.ActiveState }}'
+      ({{ telegraf_agent_unit.status.SubState }}), not active.
+      Check `systemctl status telegraf` and `journalctl -u telegraf -n 50`. An
+      unresolvable ${VAR} in telegraf.conf and a missing EnvironmentFile both
+      exit non-zero at startup; anything else is in the journal.
+    quiet: true
+  when: not ansible_check_mode
+
+# EVERY directive in the drop-in is covered here, because a drop-in that is on
+# disk and not in force is precisely the silent-green shape this repo keeps
+# hitting. The capability pair earns its two lines: without it the smart input
+# fails to open /dev/nvme* (or is denied NVME_IOCTL_ADMIN_CMD) and telegraf stays
+# happily `active` — the pre-flight above catches that at deploy time, but only
+# this assert catches a drop-in that stopped applying between deploys.
+#
+# PROPERTY NAMES ARE MEASURED, NOT GUESSED, and one is a trap: the unit-file
+# DIRECTIVE is `StartLimitIntervalSec` but the property `systemctl show` reports
+# is `StartLimitIntervalUSec`, and `systemctl show -p StartLimitIntervalSec`
+# prints NOTHING AT ALL — an assert written against that name would pass or fail
+# for the wrong reason. Verified on the live fleet 2026-08-19 against
+# modprobe@.service, which ships StartLimitIntervalSec=0 and reports
+# StartLimitIntervalUSec=0.
+#
+# PROPERTY VALUE RENDERINGS ARE MEASURED, not assumed — taken from
+# `systemctl show telegraf` at the FIRST LIVE APPLY on BOTH hypervisors,
+# 2026-08-25 (#186). What it prints:
+#   User=telegraf
+#   AmbientCapabilities=cap_dac_override cap_sys_admin   (LOWERCASE, space-joined)
+#   NoNewPrivileges=yes                                  (booleans render yes/no)
+#   ProtectSystem=strict
+#   StartLimitIntervalUSec=0                             (the spelling trap above)
+#   Restart=always
+# If a future systemd changes a rendering, correct this assert to what it
+# actually prints and record the new measurement here. Do not soften the assert
+# to make it pass — a rendering mismatch is a two-minute fix; a deleted assert is
+# permanent.
+#
+# No default() on any lookup: a property that stops being reported must raise,
+# not quietly satisfy a comparison against an empty string.
+- name: Assert the homelab systemd drop-in is in force
+  ansible.builtin.assert:
+    that:
+      - "'10-homelab.conf' in telegraf_agent_unit.status.DropInPaths"
+      - telegraf_agent_unit.status.User == 'telegraf'
+      - "'cap_dac_override' in telegraf_agent_unit.status.AmbientCapabilities"
+      - "'cap_sys_admin' in telegraf_agent_unit.status.AmbientCapabilities"
+      - telegraf_agent_unit.status.NoNewPrivileges == 'yes'
+      - telegraf_agent_unit.status.StartLimitIntervalUSec == '0'
+      - "'/etc/telegraf/telegraf.env' in telegraf_agent_unit.status.EnvironmentFiles"
+      - telegraf_agent_unit.status.Restart == 'always'
+      - telegraf_agent_unit.status.ProtectSystem == 'strict'
+    fail_msg: >-
+      /etc/systemd/system/telegraf.service.d/10-homelab.conf is on disk but the
+      running unit does not reflect it.
+      User={{ telegraf_agent_unit.status.User }},
+      AmbientCapabilities={{ telegraf_agent_unit.status.AmbientCapabilities }},
+      NoNewPrivileges={{ telegraf_agent_unit.status.NoNewPrivileges }},
+      StartLimitIntervalUSec={{ telegraf_agent_unit.status.StartLimitIntervalUSec }},
+      Restart={{ telegraf_agent_unit.status.Restart }},
+      ProtectSystem={{ telegraf_agent_unit.status.ProtectSystem }},
+      EnvironmentFiles={{ telegraf_agent_unit.status.EnvironmentFiles }},
+      DropInPaths={{ telegraf_agent_unit.status.DropInPaths }}.
+      Without the ambient capability pair the smart input silently loses
+      smartctl (opens fail, or NVME_IOCTL_ADMIN_CMD is denied); without
+      StartLimitIntervalSec=0 a crash loop latches `failed` permanently. Try
+      `systemctl daemon-reload` and re-run.
+    quiet: true
+  when: not ansible_check_mode
+
+# --- Prove the environment file parsed the way we claim it does ---------------
+# THE claim in telegraf.env.j2's header, tested rather than believed: systemd
+# strips the surrounding double quotes and takes the contents LITERALLY, `$`
+# included. If it did not — if it interpolated, or kept the quotes, or truncated
+# at a `$` the way compose's dotenv parser does (#117) — VictoriaMetrics would
+# answer 401 and telegraf would stay up dropping every batch, which is the failure
+# this whole issue family exists to stop being invisible.
+#
+# The comparison is between two sha256 digests, computed on the host and in Jinja.
+# Neither the credential nor a diff of it ever appears: the shell prints only a
+# digest, and `quiet: true` means a failed assert prints the literal expression
+# rather than the operands. Deliberately NOT no_log — that would censor the
+# failure output this exists to produce.
+- name: Digest the VictoriaMetrics password the running telegraf process actually holds
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      pid=$(systemctl show -p MainPID --value telegraf)
+      tr '\0' '\n' < "/proc/${pid}/environ" \
+        | sed -n 's/^VM_AUTH_PASSWORD=//p' \
+        | tr -d '\n' \
+        | sha256sum \
+        | cut -d' ' -f1
+    executable: /bin/bash
+  register: telegraf_agent_env_secret_digest
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the credential survived the systemd EnvironmentFile byte for byte
+  ansible.builtin.assert:
+    that:
+      - (telegraf_agent_env_secret_digest.stdout | trim) == (vault_vm_auth_password | string | hash('sha256'))
+    fail_msg: >-
+      The VM_AUTH_PASSWORD in telegraf's process environment does not match the
+      vault value. systemd's EnvironmentFile parsing has mangled it — check
+      /etc/telegraf/telegraf.env for an unbalanced quote, and re-read the parser
+      notes at the top of roles/telegraf_agent/templates/telegraf.env.j2. telegraf
+      will 401 against VictoriaMetrics and stay up while dropping every batch.
+    quiet: true
+  when: not ansible_check_mode
+
+# --- End-to-end arrival proof: THE bar for this role --------------------------
+# Everything above proves a process is running with the right environment and that
+# the inputs produce metrics locally. That is exactly the evidence that was green
+# while TrueNAS's configured-but-not-delivering exporter sent nothing for minutes
+# after a green apply, and while the log pipeline was dead for ~30 days: the
+# durable rule from both is that the evidence is a query against the STORE, never
+# the playbook recap.
+#
+# Four proofs, one per delivery-relevant family, because they can fail
+# independently — a capability regression kills SMART while cpu/mem keep flowing,
+# and a tagdrop or filter mistake kills sensors alone.
+#
+# RETRIES ARE NOT PADDING. VictoriaMetrics ingestion is not immediately queryable:
+# measured in #174, a probe POSTed to the import endpoint returned 204, was
+# invisible at +3s and present at +45s. Twelve attempts at 10s covers that with
+# room, so exhaustion here is a real failure rather than a race.
+- name: Wait for this host's telegraf metrics to come back out of VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'last_over_time(system_uptime{host="{{ inventory_hostname }}"}[5m])'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_arrival
+  until: >-
+    telegraf_agent_arrival.status | default(0) == 200
+    and (telegraf_agent_arrival.json.data.result | default([]) | length) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  # failed_when:false so RETRY EXHAUSTION lands on the assert below, which can say
+  # what to check. No no_log anywhere on these pairs — censoring them would blind
+  # the one diagnostic they exist to print (#88).
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Assert this host's metrics actually reached VictoriaMetrics
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_arrival.status | default(0) == 200
+      - telegraf_agent_arrival.json.data.result | default([]) | length > 0
+    fail_msg: >-
+      system_uptime{host="{{ inventory_hostname }}"} has no sample in the last
+      5 minutes. telegraf may be `active` — that is the failure mode, not
+      evidence against it. Check, in order:
+      (1) `journalctl -u telegraf -n 100` on {{ inventory_hostname }} for output
+          errors — a 401 means the credential, and telegraf will NOT exit;
+      (2) VictoriaMetrics on eq12_docker is up
+          (`curl -su "$U:$P" http://192.168.25.15:8428/health`);
+      (3) remember ingest lags queryability by up to ~a minute (#174) — the
+          12x10s retry above already covers that, so exhaustion is real.
+      HTTP status was {{ telegraf_agent_arrival.status | default('none') }}.
+    quiet: true
+  when: not ansible_check_mode
+
+# FRESHNESS, which the assert above cannot prove on a run that RESTARTED telegraf
+# — and it is a real hole, not a theoretical one (#186 review round). That query's
+# 5m lookbehind comfortably contains the last flush of the process that was
+# running BEFORE the restart: flush_interval is 10s, so the dead process's final
+# batch is at most ~90s old when the new one starts. A change that broke ONLY the
+# output path — a wrong-but-non-empty endpoint URL, a regression in the output
+# block of telegraf.conf.j2 — would therefore satisfy every gate in this role,
+# including that arrival assert, on the DEAD process's residual samples, while the
+# restarted agent shipped nothing. This pair requires a sample whose TIMESTAMP
+# POSTDATES the restart, which no residual sample can satisfy.
+#
+# THE QUERY IS THE MEASURED FORM, and the obvious one is wrong. Against this
+# VictoriaMetrics, 2026-08-25:
+#   timestamp(last_over_time(system_uptime{host="eq12"}[5m])) -> 1787691600
+#   timestamp(system_uptime{host="eq12"})                     -> 1787691664
+#   time() - lag(system_uptime{host="eq12"}[10m])             -> 1787691664
+# Wrapping the selector in last_over_time makes VM evaluate it as a subquery on a
+# 5-MINUTE GRID and return the grid point, not the sample time — 1787691600 is
+# exactly divisible by 300 — so that form reports a timestamp up to 5 minutes
+# stale and would fail this assert on a perfectly healthy restart. The bare
+# selector returns the LAST RAW SAMPLE's timestamp, corroborated to the second by
+# the independent time()-minus-lag() form (lag is the same function the absence
+# rules use). If no sample exists in VM's default 5m lookbehind the result is
+# empty, which the length check below catches.
+#
+# TIMING BUDGET, also measured: VM's -search.latencyOffset defaults to 30s, so an
+# instant query evaluates 30s in the past (time() read 29.5s behind wall clock
+# above) — on top of up to 65s to the next round_interval collection and a 10s
+# flush. ~105s worst case from restart to visibility, against the 15s settle
+# already spent plus 12x10s of retries here.
+#
+# THE FAMILY ASSERTS BELOW INHERIT THIS PROOF and deliberately do not repeat it:
+# one fresh system_uptime sample proves the restarted process's output path end to
+# end, and every family rides the same batched output — so their job stays "does
+# this family exist at all", which is a different claim.
+- name: Wait for a telegraf sample that postdates the restart
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'timestamp(system_uptime{host="{{ inventory_hostname }}"})'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_fresh_arrival
+  until: >-
+    telegraf_agent_fresh_arrival.status | default(0) == 200
+    and (telegraf_agent_fresh_arrival.json.data.result | default([]) | length) > 0
+    and (telegraf_agent_fresh_arrival.json.data.result[0].value[1] | float)
+    > (telegraf_agent_restart_epoch.stdout | float)
+  retries: 12
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+- name: Assert the RESTARTED telegraf has shipped a sample of its own
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_fresh_arrival.status | default(0) == 200
+      - telegraf_agent_fresh_arrival.json.data.result | default([]) | length > 0
+      - (telegraf_agent_fresh_arrival.json.data.result[0].value[1] | float)
+        > (telegraf_agent_restart_epoch.stdout | float)
+    fail_msg: >-
+      The newest system_uptime sample for host="{{ inventory_hostname }}" is
+      {{ telegraf_agent_fresh_arrival.json.data.result[0].value[1] | default('absent') }},
+      which does NOT postdate this run's restart at
+      {{ telegraf_agent_restart_epoch.stdout | default('unknown') }} (host clock).
+      So VictoriaMetrics holds samples for this host — the plain arrival assert
+      above passed on them — but they were shipped by the telegraf process this
+      run REPLACED, whose last flush is at most ~90s old and therefore sits inside
+      that assert's 5m lookbehind. The restarted agent has delivered nothing. That
+      is the signature of a broken OUTPUT path specifically (the inputs are proven
+      by `telegraf --test` above, which passed): a wrong-but-non-empty
+      victoriametrics_ingest_endpoint, or a regression in the [[outputs.http]]
+      block of telegraf.conf.j2. Check `journalctl -u telegraf -n 100` on
+      {{ inventory_hostname }} for output errors — a 401 or a connection refusal
+      is logged and telegraf does NOT exit — and confirm the URL the running
+      config carries. Retries here already cover the measured ~105s worst-case
+      visibility delay, so exhaustion is real.
+      HTTP status was {{ telegraf_agent_fresh_arrival.status | default('none') }}.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+# The thermal surface is the headline ask of #186 and it has its own failure
+# modes — a missing lm-sensors binary, a renamed chip, a filter that dropped more
+# than it meant to. The --test assert above proves the AGENT produced them; this
+# proves they reached STORAGE, which is a different claim.
+#
+# THE STORED NAMES CARRY THE NUMBER, MEASURED 2026-08-25 on the live store during
+# the first eq12 apply. `remove_numbers = false` in telegraf.conf.j2 is there to
+# keep eq12's core_0..core_3 from merging into one series — but it keeps the
+# digit in the FIELD name as well as in the feature tag, so prometheusremotewrite
+# names the series sensors_temp1_input .. sensors_temp5_input (plus the _max /
+# _crit / _alarm siblings). There is NO `sensors_temp_input` in the store and
+# there never was; a query for that bare name is a guaranteed empty result, which
+# is exactly how this assert first failed — correctly, and for the reason its own
+# fail_msg named. Hence the regex over __name__ rather than a literal.
+- name: Wait for this host's sensor temperatures to reach VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'count({__name__=~"sensors_temp[0-9]+_input", host="{{ inventory_hostname }}"})'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_sensors_arrival
+  until: >-
+    telegraf_agent_sensors_arrival.status | default(0) == 200
+    and (telegraf_agent_sensors_arrival.json.data.result | default([]) | length) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Assert this host's sensor temperatures actually reached VictoriaMetrics
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_sensors_arrival.status | default(0) == 200
+      - telegraf_agent_sensors_arrival.json.data.result | default([]) | length > 0
+    fail_msg: >-
+      No sensors_temp<N>_input series for host="{{ inventory_hostname }}" in
+      VictoriaMetrics, although `telegraf --test` produced the declared chips on
+      this host (the assert above passed). So the thermal surface exists at the
+      agent and is not arriving — check `journalctl -u telegraf -n 100` for
+      output errors, and confirm the stored metric NAMES with
+      `curl -su "$U:$P" '{{ victoriametrics_query_endpoint | regex_replace('/query$', '') }}/label/__name__/values'`
+      | grep sensors. prometheusremotewrite names a series
+      <measurement>_<field>, and with remove_numbers=false the field keeps its
+      digit — measured 2026-08-25, the real names are sensors_temp1_input ..
+      sensors_temp5_input. If a telegraf-side change moved them, fix the regex
+      above to the measured form rather than widening it to match anything.
+      HTTP status was {{ telegraf_agent_sensors_arrival.status | default('none') }}.
+    quiet: true
+  when: not ansible_check_mode
+
+# NVMe SMART is the family most likely to break silently, because it is the only
+# one that needs elevated privilege. If the ambient capability pair ever stops
+# being granted, smartctl fails and telegraf carries on serving every other input
+# perfectly — an agent that is `active`, shipping, and quietly missing the wear
+# and media-error data the root disks were instrumented for.
+- name: Wait for this host's SMART attributes to reach VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'count({__name__=~"smart_device_.+", host="{{ inventory_hostname }}"})'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_smart_arrival
+  until: >-
+    telegraf_agent_smart_arrival.status | default(0) == 200
+    and (telegraf_agent_smart_arrival.json.data.result | default([]) | length) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Assert this host's SMART attributes actually reached VictoriaMetrics
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_smart_arrival.status | default(0) == 200
+      - telegraf_agent_smart_arrival.json.data.result | default([]) | length > 0
+    fail_msg: >-
+      No smart_device_* series for host="{{ inventory_hostname }}" in
+      VictoriaMetrics. This is the family that depends on elevated privilege, so
+      check in this order:
+      (1) `systemctl show telegraf -p AmbientCapabilities -p NoNewPrivileges` —
+          the pair must be cap_dac_override + cap_sys_admin (without SYS_ADMIN
+          the device opens and NVME_IOCTL_ADMIN_CMD is then denied);
+      (2) `journalctl -u telegraf -n 100 | grep -i smart` for smartctl errors;
+      (3) that /usr/sbin/smartctl still exists and `smartctl --scan` finds the
+          root NVMe.
+      Do NOT "fix" this by moving the unit to User=root — relax the specific
+      hardening directive that broke, with the measured failure recorded beside
+      it (roles/telegraf_agent/README.md).
+      HTTP status was {{ telegraf_agent_smart_arrival.status | default('none') }}.
+    quiet: true
+  when: not ansible_check_mode
+
+# eq12 only. The COUNT is the assertion, not merely presence: five ACPI fan
+# objects were measured on this board (PNP0C0B:00-04), and the script emits
+# nothing for a device it cannot read rather than a fabricated zero — so a
+# permission or sysfs change shows up here as four series, not as an obvious
+# absence. Device indices are not stable across boots, which is why the count and
+# not the device names is what is pinned.
+#
+# THIS IS BINARY STATE, NEVER RPM. No tachometer is collected: under the DEFAULT
+# driver set neither host exposes one (measured #186 — no fan*_input, no pwm*, no
+# Super-I/O-class fan driver loaded). eq12's two fans ARE readable via a forced
+# binding of the stock in-kernel it87 module (measured 2026-08-25; unpersisted,
+# not collected, operator decision pending — docs/eq12.md), and n5pro's negative
+# is the definitive one (its EC publishes nothing to read — docs/n5pro.md).
+# Nothing downstream may label, graph or alert on this series as a fan speed.
+- name: Wait for this host's ACPI fan state to reach VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'count(acpi_fan_state_state{host="{{ inventory_hostname }}"})'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_fan_arrival
+  until: >-
+    telegraf_agent_fan_arrival.status | default(0) == 200
+    and (telegraf_agent_fan_arrival.json.data.result | default([]) | length) > 0
+  retries: 12
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_acpi_fan_state | bool
+
+- name: Assert all five ACPI fan objects actually reached VictoriaMetrics
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_fan_arrival.status | default(0) == 200
+      - telegraf_agent_fan_arrival.json.data.result | default([]) | length > 0
+      - telegraf_agent_fan_arrival.json.data.result[0].value[1] == '5'
+    fail_msg: >-
+      acpi_fan_state_state{host="{{ inventory_hostname }}"} does not count 5
+      series — got
+      {{ telegraf_agent_fan_arrival.json.data.result[0].value[1] | default('no result') }}.
+      This board has five ACPI fan objects (PNP0C0B:00-04, measured 2026-08-24)
+      and files/acpi_fan_state.sh emits nothing for a device it cannot read, so a
+      LOW count means devices went unreadable rather than that the metric is
+      missing. Check `grep . /sys/class/thermal/cooling_device*/type` and the
+      matching cur_state files on the host, and
+      `journalctl -u telegraf -n 100 | grep -i exec`. If the hardware genuinely
+      changed, update this count in the same change that explains why.
+      HTTP status was {{ telegraf_agent_fan_arrival.status | default('none') }}.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_acpi_fan_state | bool
