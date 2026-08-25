@@ -114,12 +114,15 @@ groups:
                 uid: P4169E866C3094E38
               # last_over_time, NOT an instant read — see property 1 in the header.
               # `by (devname)` keeps one alert instance per drive so a notification
-              # names WHICH disk. NOTE: the notification policy's group_by still
-              # says `disk`, a pre-#174 label the expr no longer produces — two
-              # drives firing together therefore collapse into one [FIRING:2]
-              # notification; tracked in #188. Do NOT "fix" the expr to by
-              # (disk) to match the policy — that would empty every
-              # {{ $labels.devname }} in the summaries.
+              # names WHICH disk. The notification policy's group_by now carries
+              # `devname` too (#188 — it said `disk`, a pre-#174 label this expr
+              # has never produced, so two drives firing together collapsed into
+              # one [FIRING:2] naming neither). The two files are a MATCHED PAIR:
+              # if they ever diverge again, fix the POLICY, never this expr —
+              # rewriting it to by (disk) would empty every $labels.devname
+              # interpolation in the summaries. The deploy-time group_by assert
+              # in the role's tasks/main.yml is what makes such a divergence
+              # loud instead of silent.
               expr: >-
                 max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas",
                 media="hdd"}[10m]))
@@ -249,17 +252,16 @@ groups:
       # nftables allowlist still grants 192.168.30.20/32 — that grant is a source
       # /32, so if the NAS ever moves address its metrics are dropped silently with
       # no application-level error.
-      #
-      # Routing question (critical/nas-thermal vs the dashboards-only
-      # meaning): #193.
       - uid: truenas-metrics-absent
         title: TrueNAS metrics stopped arriving
         condition: C
         # 10m: three missed 60s pushes would be 3m, but the exporter buffers on
         # failure (buffer_on_failures: 10) and a brief blip self-heals. 10m is
         # long enough not to page on one, short enough that a genuinely dead
-        # stream is caught well before the thermal rules have been blind for an
-        # hour.
+        # stream is caught the same day, well before anyone reaches for a
+        # dashboard that has silently gone dark. (It used to say "before the
+        # thermal rules have been blind for an hour" — those rules stopped
+        # reading this stream in #174.)
         for: 10m
         # THE ONE RULE THAT OWNS ABSENCE, and the only one here that may be
         # Alerting on NoData. Its sentinel is deliberately NOT the disk
@@ -285,8 +287,14 @@ groups:
           __panelId__: "13"
           runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md
         labels:
-          severity: critical
-          component: nas-thermal
+          # warning, not critical, and NOT nas-thermal — decided in #193. Since
+          # #174 this stream feeds DASHBOARDS only; thermal and pool blindness is
+          # owned by truenas-poller-absent (critical). If the appliance itself is
+          # down the poller dies too, so the page still happens — through the rule
+          # that means it. nas-metrics matches no route on purpose: warning +
+          # unmatched component = root policy = email only.
+          severity: warning
+          component: nas-metrics
         data:
           - refId: A
             datasourceUid: P4169E866C3094E38
@@ -424,9 +432,12 @@ groups:
       # ---------------------------------------------------------------------
       # min(truenas_pool_healthy) < 1 means ZFS considers the pool unhealthy —
       # DEGRADED, FAULTED, or carrying errors.
-      # noDataState is OK because absence is owned by the two liveness rules
-      # (truenas-poller-absent and truenas-metrics-absent); duplicating it here
-      # would page three times for one outage.
+      # noDataState is OK because this series is POLLER-fed, so its absence is
+      # owned by truenas-poller-absent specifically — not by the two liveness
+      # rules jointly, and not by truenas-metrics-absent, which watches the
+      # Graphite stream this rule does not read (and since #193 is a
+      # warning routed to email only). Duplicating that ownership here would
+      # add a second page for one outage.
       - uid: truenas-pool-degraded
         title: TrueNAS pool is not healthy
         condition: C

@@ -71,18 +71,32 @@ policies:
       - hostname
       - component_id
       - integration
-      # `disk` joins them for #176, on identical grounds: the TrueNAS thermal
-      # rules carry one instance per DRIVE, and the whole point of the
-      # notification is WHICH disk is hot. Without this key, two drives crossing
-      # 47C together — the airflow case, i.e. the one that matters most — merge
-      # into a single [FIRING:2] naming neither.
-      - disk
+      # `devname` is the TrueNAS thermal rules' per-drive label (#176 added this
+      # key as `disk`; #174 repointed the rules at the API poller, whose label is
+      # `devname`, and the key silently went inert — group_by on a label no
+      # instance carries is a no-op, so two drives crossing 47C together merged
+      # into one [FIRING:2] naming neither, #188). The whole point of the key is
+      # WHICH disk is hot. Fix drift here, in the POLICY — never by rewriting the
+      # rule exprs to match this file, which would empty every
+      # $labels.devname interpolation in the summaries. (Brace-free on purpose:
+      # this is a Jinja template, and the real interpolations carry braces.)
+      - devname
+      # `pool` for the same reason (#188): truenas-pool-degraded and
+      # truenas-scrub-overdue carry one instance per pool.
+      - pool
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s
     group_interval: 5m
     # 12h: these are homelab alerts on a mailbox a human reads, not a pager.
     repeat_interval: 12h
+    # NOTE (#188): a per-route group_by override is NOT covered by the
+    # deploy-time guard in tasks/main.yml — it reads only the ROOT list, sliced
+    # out of this file between the group_by and group_wait keys above. Adding
+    # one means teaching the guard about it first, or the inert-key check
+    # silently stops being total. (Written without the trailing colons on
+    # purpose: the guard asserts each of those anchors occurs exactly ONCE, and
+    # a comment that spells them with a colon trips it — as this one did.)
     routes:
 {% if observability_alert_telegram | bool %}
       # ORDER MATTERS TWICE OVER: first match wins, there is no `continue` on any

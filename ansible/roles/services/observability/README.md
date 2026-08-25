@@ -448,7 +448,8 @@ is not a control.** So the load-bearing half is a second, independent channel.
 `observability_alert_telegram` (role default `false`, **`true` on eq12_docker**)
 gates everything Telegram-shaped. False, delivery is email-only — the same
 *channel coverage* #139 shipped, though not the same routing tree, since the
-flag-false render still carries #152's heartbeat and severity routes. So this role
+flag-false render still carries the heartbeat, thermal and severity routes (#152,
+#176). So this role
 still deploys on a host whose vault has no Telegram keys. True, it
 requires `vault_grafana_telegram_bot_token` and `vault_grafana_telegram_chat_id`,
 both asserted BY NAME at the top of the play — a blank key fails the deploy loudly
@@ -456,7 +457,7 @@ rather than provisioning a contact point that can never send. (The chat id is
 stored as a **quoted string** on purpose: unquoted it parses as an integer and
 Grafana's contact point wants the textual form.)
 
-Three receivers and a four-route tree, order-sensitive (first match wins, no
+Three receivers and a five-route tree, order-sensitive (first match wins, no
 `continue` anywhere):
 
 | route matcher | receiver | channels | why |
@@ -464,6 +465,7 @@ Three receivers and a four-route tree, order-sensitive (first match wins, no
 | `channel = telegram-only` **and** `integration = telegram` | `homelab-email` | email | a **Telegram** delivery failure must not be reported by Telegram. More specific, so it goes FIRST |
 | `channel = telegram-only` | `homelab-telegram` | Telegram | everything else carrying that label (in practice `integration = email`). Second of the pair, and must stay second — promoted, it would swallow the Telegram case |
 | `heartbeat = true` | `homelab-critical` | email + Telegram, `repeat_interval: 24h` | the dead-man's switch, below |
+| `component = nas-thermal` **and** `severity = warning` | `homelab-critical` | email + Telegram | thermal warnings page immediately despite warning severity (#176) — the matcher is the **component**, so no other warning is promoted. It cannot collide with the row below: that one needs `severity = critical` |
 | `severity = critical` | `homelab-critical` | email + Telegram | critical rules page on both |
 | *(root, no matcher)* | `homelab-email` | email | everything else, unchanged from #139 |
 
@@ -476,7 +478,7 @@ reintroducing, for the Telegram half, exactly the defect #152 removed for the
 email half.
 
 `homelab-critical` **degrades to email-only** when the flag is false, which is why
-the heartbeat and severity routes render unconditionally: a route pointing at a
+the heartbeat, thermal and severity routes render unconditionally: a route pointing at a
 receiver that does not exist is a **fatal** Grafana provisioning error, and this
 shape means they can never dangle as the flag flips. The two `telegram-only` rows
 are not rendered at all in that state, so `obs-alert-delivery-failing` is caught by
