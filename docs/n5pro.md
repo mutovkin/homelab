@@ -266,6 +266,127 @@ lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
 - ROCm docs: [ROCm installation guide](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/)
 - Legacy setup scripts: <https://github.com/mutovkin/proxmox-gpu-setup-scripts> (no longer needed for host setup)
 
+## Host metrics (telegraf, #186)
+
+Until #186 this machine exported **zero** non-`vector_*` series. That was the
+larger of the two gaps: 96 GB of RAM, twelve Zen 5 cores, the TrueNAS VM and the
+GPU-sharing CT 201 all ran with no CPU, memory, load, uptime or thermal telemetry
+whatsoever. It now runs a native, pinned telegraf
+([`roles/telegraf_agent`](../ansible/roles/telegraf_agent/)) that remote-writes to
+VictoriaMetrics on eq12_docker, stamped `host="n5pro"` — the fleet-wide
+`host = inventory_hostname` convention from #178.
+
+CT 201 (`n5pro_docker`) is **not** covered by this. It still has no `docker_*`
+series of its own; a second docker-metrics collector is a separate decision.
+
+**Collected:** `cpu` (per-core and total), `mem`, `swap`, `disk`, `diskio`,
+`net`, `netstat`, `kernel`, `processes`, `system` (load/uptime), `zfs` (ARC
+kstats from `/proc/spl/kstat/zfs`), `sensors` (below), and `smart` (NVMe wear,
+available spare, power-on hours, media errors — 14 `smart_device_*` series).
+Interval 60 s.
+
+**Power** is partially covered: `amdgpu`'s `power1_average` / `power1_input` come
+through the `sensors` input, so iGPU package draw is measured. CPU-package RAPL
+(`energy_uj`) is **not** — it is deferred to #194, which the agent's privilege
+model already accommodates as a config addition. No fan input exists here at all;
+see the negative result below.
+
+### Measured sensor surface
+
+`hwmon` chips present: `acpitz`, `r8169_0_c500:00`, `nic1`, `nvme`, `k10temp`,
+`spd5118` ×2, `amdgpu`. Enumerated 2026-08-24. Note the `hwmon` numbering has
+gaps (hwmon3/4 absent) — never key anything on the index.
+
+| Source | Readings |
+| ------ | -------- |
+| `k10temp-pci-00c3` | `Tctl` 39.75 °C — **one value, no per-core temps** (unlike EQ12's coretemp) |
+| `spd5118-i2c-0-50` / `-51` | **DDR5 DIMM temperatures**, 36.5 °C each, `max` 55, `crit` 85 — two modules |
+| `nic1-pci-c400` | PHY 44 °C, MAC 44 °C |
+| `r8169_0_c500:00-mdio-0` | 38.5 °C, `max` 120 |
+| `amdgpu-pci-c700` | edge temp 36 °C; `power1_average`/`power1_input` 7.07 W; `sclk` 600 MHz |
+| `acpitz-acpi-0` | 20.0 °C |
+| `nvme-pci-c200` | Composite 33.85 °C, `max` 89.85, `crit` 93.85 |
+
+Nine `sensors_temp<N>_input` series reach the store, across all eight chips. As on
+EQ12 the digit is part of the metric name (`sensors_temp1_input` ..), because
+`remove_numbers = false` is set deliberately.
+
+Two things worth carrying into any dashboard or alert built on this:
+
+- **`k10temp` gives one `Tctl`, not per-core.** A panel written against EQ12's
+  five `coretemp` readings shows empty for this host unless it handles both
+  shapes. `Tctl` on AMD can also carry an offset, so nothing should put a
+  threshold on it without a second source to check against.
+- **`amdgpu` is the only host-side view of CT 201's GPU load.** `/dev/dri` is
+  device-shared into the container for VAAPI, so iGPU edge temperature and
+  package power are what that workload costs, measured from here.
+
+`amdgpu`'s `vddgfx` and `vddnb` both read **0.000 V** — an unsupported reading,
+not a measurement. They are dropped at the source by a `[inputs.sensors.tagdrop]`
+filter, and every deploy asserts against telegraf's own output that they never
+appear. Zero `vdd*` series exist in the store for this host, and that is
+deliberate: a fabricated zero drags `min()` and `avg()` panels to the floor, which
+this repo has been bitten by before.
+
+### Fan speed: a definitive negative
+
+**This board has no fan interface of any kind.** Not a tachometer, not even
+binary on/off state — nothing. This negative still stands after the 2026-08-25
+round of probing that overturned the equivalent finding on EQ12; the two hosts
+genuinely differ, and the reason is below.
+
+Direct enumeration, 2026-08-24: no `fan*_input` and no `pwm*` under
+`/sys/class/hwmon/hwmon*/`, no fan-capable hwmon chip, no Super-I/O fan driver
+loaded (`lsmod` shows `k10temp` only), and — unlike EQ12 — **no ACPI fan objects
+at all**.
+
+A deliberate probe followed, run through Ansible as an ad-hoc command rather than
+by hand, with host snapshots taken first and `/etc/modules` left unchanged:
+
+```bash
+sensors-detect --auto    # MEASURED 2026-08-25
+```
+
+Its verdict, verbatim: **"Sorry, no sensors were detected."** The Super-I/O scan
+surfaced one chip ID, **`0x5571`**, which the kernel does not recognise — and the
+I²C scan found nothing beyond the `spd5118` DIMM pair that is already driven.
+
+**The chip is very probably an ITE IT5571** (sometimes written IT5571VG). That
+identification is not ours and not from a datasheet — ITE publishes none — but
+from community reports on this exact machine (ServeTheHome, Level1Techs,
+r/MINISFORUM, Unraid forums, late 2025 through 2026), which consistently show the
+same unknown-ID symptom across Unraid, Proxmox and CachyOS. **The raw `0x5571` is
+kept above deliberately**: that is what `sensors-detect` actually prints, and it
+is what a future reader will grep for.
+
+#### Why this is a harder negative than "no driver"
+
+A missing driver is a problem someone could fix. This is worse than that.
+
+Community EC RAM dumps on this machine read **mostly zeros** in the registers
+where fan speed, temperature and PWM would live. The BIOS/EC handles fan control
+**internally and never publishes the values**. So even a perfect, purpose-written
+driver would read zeros — there is nothing on the other side of the register to
+read. Forced IDs and out-of-tree `it87` builds have both been tried by others on
+this hardware and produce **no usable RPM or PWM**.
+
+That is the difference from EQ12, and it is why that host's answer flipped and
+this one's did not. There, a chip was *identified* (ITE IT8613E), the stock
+driver already supported a close sibling, and the registers held real values —
+so a `force_id` binding worked. Here the chip is unsupported **and** the EC
+publishes nothing to read. Two independent blockers, either one sufficient.
+
+**RE-CHECK CONDITION — and note it is a VENDOR action, not a Linux one:** revisit
+only if Minisforum ships a BIOS/EC update that publishes those registers, or
+releases EC documentation. Do **not** go looking in the kernel tree, and do not
+re-run `sensors-detect`; no amount of driver work reaches a register the EC never
+fills. The command, the date and the verdict are recorded above.
+
+So there is no fan signal to export and nothing pretends otherwise:
+`telegraf_agent_acpi_fan_state` is `false` for this host, and the role deploys no
+fan script to it. Unlike EQ12 there is not even binary on/off state here — no
+ACPI fan objects at all, so there is nothing to collect in any form.
+
 ## NFS Architecture
 
 Containers that need TrueNAS storage (Lyrion's music library, media) use Docker NFS volumes instead of `/etc/fstab` mounts. This is a deliberate choice to avoid a boot-order race condition:
