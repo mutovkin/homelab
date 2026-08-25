@@ -266,3 +266,8 @@ until one leg reports and the other does not.
   Verification section prescribed injecting drift into host_vars; the fixture above is
   that bar met without mutating inventory.
 - #135, #138 — the two changes verified here. #141 duplicates #138.
+- [An experiment that cannot distinguish the hypotheses is not evidence](experiment-must-discriminate-between-hypotheses.md)
+  (#194) — the sibling one level up. This doc is about an *instrument* that cannot tell
+  fixed from broken; that one is about an *experiment* whose result is the same under
+  both hypotheses about the world. Three actors reached confident opposite conclusions
+  about one RAPL domain before anyone asked what would falsify the alternative.

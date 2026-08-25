@@ -26,6 +26,37 @@ telegraf_agent_controller_cache: "{{ lookup('env', 'HOME') }}/.cache/homelab/tel
 # "false" from host_vars is a truthy string (vector_agent precedent).
 telegraf_agent_acpi_fan_state: false
 
+# RAPL package power in WATTS via files/rapl_power.sh (#194) — both physical
+# hosts expose /sys/class/powercap and load intel_rapl_msr + intel_rapl_common
+# (yes, on the AMD box too), and the unit's ambient CAP_DAC_OVERRIDE was measured
+# to read the root-only `energy_uj`. Default TRUE because that is true of every
+# host in this group; `| bool` at every use site (a host_vars "false" is a truthy
+# string). The exec script — not [[inputs.intel_powerstat]] — for two measured
+# reasons recorded in the script header and in README.md.
+telegraf_agent_rapl_power: true
+
+# Domain NAMES to exclude at the source, passed to the script as arguments. Empty
+# fleet-wide; n5pro passes `core`, whose powercap subdomain was measured — by
+# LOAD PLACEMENT, the only test that discriminates — to cover CPU0 alone rather
+# than the package's cores: it stays at 0.12 W while package climbs 28 W under a
+# three-core load containing no CPU0. eq12's identically-named domain passes the
+# same test and IS exported. Coverage is a property of the board, never of the
+# name — measure it per host. Full tables in each host's host_vars, README.md
+# and docs/{eq12,n5pro}.md.
+#
+# Values reach a TOML double-quoted string in telegraf.conf.j2, so the role
+# asserts their shape before templating (a `"` would break the whole config
+# parse, whitespace would silently split one exclusion into two).
+telegraf_agent_rapl_exclude_domains: []
+
+# The EXACT domain set this host must deliver, asserted for equality (not
+# superset) against VictoriaMetrics at the end of the deploy — so an excluded
+# domain reappearing FAILS just as loudly as one going missing. Must be non-empty
+# on every host with telegraf_agent_rapl_power enabled: an empty list would make
+# the equality trivially true against an empty result, i.e. a guard that reads
+# green while nothing arrives. The role asserts that too.
+telegraf_agent_rapl_expected_domains: []
+
 # Features the sensors input must EXCLUDE AT THE SOURCE — readings the chip
 # fabricates rather than measures (n5pro: amdgpu's vddgfx/vddnb, 0.000 V). This
 # is deliberately INDEPENDENT of telegraf_agent_forbidden_test_output below,

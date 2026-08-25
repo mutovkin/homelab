@@ -260,6 +260,10 @@ telegraf_agent_expected_test_output:
   - "chip=amdgpu-pci-c700" # iGPU edge temp + power (host-side view of CT-201 VAAPI load)
   - "chip=nvme-pci-c200"
   - "smart_device,"
+  # RAPL (#194). Influx line protocol sorts tag keys, so `domain` precedes the
+  # agent's `environment`/`host`/`location` — the substring is the line's head.
+  # Verified against the script's real output on this host, 2026-08-25.
+  - "rapl,domain=package-0"
 # Fabricated zeros (CLAUDE.md): amdgpu vddgfx/vddnb read 0.000 V — unsupported,
 # not measured. THE EXCLUSION: what the sensors tagdrop in telegraf.conf.j2 drops
 # at the source.
@@ -269,3 +273,50 @@ telegraf_agent_sensors_tagdrop_features: [vddgfx, vddnb]
 telegraf_agent_forbidden_test_output:
   - "feature=vddgfx"
   - "feature=vddnb"
+  # The excluded RAPL domain must not reappear in telegraf's own output either
+  # (see below for why it is excluded).
+  - "rapl,domain=core"
+
+# --- RAPL package power (#194) -----------------------------------------------
+# TWO powercap domains on this Zen 5 box — intel-rapl:0 = package-0,
+# intel-rapl:0:0 = core. There is NO uncore here, unlike eq12; a panel or rule
+# hard-wired to eq12's three-domain shape reads empty for this host.
+# max_energy_range_uj = 65532610987 (65.5 kJ), which wraps roughly every 3 h at
+# idle and ~20 min under load — the reason files/rapl_power.sh converts to watts
+# at the source instead of exporting the raw counter.
+#
+# THE `core` DOMAIN IS EXCLUDED: it covers CPU0 ONLY, not the package's cores.
+#
+# THE TEST THAT ESTABLISHES THIS IS LOAD PLACEMENT, and it is the only kind that
+# can. A busy-loop pinned to CPU0 makes `core` rise under BOTH hypotheses (real
+# aggregate / CPU0-only), so it discriminates nothing — that confound produced
+# two confident and OPPOSITE wrong answers during #194. Put the load on cores the
+# domain would only see if it were an aggregate. Measured 2026-08-25, two runs,
+# 6 s windows (run 2 in parentheses):
+#
+#   placement                    package W          core W
+#   idle                         5.93  (5.83)       0.06  (0.05)
+#   busy-loop on CPU0           21.96 (22.84)      15.83 (16.59)
+#   busy-loop on CPU20          11.21 (11.88)       0.16  (0.13)
+#   busy-loop on CPU2+14+20     33.93 (33.78)       0.12  (0.24)
+#   idle again                   6.32  (6.16)       0.09  (0.11)
+#
+# `core` stays FLAT at ~0.12 W while package climbs 28 W under a three-core load
+# containing no CPU0. It tracks only when CPU0 itself is loaded. On this Zen 5
+# board intel-rapl:0:0 is one physical core of twelve (24 logical CPUs).
+#
+# Contrast eq12, where the SAME sysfs path is a genuine aggregate (it tracks
+# package to within 0.08 W on every placement) — so a domain's coverage is a
+# property of the BOARD and must be measured per host, never inferred from the
+# name `core`.
+#
+# It is dropped rather than relabelled `domain=cpu0`: one physical core of twelve answers
+# no question anyone asks, and a per-core series sitting under the same metric
+# name as `package-0` invites a sum that is always wrong. This is not a
+# fabricated zero — it is a real reading of the wrong thing, which is worse,
+# because it looks measured.
+#
+# Asserted absent both in telegraf's own output (above) and in the delivered
+# domain set (below).
+telegraf_agent_rapl_exclude_domains: [core]
+telegraf_agent_rapl_expected_domains: [package-0]

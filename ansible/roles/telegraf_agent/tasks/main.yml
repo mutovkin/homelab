@@ -118,6 +118,74 @@
       ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml.
     quiet: true
 
+# Same reasoning one family over (#194). The RAPL arrival proof at the end of
+# this role asserts the delivered domain set EQUALS this list — an empty list
+# would make that equality trivially true against an empty result: a guard that
+# reads green while no power series arrives at all. Which domains a board EXPOSES
+# is a measured property of it (eq12 exposes three, n5pro two and no uncore);
+# which it EXPORTS is that minus the exclusions (so n5pro delivers one). Both
+# belong in host_vars and nowhere else.
+- name: Assert this host declares the RAPL domains it must deliver
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_rapl_expected_domains | length > 0
+    fail_msg: >-
+      telegraf_agent_rapl_power is enabled for {{ inventory_hostname }} but
+      telegraf_agent_rapl_expected_domains is empty, which would turn the
+      end-to-end RAPL domain-set proof into `assert: true` — a guard that cannot
+      fail reads green forever (CLAUDE.md). Enumerate this board's domains from
+      the `name` files under /sys/class/powercap (NEVER the node indices) in
+      ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml, minus
+      anything in telegraf_agent_rapl_exclude_domains.
+    quiet: true
+  when: telegraf_agent_rapl_power | bool
+
+# Both RAPL domain lists are interpolated into telegraf.conf.j2 — the exclusions
+# into a TOML DOUBLE-QUOTED string (the exec `commands` argv). A value containing
+# a `"` would end that scalar early and break the parse of the WHOLE config, and
+# an embedded space would silently split one exclusion into two that each match
+# nothing. This repo has a documented history of exactly that class of bug — an
+# unquoted value ending a scalar early (CLAUDE.md, the compose `${VAR:?...}` and
+# dotenv `$` traps) — so the shape is asserted here rather than trusted. The
+# character class is the one files/rapl_power.sh itself accepts at discovery, so
+# a name this guard admits is a name that script can emit.
+# A domain in BOTH lists is a contradiction: the script would drop it and the
+# equality assert would then demand it. Without this, that mistake is caught only
+# by the arrival assert at the very END of a deploy, after telegraf has been
+# reconfigured and restarted — and only on a real run, never under --check.
+- name: Assert no RAPL domain is both expected and excluded
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_rapl_expected_domains
+        | intersect(telegraf_agent_rapl_exclude_domains) | length == 0
+    fail_msg: >-
+      {{ telegraf_agent_rapl_expected_domains
+         | intersect(telegraf_agent_rapl_exclude_domains) }} appears in BOTH
+      telegraf_agent_rapl_expected_domains and
+      telegraf_agent_rapl_exclude_domains for {{ inventory_hostname }}. The
+      script drops excluded domains at the source, so the delivered set can never
+      contain one — this host could not converge. Decide which the domain is:
+      exported (drop it from the exclude list) or not (drop it from the expected
+      list).
+    quiet: true
+  when: telegraf_agent_rapl_power | bool
+
+- name: Assert every declared RAPL domain name is a safe, well-formed token
+  ansible.builtin.assert:
+    that:
+      - item is match('^[A-Za-z0-9_.:-]+$')
+    fail_msg: >-
+      RAPL domain name {{ item | to_json }} for {{ inventory_hostname }} is not a
+      bare token. These names are interpolated into telegraf.conf's TOML — a
+      quote breaks the entire config parse, whitespace silently becomes two
+      exclusions — and into an influx tag value. Real RAPL `name` files read
+      package-0, core, uncore, psys. Fix the value in
+      ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml.
+    quiet: true
+  loop: >-
+    {{ (telegraf_agent_rapl_expected_domains + telegraf_agent_rapl_exclude_domains) | unique }}
+  when: telegraf_agent_rapl_power | bool
+
 # The absence rules live in the OBSERVABILITY role's provisioning files, and its
 # deploy-time guard derives the expected host set from group `telegraf_agents` —
 # but that guard only runs when the observability stack deploys, which can be
@@ -127,20 +195,35 @@
 # round). Static file+inventory check; runs under --check.
 - name: Assert this host has an absence owner in the observability alert rules
   vars:
+    _telegraf_rules_file: >-
+      {{ lookup('file', role_path ~ '/../services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml') }}
     _telegraf_agent_rule_hosts: >-
-      {{ lookup('file', role_path ~ '/../services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
-         | regex_findall('system_uptime\{host="([^"]+)"') }}
+      {{ _telegraf_rules_file | regex_findall('system_uptime\{host="([^"]+)"') }}
+    # The AGENT stream and the RAPL exec stream are two delivery paths and need
+    # two owners (#174/#194): the exec input can die while telegraf stays
+    # healthy, so a host covered by the system_uptime rule alone is still
+    # unowned for power. Checked from this side for the same reason as above —
+    # the observability-side reconciler only runs when that stack deploys.
+    _telegraf_rapl_rule_hosts: >-
+      {{ _telegraf_rules_file | regex_findall('rapl_power_watts\{host="([^"]+)"') }}
   ansible.builtin.assert:
     that:
       - inventory_hostname in _telegraf_agent_rule_hosts
+      - not (telegraf_agent_rapl_power | bool)
+        or inventory_hostname in _telegraf_rapl_rule_hosts
     fail_msg: >-
-      {{ inventory_hostname }} runs a telegraf agent but has NO pinned absence
-      rule in roles/services/observability/files/data/grafana/provisioning/
-      alerting/telegraf-health.yaml (selectors found:
-      {{ _telegraf_agent_rule_hosts }}). Its agent could die and nothing would
-      page. Add the rule (mirror obs-telegraf-metrics-absent-eq12, pinned
-      selector, matching uid/title) AND deploy the observability stack in the
-      same change — the observability role's own guard enforces the exact set.
+      {{ inventory_hostname }} runs a telegraf agent but is MISSING a pinned
+      absence rule in roles/services/observability/files/data/grafana/
+      provisioning/alerting/telegraf-health.yaml. Agent-stream selectors found:
+      {{ _telegraf_agent_rule_hosts }}; RAPL-stream selectors found:
+      {{ _telegraf_rapl_rule_hosts }} (this host collects RAPL:
+      {{ telegraf_agent_rapl_power | bool }}). Whichever is absent, that stream
+      could stop and nothing would page — and they are INDEPENDENT: the exec
+      input can die while the agent stays healthy, so the agent rule does not
+      cover power. Add the rule (mirror obs-telegraf-metrics-absent-eq12 or
+      obs-rapl-power-absent-eq12, pinned selector, matching uid/title) AND deploy
+      the observability stack in the same change — the observability role's own
+      guard enforces the exact set and the RAPL threshold.
     quiet: true
 
 # --- Check-mode reality gate -------------------------------------------------
@@ -386,8 +469,10 @@
       install telegraf {{ telegraf_agent_version }} from the pinned .deb; write
       /etc/telegraf/telegraf.conf, /etc/telegraf/telegraf.env (0600) and
       /etc/systemd/system/telegraf.service.d/10-homelab.conf
-      {{ '(plus /usr/local/lib/telegraf/acpi_fan_state.sh)'
-         if telegraf_agent_acpi_fan_state | bool else '' }};
+      (plus the exec scripts under /usr/local/lib/telegraf:
+      {{ ((['acpi_fan_state.sh'] if telegraf_agent_acpi_fan_state | bool else [])
+          + (['rapl_power.sh'] if telegraf_agent_rapl_power | bool else []))
+         | join(', ') | default('none', true) }});
       run `telegraf --test` as the unit user with the unit's capabilities and
       refuse to continue unless every family in
       telegraf_agent_expected_test_output appears in ITS OWN output; enable and
@@ -470,7 +555,7 @@
     path: /usr/local/lib/telegraf
     state: directory
     mode: "0755"
-  when: telegraf_agent_acpi_fan_state | bool
+  when: telegraf_agent_acpi_fan_state | bool or telegraf_agent_rapl_power | bool
 
 - name: Deploy the ACPI fan-state exec script (binary state, not RPM)
   ansible.builtin.copy:
@@ -479,6 +564,20 @@
     mode: "0755"
   register: telegraf_agent_fan_script
   when: telegraf_agent_acpi_fan_state | bool
+
+# Both hosts, unlike the fan script — RAPL is present on the Intel box and the
+# AMD one alike (#194). The script converts energy_uj deltas to WATTS at the
+# source and wrap-corrects per zone; the plugin alternative was measured to be
+# unusable on n5pro and to emit a garbage first sample on eq12 (its header and
+# telegraf.conf.j2 carry the measurements). Read-only collection: nothing here
+# writes to powercap, and no power CAPPING of any kind is in scope.
+- name: Deploy the RAPL package-power exec script (watts, wrap-corrected)
+  ansible.builtin.copy:
+    src: rapl_power.sh
+    dest: /usr/local/lib/telegraf/rapl_power.sh
+    mode: "0755"
+  register: telegraf_agent_rapl_script
+  when: telegraf_agent_rapl_power | bool
 
 # --- The package -------------------------------------------------------------
 # `deb:` rather than a repository: a pinned, checksummed file is what makes this
@@ -602,19 +701,20 @@
 
 # --- systemd -----------------------------------------------------------------
 # Single source of truth for the restart decision (vector_agent/postgresql
-# precedent). Deliberately NO default() on ANY of the five: if one is renamed this
+# precedent). Deliberately NO default() on ANY of the six: if one is renamed this
 # must fail loudly rather than silently decide no restart is needed, which would
 # leave telegraf running the OLD config while the play reports converged — the
 # do-nothing failure #78/#139 are about.
 #
 # And none is NEEDED anywhere, which is where this comment used to be wrong
 # (#186 review round). A task skipped by its `when` STILL REGISTERS — the skip
-# result is stored and `changed` is false — so every one of these five variables
+# result is stored and `changed` is false — so every one of these six variables
 # exists on every host in the group. That is as true of the fan-script task,
-# gated on telegraf_agent_acpi_fan_state and therefore skipped on n5pro, as it is
-# of the four preview_only-gated tasks above it; a `when`-gated task is not
-# "never reached", it is skipped, which is the very mechanism the paragraph above
-# relies on. Reading the term bare is therefore uniform, and a renamed register
+# gated on telegraf_agent_acpi_fan_state and therefore skipped on n5pro (and of
+# the RAPL script task, which is enabled on both hosts today but gated all the
+# same), as it is of the four preview_only-gated tasks above it; a `when`-gated
+# task is not "never reached", it is skipped, which is the very mechanism the
+# paragraph above relies on. Reading the term bare is therefore uniform, and a renamed register
 # fails loudly instead of silently voting "no restart".
 - name: Determine whether telegraf must be restarted
   ansible.builtin.set_fact:
@@ -623,7 +723,8 @@
          or telegraf_agent_config.changed
          or telegraf_agent_env.changed
          or telegraf_agent_dropin.changed
-         or telegraf_agent_fan_script.changed }}
+         or telegraf_agent_fan_script.changed
+         or telegraf_agent_rapl_script.changed }}
 
 - name: Preview the telegraf restart (check mode)
   ansible.builtin.debug:
@@ -1139,3 +1240,106 @@
   when:
     - not ansible_check_mode
     - telegraf_agent_acpi_fan_state | bool
+
+# Both hosts (#194). RAPL is the family with the most ways to thin out QUIETLY,
+# which is why this proof asserts an EXACT SET and not mere presence:
+#
+#   * files/rapl_power.sh emits NOTHING for a zone it cannot read completely —
+#     correct gauge semantics (CLAUDE.md), and therefore a silent per-domain
+#     disappearance rather than an obvious total absence. Two domains where three
+#     are expected must fail as loudly as zero;
+#   * EQUALITY, not superset, so an EXCLUDED domain reappearing also fails. That
+#     is n5pro's `core`, measured by LOAD PLACEMENT to cover CPU0 alone rather
+#     than the package's cores (flat at 0.12 W while package climbed 28 W under
+#     a three-core load containing no CPU0).
+#     If a kernel or firmware change ever made that subdomain mean something
+#     else, this is what says so instead of a wrong number reaching a panel;
+#   * the domain LABEL comes from the sysfs `name` file, never the node index, so
+#     this also catches a script that started labelling from the index.
+#
+# `count by (domain)` rather than the raw series: it collapses each domain to one
+# row whatever the sample cadence, so the comparison is about the SET.
+# [2m] against a 60s interval — two collections of headroom, and deliberately NOT
+# the shape of the sensors and SMART proofs above. Those are bare instant
+# `count(...)` PRESENCE checks; this one is a windowed SET EQUALITY, which is
+# what makes a stale sample inside the window able to fail it. The retry-budget
+# note on the task itself explains why the window may not be widened back.
+#
+# The failed_when:false + assert pairing here is the SAME shape as those proofs
+# and is safe for the same reason: the assert reads `status` and the JSON result,
+# never `<reg> is not failed` — which failed_when:false would have ASSIGNED to
+# False, making the assert literally `assert: true` (CLAUDE.md). Do not copy this
+# pairing to a guard that reads `.failed`.
+- name: Wait for this host's RAPL power domains to reach VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'count by (domain) (last_over_time(rapl_power_watts{host="{{ inventory_hostname }}"}[2m]))'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_rapl_arrival
+  # The until requires the FULL set, so a partially-arrived first batch keeps
+  # retrying instead of passing here and failing the assert a second later.
+  # map(attribute=..., default=...) rather than a bare attribute lookup: a series
+  # somehow missing the tag must reach the assert as a readable wrong value, not
+  # as an opaque Jinja error inside a retry loop.
+  until: >-
+    telegraf_agent_rapl_arrival.status | default(0) == 200
+    and (telegraf_agent_rapl_arrival.json.data.result | default([])
+         | map(attribute='metric.domain', default='<untagged>') | sort | list)
+        == (telegraf_agent_rapl_expected_domains | sort | list)
+  # RETRIES MUST OUTLAST THE LOOKBEHIND, and that is why the window is 2m rather
+  # than the 5m this started as. The assert below is an EQUALITY, so it fails on
+  # an EXTRA domain as well as a missing one — and the run that first EXCLUDES a
+  # domain leaves that domain's last real sample sitting inside the window. With
+  # [5m] and 12x10s the loop could not outlive the stale sample: every attempt
+  # re-read the excluded domain, the budget ran out at 120s, and a CORRECT change
+  # failed for ~3 more minutes. It never fired on this branch only because n5pro
+  # had no `core` in VictoriaMetrics to go stale. 180s of retries against a 120s
+  # window always converges — keep retries*delay > the window if either moves.
+  # 2m is still two collections of headroom at the 60s agent interval.
+  retries: 18
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_rapl_power | bool
+
+- name: Assert this host delivers exactly the RAPL domains it declares
+  vars:
+    _telegraf_agent_rapl_domains: >-
+      {{ telegraf_agent_rapl_arrival.json.data.result | default([])
+         | map(attribute='metric.domain', default='<untagged>') | sort | list }}
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_rapl_arrival.status | default(0) == 200
+      - _telegraf_agent_rapl_domains == telegraf_agent_rapl_expected_domains | sort | list
+    fail_msg: >-
+      rapl_power_watts{host="{{ inventory_hostname }}"} delivered domains
+      {{ _telegraf_agent_rapl_domains }}, not the declared
+      {{ telegraf_agent_rapl_expected_domains | sort | list }}.
+      MISSING means files/rapl_power.sh could not read a zone completely — it
+      emits nothing rather than a fabricated zero, so check
+      `grep . /sys/class/powercap/intel-rapl:*/name` and the matching
+      energy_uj/max_energy_range_uj on the host, then
+      `/usr/local/lib/telegraf/rapl_power.sh` by hand. `energy_uj` is
+      -r-------- root root and the unit reads it through ambient
+      CAP_DAC_OVERRIDE, so a drop-in regression takes this family out while
+      telegraf stays `active` (the assert above covers the drop-in).
+      EXTRA means a domain this host deliberately excludes is being exported
+      again — for n5pro that is `core`, measured by load placement to cover CPU0
+      alone rather
+      than a package aggregate; check telegraf_agent_rapl_exclude_domains in
+      host_vars before widening this list. If the hardware genuinely changed,
+      update telegraf_agent_rapl_expected_domains in the same change that
+      explains why. HTTP status was
+      {{ telegraf_agent_rapl_arrival.status | default('none') }}.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_rapl_power | bool

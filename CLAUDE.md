@@ -416,6 +416,56 @@ Hard-won lessons — check here before debugging from scratch.
   handler from failing on a systemd unit the templates have not written yet.
   See [docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md](docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md).
 
+- **An experiment that cannot distinguish the hypotheses is not evidence, however
+  careful it looks.** #194 asked whether n5pro's RAPL `core` domain was real. A
+  near-zero idle reading, an idle-time match against the per-core MSRs, and a
+  single-core load test were each run carefully — and none could separate "real
+  aggregate, power-gated at idle" from "one core's counter": all three observations
+  are predicted by BOTH. Three actors produced confident, *opposite* conclusions.
+  The discriminating test was load PLACEMENT: put the load on a core the domain
+  would only see if it were an aggregate. n5pro's `core` stayed flat at 0.12 W while
+  package climbed 28 W (three-core load, no CPU0) — it covers CPU0 alone; eq12's
+  identically-named domain tracked package to 0.08 W at every placement and is a
+  genuine aggregate. **Same sysfs path, same name, opposite answer — coverage is a
+  property of the board, never of the name.** So: write down what each hypothesis
+  predicts BEFORE measuring, always run the positive control on hardware expected to
+  answer the other way, and treat "measured" in someone's brief as a claim to
+  interrogate, not a warrant. A near-zero reading is not proof of an unsupported
+  sensor and a reading that moves is not proof of a correct one. Corollary measured
+  in the same change: a dead-zone test using `chmod 000` **as root** proves nothing —
+  root bypasses permission checks, so the harness must actually create the condition
+  it claims to test, and a syntax check in the WRONG DIALECT proves nothing — the same
+  change validated an awk edit against the Mac's BSD awk, which accepted a program the
+  hosts' **mawk 1.3.4** refused. The actual defect was not awk: the program is a
+  single-quoted shell string, and an apostrophe inside an awk COMMENT (`N100's`) closed
+  it forty lines early, which mawk reported as `missing } near end of file` pointing at
+  a comment. Validate embedded interpreters against the interpreter ON A HOST; when awk
+  claims an unbalanced brace, look for a quote first. Also from that round: "a guard you
+  have not seen fail is not a guard" binds in awk too — a wrap correction followed by
+  `if (delta < 0) { continue }` can never fire (both reads come from one zone, so
+  `delta + max >= 0`), and a counter RESET was therefore converted into a measured
+  261339.76 W from a 6 W part. Excluded domains are dropped, not relabelled: a per-core
+  series sharing a metric name with `package-0` invites a sum that is always wrong.
+  Two more from the same issue, both generalisable. **A bound that fails OPEN when its own
+  input is unvalidated is not a bound:** a plausibility ceiling passed to awk as a
+  non-numeric `-v` value made `watts > ceiling` a STRING comparison, so every implausible
+  reading passed and the guard silently stopped guarding — a guard's inputs are part of the
+  guard. **A pinned dependency's own deprecation warnings are the bump-blocker list:** the
+  hosts had been logging `inputs.exec ... deprecated since 1.39.0 and will be removed in
+  1.45.0` on every start for the deployment's whole life, unread because everything worked;
+  where a version is pinned and bumped deliberately, a deprecation is a scheduled outage.
+  And the deprecation was of the value FORM, not of embedded whitespace — a single-token
+  command warned identically, so don't assume the simple case is exempt.
+  **Five instances of this error landed on that one question** — the issue text, two
+  branches, the operator's own load test, and the implementing agent *in the act of writing
+  the lesson down* (asserting eq12's `uncore` was "flat because nothing is drawing" with no
+  discriminating test). None was carelessness; a confounded test feels exactly like evidence
+  from the inside, so "be more rigorous" is not a control. The control is procedural:
+  **before believing a measurement, state what result would have FALSIFIED the alternative,
+  and check your test could actually have produced it** — and write that falsifier down
+  before measuring, because afterwards the number looks like it settles the question.
+  See [docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md](docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md).
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.

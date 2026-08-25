@@ -4,8 +4,9 @@ A **native (systemd) telegraf metrics agent** for the two PHYSICAL Proxmox hosts
 `eq12` and `n5pro`. Before #186 neither machine exported a single non-`vector_*`
 series: no CPU, memory, load, uptime, disk or thermal telemetry for the two boxes
 every VM and container in the fleet runs on top of. This role collects host
-vitals, ZFS kstats, the full measured lm-sensors surface, NVMe SMART, and (eq12
-only) binary ACPI fan state, and remote-writes them to the same VictoriaMetrics
+vitals, ZFS kstats, the full measured lm-sensors surface, NVMe SMART, RAPL package
+power in watts, and (eq12 only) binary ACPI fan state, and remote-writes them to the
+same VictoriaMetrics
 the container telegraf on eq12_docker writes to — every sample stamped
 `host = {{ inventory_hostname }}`, the fleet-wide convention from #178.
 
@@ -32,6 +33,7 @@ which belong on a hypervisor.
 | `/etc/telegraf/telegraf.env` | **0600 root:root** | the systemd EnvironmentFile (VM credentials) |
 | `/etc/systemd/system/telegraf.service.d/10-homelab.conf` | 0644 | the override drop-in |
 | `/usr/local/lib/telegraf/acpi_fan_state.sh` | 0755 | eq12 only — the binary fan-state exec input |
+| `/usr/local/lib/telegraf/rapl_power.sh` | 0755 | both hosts — the RAPL package-power exec input |
 
 ## The shipped unit's traps
 
@@ -84,8 +86,9 @@ is a larger posture change than two scoped capabilities.
 
 **Why not root:** because it is not necessary. Only the NVMe admin ioctl needs
 anything at all — `sensors`, the ZFS kstats under `/proc/spl/kstat/zfs`, and
-eq12's fan `cur_state` (0644) need **no** capability, and #194's root-only RAPL
-`energy_uj` is covered by `CAP_DAC_OVERRIDE` alone.
+eq12's fan `cur_state` (0644) need **no** capability, and the root-only RAPL
+`energy_uj` is covered by `CAP_DAC_OVERRIDE` alone — measured before #194 relied
+on it.
 
 Because the unit does hold two strong capabilities, they are paid for with
 confinement everywhere else: `ProtectSystem=strict` with
@@ -137,16 +140,147 @@ eq12_docker container telegraf, which floats on `telegraf:latest` and moved to
 follow-up that owns vector's identical container-vs-native drift note owns this
 one.
 
-## How #194 (RAPL / package power) slots in later
+## RAPL package power (#194)
 
-Add `[[inputs.intel_powerstat]]` (or an exec reader over
-`/sys/class/powercap/intel-rapl*/energy_uj`) to `templates/telegraf.conf.j2` and
-re-run the role. No privilege change, no unit change, no delivery-path change:
-`energy_uj` is `-r-------- root root` and `CAP_DAC_OVERRIDE` — already in the
-ambient set above — was measured to read it. One caution to carry into it:
-RAPL counters wrap fast (n5pro's package range is 65.5 kJ, roughly 20 minutes
-under load), so keep the 60 s interval rather than widening it, or a wrap lands
-inside a sampling gap and reads as a negative delta.
+Both hosts export `rapl_power_watts`, tagged `domain`, every 60 s —
+`package-0` + `core` + `uncore` on eq12, `package-0` alone on n5pro. It comes
+from `files/rapl_power.sh`, an exec input, and every choice below is a
+measurement rather than a preference.
+
+**It is `[[inputs.exec]]`, not `[[inputs.intel_powerstat]]`, and both halves of
+that were measured 2026-08-25 with `telegraf --test` under the real unit user and
+capabilities.** On n5pro the plugin will not even initialise — *"failed to
+initialize metric fetcher interface: host processor is not supported"* — so it
+cannot serve the AMD box at all. On eq12 it does run, and its **first** gather
+emits `current_power_consumption_watts=826963607.79`: an absurd first-sample
+artefact, because there is no prior read to delta against — i.e. a garbage spike
+at every agent restart even where the plugin works. Running the plugin on eq12
+and a script on n5pro would then export two metric names for one signal — the
+`coretemp`/`k10temp` divergence trap one layer up. One script on both hosts
+instead. **Do not "simplify" this back to the plugin.**
+
+**Watts are computed at the source because these counters wrap fast.**
+`max_energy_range_uj` is 262143328850 uJ on eq12 but only 65532610987 uJ
+(65.5 kJ) on n5pro — a rollover roughly every 3 h at idle and closer to 20 min
+under load. A `rate()`/`increase()` over the raw counter emits a large negative
+spike at every wrap. The script takes two `energy_uj` reads ~1 s apart, adds that
+zone's own `max_energy_range_uj` to a negative delta, and divides by the
+**actual** elapsed time measured between the two read passes rather than an
+assumed 1.0 s. Over a ~1 s window a *double* wrap is physically impossible (it
+would need >65 kW on n5pro), so a single correction is the only one that can be
+needed.
+
+**But the correction is a GUESS about what a negative delta meant, and it is
+bounded by physics.** A counter RESET (`energy_uj` dropping high->low without
+reaching max: module reload, kexec, a firmware event) has the same sign as a
+wrap. This paragraph used to claim that "a delta still negative after the
+correction is a counter reset, and that zone emits nothing" — that was false, and
+the guard backing it was unreachable: both reads come from the same zone, so
+`delta` is in `[-max, max]` and `delta += max` can never leave it negative. A
+reset was therefore silently converted into a vast number — measured on eq12, a
+`1000000 -> 0` reset printed **261339.76 W**, the same artefact class this script
+rejects `[[inputs.intel_powerstat]]` for. Corrected values above
+`RAPL_MAX_PLAUSIBLE_WATTS` (default 1000, ~40x the N100's ceiling and ~12x the
+Ryzen's) are now discarded with a message on stderr.
+
+The wrap branch **was exercised**, manually during #194, against a stub tree via
+the `RAPL_SYSFS_ROOT` override — the only reason that override exists. No harness
+is committed, so treat this as a recipe to re-run rather than a test that runs
+itself, and do re-run it after any edit to the awk stage: it is how both the
+unreachable guard and the reset path above were found.
+
+**Each sample is a ~1 s instantaneous snapshot taken once per 60 s interval, not
+a 60 s average.** Say so on any panel that could be read as energy. Widening the
+agent interval does not make the snapshot more representative — it only makes the
+snapshots rarer, and a wide interval is what lets a wrap land in a sampling gap.
+Keep it at 60 s.
+
+**The domain label comes from the sibling `name` file, never the sysfs node
+index** (`intel-rapl:0` -> `package-0`, `intel-rapl:0:0` -> `core`). Indices are
+not stable across boots or hardware.
+
+**Domain coverage is a property of the BOARD, and the only test that establishes
+it is LOAD PLACEMENT.** The two hosts give opposite answers for the same sysfs
+path and the same domain name:
+
+| placement | eq12 package / core | n5pro package / core |
+| --------- | ------------------- | -------------------- |
+| idle | 1.70 / 1.62 W | 5.93 / 0.06 W |
+| busy-loop on CPU0 | 11.47 / 11.39 W | 21.96 / 15.83 W |
+| busy-loop on a non-CPU0 core | 12.13 / 12.05 W | 11.21 / 0.16 W |
+| busy-loop on three non-CPU0 cores | 19.55 / 19.46 W | 33.93 / 0.12 W |
+| idle again | 1.86 / 1.78 W | 6.32 / 0.09 W |
+
+(measured 2026-08-25; eq12 loaded CPU3 and CPU1+2+3, n5pro CPU20 and CPU2+14+20)
+
+eq12's `core` tracks package to within ~0.08 W at every placement — a genuine
+all-core aggregate, exported. n5pro's stays flat at ~0.12 W while package climbs
+28 W under a three-core load with no CPU0 in it — it is **one physical core of
+twelve (24 logical CPUs)**, and is dropped at the source via
+`telegraf_agent_rapl_exclude_domains: [core]` and asserted absent from
+`telegraf --test`'s own output. Its `uncore` does not exist at all; eq12's does
+and is the iGPU, flat rather than absent at idle.
+
+**Why placement and nothing weaker.** A busy-loop pinned to CPU0 raises `core`
+under BOTH hypotheses — real aggregate and CPU0-only — so it cannot separate
+them. Neither can an idle-time comparison against the per-core MSRs, because at
+idle an aggregate approximates its busiest core. During #194 both of those tests
+were run, by different people, and produced confident and *opposite* wrong
+conclusions. The generalisable rule, which is the most valuable thing this
+collector taught us:
+
+> An experiment that cannot distinguish between the hypotheses is not evidence,
+> however careful it looks. Ask what result would falsify the alternative, then
+> design the measurement for that.
+
+n5pro's `core` is dropped rather than relabelled `domain="cpu0"`: one physical
+core of twelve answers no question anyone asks, and a per-core series under the same
+metric name as `package-0` invites a sum that is always wrong. This is not a
+fabricated zero — it is a real reading of the wrong thing, which is worse,
+because it looks measured.
+
+**KNOWN GAP — a FROZEN counter reads as a confident `0.000000 W`, and nothing
+alerts on it.** The script's contract is that a zone it cannot read completely
+emits nothing. That covers *unreadable*; it does not cover *readable but never
+advancing* — a domain the driver still exposes while the firmware has stopped
+updating it. Measured: with `energy_uj` static across both passes the script
+emits `power_watts=0.000000`, which is a faithful reading of the counter (energy
+consumed in the window really was below 1 uJ) and is therefore NOT suppressed at
+the source — eq12's `uncore` legitimately reads exactly that at idle (24 h max
+0.000182 W measured 2026-08-25, 0.000243 W on a re-read the same day — the figure
+drifts, the point does not: the counter advances, so the domain is live). But the two absence rules count DOMAINS, and a frozen
+domain is still present, so neither fires. `package-0` can never legitimately be
+0 W on a running host, so the detector would be a rule of the shape
+`max_over_time(rapl_power_watts{domain="package-0"}[6h]) == 0` with
+`noDataState: OK` (absence is already owned). Deliberately not added here: the
+per-family absence design is deferred to #202 and weighed against the
+alert-fatigue posture #193 landed. Recorded so it is a known limitation rather
+than a discovery.
+
+**The delivered domain set is asserted for EQUALITY, not presence.** The script
+emits nothing for a zone it cannot read completely (gauges skip on unknown), so
+losing one domain thins the series silently while a presence check stays green —
+and equality also fails if an *excluded* domain reappears. The set lives in
+`telegraf_agent_rapl_expected_domains` per host, and the role refuses to run with
+an empty one: that would make the equality trivially true against an empty
+result.
+
+**Liveness is a SECOND pair of rules, deliberately.**
+`obs-rapl-power-absent-eq12` and `-n5pro`, in
+`roles/services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml`,
+watch `count by (host) (last_over_time(rapl_power_watts{host="..."}[10m]))`
+against that host's domain count. The agent-liveness rules above them watch the
+`[[inputs.system]]` stream, and an exec input can die on its own while that
+stream keeps flowing perfectly — #174's "two delivery paths need two liveness
+rules", one family over. These two are `severity: warning`, which routes
+email-only under the root policy: losing power visibility is not a page, and the
+agent-dead case that IS one is already owned at `critical`.
+
+**Read-only collection.** Nothing here writes to `powercap` — no power capping,
+no `constraint_*` file, no policy change. And RAPL is **package** power, never
+wall power: it excludes NVMe, fans, PSU conversion loss, and on n5pro the drive
+bays and the whole NAS side of the box. Neither machine has a wall-power meter,
+and adding one is a hardware purchase (explicitly out of scope in #194).
 
 ## Fans: what is collected, and what is only reachable
 
