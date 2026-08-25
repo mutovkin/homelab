@@ -18,6 +18,7 @@ delivers.
 | `truenas_pool_healthy`, `truenas_pool_status{status}` | no pool graph exists on 26.0 |
 | `truenas_pool_{size,allocated,free}_bytes`, `_fragmentation_percent` | as above |
 | `truenas_pool_scrub_{age_seconds,errors,running}` | as above |
+| `truenas_alert_active{klass,level}` | no SMART API survives on 26.0 (removed in 25.10); this is the middleware's own ~90-min smartctl scan, surfaced via `alert.list` |
 | `truenas_poller_up`, `truenas_poller_duration_seconds` | liveness for this delivery path |
 
 ## `media` is derived from ROTATION RATE, not from `type`
@@ -47,6 +48,23 @@ open the moment a drive was replaced.
   counter that only exists once non-zero cannot carry an absence rule (#151) —
   "no series" would be indistinguishable from "poller dead".
 
+## Drive-health alerts are conclusions, not counters (#183)
+
+TrueNAS 26.0 removed every SMART attribute/test API (measured: `smart.test.results`
+and `disk.smart_attributes` return "Method does not exist"). `truenas_alert_active`
+therefore reports the middleware's internal ~90-minute smartctl scan — its
+*verdict*, not the underlying attributes. Explicitly NOT provided: reallocated /
+pending / offline-uncorrectable / UDMA CRC counts, or any sector-level trend
+data. Klass→level pairs are pinned in `SMART_ALERT_KLASSES` (from middleware
+`release/26.0.0-BETA.2`); extending coverage is a deliberate code change.
+Dismissing an alert in the TrueNAS UI zeroes the series — dismissal is the ack
+mechanism and the Grafana rule mirrors it.
+
+The zeros are measured, not fabricated: they are emitted only from a successful
+`alert.list` answer, and any failure aborts the whole push (see Failure
+behaviour), so a revoked `ALERT_LIST_READ` shows up as poller absence, never as
+a healthy zero.
+
 ## Failure behaviour
 
 On any error the poller **pushes nothing and exits non-zero**. A partial scrape
@@ -72,8 +90,9 @@ copy of it, in the appliance's own vault.
 
 ## Privileges
 
-Needs `POOL_READ` and `DISK_READ` on the `ansible-ctrl` privilege, on top of the
-`REPORTING_WRITE` that #173 established. Grant them in the TrueNAS UI
+Needs `POOL_READ`, `DISK_READ` and `ALERT_LIST_READ` on the `ansible-ctrl`
+privilege, on top of the `REPORTING_WRITE` that #173 established. Grant them in
+the TrueNAS UI
 (Credentials → Groups → Privileges) and record them in `truenas_granted_roles`.
 
 ## Deploy
