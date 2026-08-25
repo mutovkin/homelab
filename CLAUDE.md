@@ -416,6 +416,28 @@ Hard-won lessons — check here before debugging from scratch.
   handler from failing on a systemd unit the templates have not written yet.
   See [docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md](docs/solutions/integration-issues/truenas-26-api-exporter-configured-is-not-delivering.md).
 
+- **An experiment that cannot distinguish the hypotheses is not evidence, however
+  careful it looks.** #194 asked whether n5pro's RAPL `core` domain was real. A
+  near-zero idle reading, an idle-time match against the per-core MSRs, and a
+  single-core load test were each run carefully — and none could separate "real
+  aggregate, power-gated at idle" from "one core's counter": all three observations
+  are predicted by BOTH. Three actors produced confident, *opposite* conclusions.
+  The discriminating test was load PLACEMENT: put the load on a core the domain
+  would only see if it were an aggregate. n5pro's `core` stayed flat at 0.12 W while
+  package climbed 28 W (three-core load, no CPU0) — it covers CPU0 alone; eq12's
+  identically-named domain tracked package to 0.08 W at every placement and is a
+  genuine aggregate. **Same sysfs path, same name, opposite answer — coverage is a
+  property of the board, never of the name.** So: write down what each hypothesis
+  predicts BEFORE measuring, always run the positive control on hardware expected to
+  answer the other way, and treat "measured" in someone's brief as a claim to
+  interrogate, not a warrant. A near-zero reading is not proof of an unsupported
+  sensor and a reading that moves is not proof of a correct one. Corollary measured
+  in the same change: a dead-zone test using `chmod 000` **as root** proves nothing —
+  root bypasses permission checks, so the harness must actually create the condition
+  it claims to test. Excluded domains are dropped, not relabelled: a per-core series
+  sharing a metric name with `package-0` invites a sum that is always wrong.
+  See [docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md](docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md).
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.
