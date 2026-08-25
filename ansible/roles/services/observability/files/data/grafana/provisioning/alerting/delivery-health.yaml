@@ -53,6 +53,16 @@ groups:
       # of incidental traffic is not evidence of anything, so make the signal
       # deliberate. This is that idea applied one layer up, to notifications
       # instead of log records.
+      #
+      # What its ARRIVAL proves, end to end: Grafana evaluated a rule, matched a
+      # route, and a real message arrived. What its ABSENCE means: gone from one
+      # channel for more than a day while the other keeps delivering, that
+      # channel is broken; gone from BOTH, Grafana's alerting engine itself is
+      # down or the rule was paused. Cross-check
+      # grafana_alerting_notifications_failed_total in VictoriaMetrics alongside
+      # `docker logs grafana`. And do not silence this rule: silencing it
+      # removes the only control that does not depend on the channel it is
+      # testing.
       - uid: obs-alert-delivery-heartbeat
         title: Alert delivery heartbeat
         condition: C
@@ -65,18 +75,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Alert delivery heartbeat — this firing is NORMAL and expected.
-          description: >-
-            You are meant to receive this once per channel per 24h. It proves the
-            whole notification path works end to end: Grafana evaluated a rule,
-            matched a route, and a real message arrived. NOTHING IS WRONG. What is
-            wrong is NOT receiving it: if this stops arriving on one channel for
-            more than a day while the other keeps delivering, that channel is
-            broken — check `docker logs grafana` for SMTP or telegram errors, and
-            grafana_alerting_notifications_failed_total in VictoriaMetrics. If it
-            stops on BOTH, Grafana's alerting engine itself is down or the rule
-            was paused. Do not silence this rule; silencing it removes the only
-            control that does not depend on the channel it is testing.
+          summary: Daily delivery test — this arriving means this channel works.
+          description: |-
+            Expected once per channel per 24h; nothing to do.
+            Missing on one channel for over a day: that channel is broken — check `docker logs grafana`. Missing on both: the alerting engine itself is down.
+            Never silence this rule.
         labels:
           severity: info
           # Matched by the heartbeat route (repeat_interval 24h) in
@@ -139,6 +142,23 @@ groups:
                       - 0
 
       # ---------------------------------------------------------------------
+      # ROUTED AWAY FROM THE FAILING CHANNEL, because that is the point of the
+      # rule (#152: a rule that reports a channel's failure THROUGH that channel
+      # is not a control). The routing mechanism is documented in the labels
+      # block below; while observability_alert_telegram is false there is only
+      # one channel, so an email failure still arrives by email. That is the
+      # unavoidable single-channel gap, and it is the reason the flag is not
+      # meant to stay false.
+      #
+      # integration="email": suspect the shared Gmail app password (revoked or
+      # rotated — it is the same credential watchtower uses, see
+      # templates/env.j2), a Google sender block, or egress to
+      # smtp.gmail.com:587.
+      # integration="telegram": the bot token or chat id is wrong or the bot was
+      # removed from the chat — the transport itself was operator-confirmed
+      # working, so suspect Grafana's contact-point settings before the
+      # credential.
+      # `docker logs grafana` carries the underlying SMTP/API error either way.
       - uid: obs-alert-delivery-failing
         title: Alert notification delivery failing
         condition: C
@@ -161,27 +181,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Grafana failed to deliver alert notifications via {{ $labels.integration }}.
-          description: >-
-            grafana_alerting_notifications_failed_total increased for
-            integration={{ $labels.integration }} — alerts fired and the message
-            did not go out. If integration="email", suspect the shared Gmail app
-            password (revoked or rotated — it is the same credential watchtower
-            uses, see templates/env.j2), a Google sender block, or egress to
-            smtp.gmail.com:587. If integration="telegram", the bot token or chat
-            id is wrong or the bot was removed from the chat — the transport itself
-            was operator-confirmed working, so suspect Grafana's contact-point
-            settings before the credential. `docker logs grafana` carries the
-            underlying SMTP/API error either way.
-            HOW THIS ALERT REACHED YOU, because it is the point of the rule (#152:
-            a rule that reports a channel's failure THROUGH that channel is not a
-            control). While observability_alert_telegram is true it is routed AWAY
-            from the integration that failed: integration=email pages by Telegram,
-            integration=telegram pages by email. While the flag is false there is
-            only one channel, so it is caught by the severity=critical route and
-            arrives by email — including when email is what failed. That is the
-            unavoidable single-channel gap, and it is the reason the flag is not
-            meant to stay false.
+          summary: Grafana failed to deliver notifications via {{ $labels.integration }}.
+          description: |-
+            Alerts fired and the message did not go out — `docker logs grafana` has the SMTP/API error.
+            email → the shared Gmail app password or egress to :587; telegram → bot token, chat id, or the bot removed from the chat.
+            Sent to you via the other channel on purpose.
         labels:
           severity: critical
           component: alerting
@@ -295,6 +299,24 @@ groups:
       # should match the provisioned receivers. It must stay inside telegraf's
       # fieldpass — the two are coupled by hand, see telegraf.conf.
       #
+      # READ THAT FILTER CAREFULLY BEFORE EDITING IT — it has TWO entries and
+      # they are not interchangeable: `grafana_alerting_notifications*` is the
+      # glob feeding obs-alert-delivery-failing, and
+      # `grafana_alerting_alertmanager_receivers` is an EXACT name, no glob, and
+      # it is THIS RULE'S OWN FEED. The glob does not cover it. Removing that
+      # second entry — or "tidying" the two into one pattern — silently blinds
+      # the absence owner itself, which is precisely the failure this rule exists
+      # to catch and the one thing it cannot report about itself. It must never
+      # leave the fieldpass while this rule exists. A Grafana metric RENAME
+      # empties either entry just as quietly (the *pass filters match the
+      # measurement name, and under metric_version = 2 that trap has already
+      # bitten once — see the comment in telegraf.conf).
+      #
+      # Triage order when it fires: `docker logs telegraf` on eq12_docker; that
+      # http://grafana:3000/metrics still answers 200 from inside
+      # observability_network; then that telegraf's `[[inputs.prometheus]]`
+      # fieldpass still matches.
+      #
       # noDataState: Alerting is genuinely false-alarm-free on this series (it is
       # exported for the whole process lifetime), which it would NOT have been on
       # the notifications counter. That difference is the entire finding.
@@ -312,36 +334,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: The delivery-path metrics have stopped arriving — delivery is now unmonitored.
-          description: >-
-            No grafana_alerting_alertmanager_receivers sample in over 10 minutes,
-            while telegraf scrapes Grafana's /metrics every 60s. That series is
-            exported continuously for Grafana's whole process lifetime, so its
-            absence means the PATH is broken, not that nothing was sent.
-            Nothing is necessarily wrong with DELIVERY — what is broken is the
-            ability to SEE delivery failures, so obs-alert-delivery-failing is now
-            blind and will report Normal no matter what happens. That is the
-            failure this rule exists to convert into a page.
-            Check, in order: `docker logs telegraf` on eq12_docker; that
-            http://grafana:3000/metrics still answers 200 from inside
-            observability_network; and that telegraf's `[[inputs.prometheus]]`
-            fieldpass still matches.
-            READ THAT FILTER CAREFULLY BEFORE EDITING IT — it has TWO entries and
-            they are not interchangeable:
-            `grafana_alerting_notifications*` is the glob feeding
-            obs-alert-delivery-failing, and `grafana_alerting_alertmanager_receivers`
-            is an EXACT name, no glob, and it is THIS RULE'S OWN FEED. The glob does
-            not cover it. Removing that second entry — or "tidying" the two into one
-            pattern — silently blinds the absence owner itself, which is precisely
-            the failure this rule exists to catch and the one thing it cannot report
-            about itself. It must never leave the fieldpass while this rule exists.
-            A Grafana metric RENAME empties either entry just as quietly (the *pass
-            filters match the measurement name, and under metric_version = 2 that
-            trap has already bitten once — see the comment in telegraf.conf).
-            Do NOT switch this rule to grafana_alerting_notifications_total,
-            however natural that looks: Grafana exports that counter only while
-            notifications are being sent, so it is absent on a healthy idle system
-            and this rule would fire forever. Measured — see the comment above.
+          summary: Delivery-path telemetry stopped — Grafana delivery failures are now invisible.
+          description: |-
+            No receivers-metric sample in over 10 minutes while telegraf scrapes every 60s. Delivery itself may be fine; the watcher for it is blind.
+            Check `docker logs telegraf` on eq12_docker, then that Grafana's /metrics answers, then telegraf's fieldpass filter.
         labels:
           severity: critical
           component: alerting
