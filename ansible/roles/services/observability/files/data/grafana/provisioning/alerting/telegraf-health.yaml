@@ -498,6 +498,221 @@ groups:
                       - 600
 
       # ---------------------------------------------------------------------
+      # THE RAPL POWER ABSENCE OWNERS (#194), one per physical Proxmox host.
+      #
+      # A SEPARATE PAIR OF RULES FROM THE TWO ABOVE, ON PURPOSE, and the reason
+      # is #174's measured lesson: the agent-liveness rules watch the
+      # [[inputs.system]] stream, and the exec input that produces this family
+      # can die on its own while that stream keeps flowing perfectly. A failing
+      # exec is logged once and telegraf carries on serving every other input —
+      # exactly the shape that cost the container agent its ping metrics. Two
+      # producers need two liveness rules; an agent-level rule is blind to this.
+      #
+      # SHAPE IS A DOMAIN COUNT, NOT PRESENCE, because partial loss is the
+      # realistic failure here. files/rapl_power.sh emits NOTHING for a zone it
+      # cannot read completely (gauges skip on unknown rather than publishing a
+      # fabricated zero), so losing one domain thins the series silently while a
+      # presence check stays green. `count by (host)` collapses each host to one
+      # row carrying the number of domains delivered, and the threshold is that
+      # host's measured domain count.
+      #
+      # WARNING, NOT CRITICAL, and that routes email-only under the root policy
+      # (no sub-route matches component=metrics-pipeline at severity=warning).
+      # Losing power visibility is not worth a page: the agent-dead case — the
+      # one that IS a page — is already owned by the two rules above, at
+      # severity critical. This deliberately keeps the #193 fatigue posture.
+      #
+      # NO DEEP LINKS ON THESE TWO EITHER, for the reason spelled out above the
+      # native-agent rules: a dashboard-only __dashboardUid__ is not
+      # representable and its rejection is boot-fatal for ALL provisioned rules.
+      #
+      # WHEN EITHER FIRES, on the host itself:
+      #   ssh root@<host> 'systemctl status telegraf'
+      #   ssh root@<host> 'journalctl -u telegraf -n 100 | grep -i exec'
+      #   ssh root@<host> '/usr/local/lib/telegraf/rapl_power.sh'   # ~1s, prints
+      #       one influx line per readable domain, nothing for an unreadable one
+      #   ssh root@<host> 'grep . /sys/class/powercap/intel-rapl:*/name'
+      # `energy_uj` is -r-------- root root and the unit reads it through the
+      # drop-in's ambient CAP_DAC_OVERRIDE, so a drop-in regression takes this
+      # family out while telegraf stays `active` and every other family flows.
+      #
+      # NOTE for whoever renames a host, or changes a board: these are scoped to
+      # the name AND to the domain count, so both a rename and a hardware change
+      # must be made here in the same change — the role's own deploy-time proof
+      # asserts the same set out of host_vars and will fail first.
+
+      # eq12 (Intel N100) delivers THREE domains — package-0, core, uncore —
+      # enumerated from the sysfs `name` files, 2026-08-25.
+      - uid: obs-rapl-power-absent-eq12
+        title: RAPL power domains stopped arriving for eq12
+        condition: C
+        for: 5m
+        # Alerting, not OK, and the #151 test settles it the same way it does for
+        # the rules above: this family is exported every 60s unconditionally, so
+        # absence is NEVER its healthy state (unlike a counter that only exists
+        # while non-zero). NoData here means every domain is gone — the exec
+        # input dead, the capability lost, telegraf down, or the host away.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: RAPL power domains for host=eq12 are incomplete or absent (expected 3).
+          description: |-
+            The exec input can die while the agent stays healthy, so this is separate from the agent-liveness rule. On the host: `journalctl -u telegraf -n 100 | grep -i exec`, then run /usr/local/lib/telegraf/rapl_power.sh by hand — it prints one line per readable domain and nothing for one it cannot read.
+            energy_uj is root-only and is reached through the unit's ambient CAP_DAC_OVERRIDE; a drop-in regression takes this family out while every other family keeps flowing.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s collection interval: ten samples of
+              # headroom, so a restart cannot empty the window. relativeTimeRange
+              # above must stay >= this lookbehind. `by (host)` around a pinned
+              # selector for the same reason as the rules above — widening the
+              # selector then evaluates each host on its own rather than letting
+              # a healthy peer mask a dead one (#160).
+              expr: 'count by (host) (last_over_time(rapl_power_watts{host="eq12"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not become a real 0, which would
+          # trip this `lt` threshold and read as a genuine partial loss while the
+          # truth is that nothing came back at all. With no numeric value the
+          # rule falls through to noDataState, which is Alerting on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 3: this board's measured domain set is exactly {package-0, core,
+          # uncore}. n5pro's rule below uses 1 because that machine has two
+          # domains and deliberately excludes one — the counts are per-board
+          # facts, not a shared constant. Detection latency is the group's 5m
+          # `interval` plus `for: 5m`, both of which only advance at evaluation
+          # ticks: 5-10 min once the domains stop arriving.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 3
+
+      # n5pro (Ryzen AI 9 HX PRO 370) delivers ONE domain. The board has two —
+      # package-0 and core — and `core` is EXCLUDED at the source because it
+      # covers CPU0 ALONE, measured 2026-08-25 by LOAD PLACEMENT (the only test
+      # that separates that from a real aggregate): under a busy-loop on
+      # CPU2+14+20, package rose to 33.93 W while `core` stayed at 0.12 W; it
+      # moves only when CPU0 itself is loaded. eq12's identically-named domain
+      # passes the same test and IS exported, which is why this threshold is 1
+      # and eq12's is 3 — the shapes are per-board and neither may be copied to
+      # the other. There is no `uncore` domain on this machine at all.
+      - uid: obs-rapl-power-absent-n5pro
+        title: RAPL power domains stopped arriving for n5pro
+        condition: C
+        for: 5m
+        # Alerting, not OK — same #151 reasoning as the eq12 rule above.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: RAPL power domains for host=n5pro are incomplete or absent (expected 1).
+          description: |-
+            The exec input can die while the agent stays healthy, so this is separate from the agent-liveness rule. On the host: `journalctl -u telegraf -n 100 | grep -i exec`, then run /usr/local/lib/telegraf/rapl_power.sh by hand — it prints one line per readable domain and nothing for one it cannot read.
+            One domain is correct here: this board has package-0 and core, and core is excluded at the source because it was measured to be a single core rather than a package aggregate.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s collection interval, as above;
+              # relativeTimeRange must stay >= the lookbehind.
+              expr: 'count by (host) (last_over_time(rapl_power_watts{host="n5pro"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — same reasoning as the eq12 rule above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 1, i.e. the single expected domain is gone. With one domain the
+          # count can only be 1 or absent, so on this host the threshold and the
+          # noDataState catch the same fault by two paths — kept in the count
+          # shape anyway so the pair reads identically and so re-including a
+          # domain here is a one-number edit.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+
+      # ---------------------------------------------------------------------
       # WHERE TO LOOK, and it is almost certainly one word: `taginclude` under
       # [[inputs.docker]] in
       # ansible/roles/services/observability/files/data/telegraf/telegraf.conf.

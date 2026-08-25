@@ -171,11 +171,35 @@ telegraf_agent_expected_test_output:
   - "chip=nvme-pci-0300" # root NVMe Composite
   - "smart_device," # inputs.smart is actually producing
   - "acpi_fan_state," # the exec fan-state script is actually producing
-  - "rapl,domain=package-0," # RAPL package watts, #194 — exec input producing
-  - "rapl,domain=core,"
-  - "rapl,domain=uncore,"
+  # RAPL (#194). Influx line protocol sorts tag keys, so `domain` precedes the
+  # agent's `environment`/`host`/`location` — the substring is the line's head.
+  # Verified against the script's real output on this host, 2026-08-25.
+  - "rapl,domain=package-0"
+  - "rapl,domain=core"
+  - "rapl,domain=uncore"
 telegraf_agent_forbidden_test_output: []
-# Measured 2026-08-25: intel-rapl:0 = package-0, :0:0 = core, :0:1 = uncore, all
-# max_energy_range_uj = 262143328850. The arrival assert compares this COUNT
-# against VictoriaMetrics — a partial failure is a low count, not an absence.
-telegraf_agent_rapl_domain_count: 3
+# RAPL package power (#194). THREE domains on this N100, enumerated from the
+# `name` files and not the node indices: intel-rapl:0 = package-0,
+# intel-rapl:0:0 = core, intel-rapl:0:1 = uncore.
+# max_energy_range_uj = 262143328850 on all three.
+#
+# `core` HERE IS A GENUINE ALL-CORE AGGREGATE, and it is exported for that
+# reason — established by the same load-placement test that DISQUALIFIED n5pro's
+# identically-named domain (see that host's vars for the confound this avoids:
+# loading CPU0 alone cannot tell an aggregate from a CPU0-only counter).
+# Measured 2026-08-25, 6 s windows:
+#
+#   placement                package W     core W
+#   idle                      1.70          1.62
+#   busy-loop on CPU0        11.47         11.39
+#   busy-loop on CPU3        12.13         12.05
+#   busy-loop on CPU1+2+3    19.55         19.46
+#   idle again                1.86          1.78
+#
+# core tracks package to within ~0.08 W at EVERY placement, including cores that
+# a CPU0-only counter could not see. That is the positive control for the n5pro
+# negative: same sysfs path, same domain name, different board, opposite answer.
+#
+# uncore is the iGPU. It is flat at idle because there is nothing drawing, not
+# because it is unsupported.
+telegraf_agent_rapl_expected_domains: [package-0, core, uncore]

@@ -110,8 +110,8 @@
 [[inputs.smart]]
   path_smartctl = "/usr/sbin/smartctl"
   attributes = true
-
 {% if telegraf_agent_acpi_fan_state | bool %}
+
 # eq12 only. BINARY ACPI fan state (0/1) — NOT a fan speed, and not this board's
 # tachometer. Under the DEFAULT driver set the board exposes no fan*_input and no
 # pwm* (measured #186); a forced binding of the stock in-kernel it87 module DOES
@@ -123,19 +123,39 @@
   timeout = "5s"
   data_format = "influx"
 {% endif %}
+{% if telegraf_agent_rapl_power | bool %}
 
-# RAPL per-domain CPU package power in WATTS (#194) — both physical hosts
-# expose /sys/class/powercap (yes, the AMD box too: intel_rapl_msr drives it).
-# The script converts to watts at the source with in-window wrap correction —
-# n5pro's counter range is 65.5 kJ, a rollover every ~3 h idle, so a raw
-# counter + rate() would cliff at every wrap. Domain names come from the sysfs
-# `name` file. energy_uj is root-only; ambient CAP_DAC_OVERRIDE (measured, the
-# README staircase) reads it — no unit change. This is PACKAGE power, not wall
-# power: no NVMe, fans, PSU loss, or (n5pro) the drive bays. eq12 emits
-# package-0/core/uncore, n5pro package-0/core — nothing may hard-wire either
-# shape. n5pro core ≈0.04 W at idle is REAL (Zen5 core power-gating): measured
-# 2026-08-25, a 6 s single-core load moved it 0.04 → 4.41 W.
+# RAPL package power, in WATTS (#194). Both hosts load intel_rapl_msr +
+# intel_rapl_common — yes, the AMD box too — and expose /sys/class/powercap;
+# `energy_uj` is `-r-------- root root` and the unit reaches it through ambient
+# CAP_DAC_OVERRIDE, not root (see the drop-in).
+#
+# WHY NOT [[inputs.intel_powerstat]] — the negative belongs HERE, where the next
+# person would "simplify" to the plugin. Measured 2026-08-25 with
+# `telegraf --test` under the real unit user and capabilities:
+#   * n5pro — the plugin will not initialise: "failed to initialize metric
+#     fetcher interface: host processor is not supported". It cannot serve this
+#     machine at all.
+#   * eq12 — it runs, and its FIRST gather emits
+#     current_power_consumption_watts=826963607.79: a first-sample artefact with
+#     no prior read to delta against, i.e. a garbage spike at every restart.
+# Running the plugin on eq12 and the script on n5pro would export two metric
+# names for one signal — the coretemp/k10temp divergence trap. One script, both
+# hosts.
+#
+# The script converts to watts AT THE SOURCE because these counters wrap fast
+# (65.5 kJ on n5pro: ~3 h idle, ~20 min loaded), so a rate() over the raw
+# counter would spike negative at every rollover. Each sample is a ~1 s
+# instantaneous snapshot taken once per 60 s interval, NOT a 60 s average.
+# The script runs ~1 s; timeout is 5 s.
+#
+# Arguments are the domains to EXCLUDE (n5pro: `core` — measured by load
+# PLACEMENT to cover CPU0 alone, not the package's cores; eq12's same-named
+# domain passes that test and is exported). The role asserts these names are
+# bare tokens before templating them into this TOML string.
+# RAPL is PACKAGE power, never wall power.
 [[inputs.exec]]
-  commands = ["/usr/local/lib/telegraf/rapl_power.sh"]
-  timeout = "15s"
+  commands = ["{{ (['/usr/local/lib/telegraf/rapl_power.sh'] + telegraf_agent_rapl_exclude_domains) | join(' ') }}"]
+  timeout = "5s"
   data_format = "influx"
+{% endif %}

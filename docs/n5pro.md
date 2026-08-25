@@ -283,68 +283,52 @@ series of its own; a second docker-metrics collector is a separate decision.
 `net`, `netstat`, `kernel`, `processes`, `system` (load/uptime), `zfs` (ARC
 kstats from `/proc/spl/kstat/zfs`), `sensors` (below), `smart` (NVMe wear,
 available spare, power-on hours, media errors — 14 `smart_device_*` series), and
-RAPL package power (below, #194). Interval 60 s.
+RAPL package power (below). Interval 60 s. No fan input exists here at all; see
+the negative result further down.
 
-No fan input exists here at all; see the negative result below.
+### Package power (RAPL, #194)
 
-### Power (RAPL + amdgpu PPT, #194)
+Two powercap domains, named from the sysfs `name` files and **never** from the
+node indices: `intel-rapl:0` = `package-0` and `intel-rapl:0:0` = `core`. There
+is **no `uncore` domain** here, unlike EQ12 — a panel or rule hard-wired to that
+three-domain shape reads empty for this host. `max_energy_range_uj` is
+65532610987 (65.5 kJ), which wraps roughly every 3 h at idle and every ~20 min
+under load; the agent therefore exports `rapl_power_watts{domain=…}` in **watts,
+converted and wrap-corrected at the source** by
+`roles/telegraf_agent/files/rapl_power.sh`. Each sample is a **~1 s instantaneous
+snapshot taken once per 60 s interval, not a 60 s average**.
 
-Two independent power surfaces are measured on this machine, and they are **not
-additive**:
+**`core` is deliberately NOT exported, and the negative is measured.** Its
+powercap reading is 0.07 W against a 6.4 W package, which cannot be a core
+aggregate. Second source, the AMD energy MSRs read read-only off
+`/dev/cpu/*/msr` over a 4 s window (energy unit shift 16 → 15.2588 µJ/unit),
+2026-08-25:
 
-- **CPU package**, from `/sys/class/powercap` via the RAPL exec input (#194).
-- **iGPU package tracking power**, from `amdgpu`'s `power1_average` /
-  `power1_input` through the `sensors` input that #186 already deployed — the
-  host-side view of what CT 201's VAAPI workloads cost. #194 added no collection
-  for this; the dashboard consumes the series that were already flowing.
+| quantity | measured | in µJ |
+| -------- | -------- | ----- |
+| powercap `intel-rapl:0:0` (`core`) | 291,748 µJ | 291,748 |
+| CPU0 `MSR_AMD_CORE_ENERGY_STATUS` (0xC001029A) | 19,131 units | 291,927 |
+| package MSR (0xC001029B) | 1,671,711 units | 25,508,354 |
+| powercap `intel-rapl:0` (`package-0`) | 25,496,942 µJ | 25,496,942 |
 
-`/sys/class/powercap` exposes **two** RAPL domains here (the AMD box included:
-`intel_rapl_msr` drives it), enumerated 2026-08-25. The `domain` tag comes from
-the sysfs `name` file, never the index.
+powercap `core` matches CPU0's **single-core** counter to within 0.06% while
+package matches package to within 0.04%. On this platform the `intel_rapl`
+`core` subdomain is one core of twelve, mislabelled as a domain aggregate — a
+real reading of the wrong thing, which is worse than a fabricated zero because it
+looks measured. It is excluded at the source
+(`telegraf_agent_rapl_exclude_domains: [core]`) and the deploy asserts it is
+absent from both telegraf's own output and the delivered domain set.
 
-| sysfs node | `name` | `max_energy_range_uj` | measured idle |
-| ---------- | ------ | --------------------- | ------------- |
-| `intel-rapl:0` | `package-0` | 65532610987 | 5.7–5.8 W |
-| `intel-rapl:0:0` | `core` | 65532610987 | 0.04 W |
+**`amdgpu`'s `power1_average` / `power1_input` already come through the `sensors`
+input**, so iGPU package draw is measured too — but it is **not additive** with
+the RAPL package series: the iGPU sits inside the same SoC package, so summing
+the two double-counts it.
 
-There is **no `uncore` domain** on this Zen5 part. Nothing may assume eq12's
-three-domain shape here, or this one there.
-
-**The 0.04 W core reading is REAL — this is the negative of a negative, and it
-was measured rather than argued.** A domain reading ~0 W looks exactly like the
-fabricated `vddgfx`/`vddnb` zeros this host drops at the source, so it was
-load-tested on 2026-08-25:
-
-| state | `package-0` | `core` |
-| ----- | ----------- | ------ |
-| idle | 5.79 W | 0.04 W |
-| 6 s single-core busy loop | 22.44 W | 4.41 W |
-| idle again | ~5.8 W | ~0.04 W |
-
-A fabricated reading is flat; this tracks load faithfully. The 0.04 W idle is
-genuine Zen5 core power-gating — idle package power here is SoC/fabric/iGPU, not
-cores. The domain is exported.
-
-**The wrap math, and why it matters more on this box.** `max_energy_range_uj` is
-**65532610987 µJ (65.5 kJ)**, a quarter of eq12's 262.1 kJ range on the host
-that also idles nearly three times higher. At the measured 5.8 W idle that is a
-rollover roughly every **3 hours**; at the measured 22 W load, under an hour —
-against eq12's day and a half. A raw counter plus PromQL `rate()` would therefore be
-correct for a while and then cliff at every wrap, repeatedly — Prometheus reset
-semantics assume a reset to zero, and a modulo wrap loses `(max − e0)`. So
-[`roles/telegraf_agent/files/rapl_power.sh`](../ansible/roles/telegraf_agent/files/rapl_power.sh)
-samples twice 2 s apart and corrects **inside its own window**: a negative delta
-there is exactly one wrap (a double wrap in 2 s would need >16 kW), so it adds
-the domain's own `max_energy_range_uj` and exports watts.
-
-**RAPL is CPU package power, NOT wall power.** It excludes the NVMe, the fans,
-PSU losses and — the big one on this machine — the five drive bays. There is no
-machine total for n5pro anywhere in this stack. Dashboard: `hosts-power`
-("Hosts — CPU package power").
-
-Reading `energy_uj` needs privilege (`-r-------- root root`) and gets it from the
-ambient `CAP_DAC_OVERRIDE` the unit already carries for NVMe SMART — no unit or
-privilege change was made for this.
+**None of this is wall power.** RAPL excludes NVMe, fans, PSU conversion loss and
+— on this machine specifically — the five drive bays and the whole NAS side of
+the box, and there is no wall meter here. Grafana:
+`Homelab / hosts / Hosts — CPU package power` (uid `host-power`); liveness is
+`obs-rapl-power-absent-n5pro`, on the domain count.
 
 ### Measured sensor surface
 
