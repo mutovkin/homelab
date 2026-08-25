@@ -432,9 +432,12 @@ groups:
       # ---------------------------------------------------------------------
       # min(truenas_pool_healthy) < 1 means ZFS considers the pool unhealthy —
       # DEGRADED, FAULTED, or carrying errors.
-      # noDataState is OK because absence is owned by the two liveness rules
-      # (truenas-poller-absent and truenas-metrics-absent); duplicating it here
-      # would page three times for one outage.
+      # noDataState is OK because this series is POLLER-fed, so its absence is
+      # owned by truenas-poller-absent specifically — not by the two liveness
+      # rules jointly, and not by truenas-metrics-absent, which watches the
+      # Graphite stream this rule does not read (and since #193 is a
+      # warning routed to email only). Duplicating that ownership here would
+      # add a second page for one outage.
       - uid: truenas-pool-degraded
         title: TrueNAS pool is not healthy
         condition: C
