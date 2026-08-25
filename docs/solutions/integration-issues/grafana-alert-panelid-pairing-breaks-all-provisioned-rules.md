@@ -61,6 +61,23 @@ truenas-scrub-overdue      dash=True panel=True
 parsed OK, rules with links: 6
 ```
 
+### Scope of the evidence
+
+Two claims here, and they do not have the same standing. **Measured**, from one real
+incident on this fleet's Grafana on 2026-08-24: the annotation-pairing failure class —
+an unpaired `__dashboardUid__` crash-looped the process from 19:48:36, ten
+`Starting Grafana` lines with zero `HTTP Server Listen`, first listen at 19:51:26 once
+every link was paired. Everything below about *that* is observation.
+
+**Inferred, not measured:** the generalization that any malformed rule, in any
+provisioning file, is equally boot-fatal. The reasoning is the module cascade visible in
+the same logs — provisioning fails as a unit and its dependents log
+`failed to start X, because it depends on module provisioning, which has failed` — which
+says the blast radius follows from *provisioning* failing, not from which document or key
+caused it. That is a strong inference from the architecture, not a second experiment. Treat
+it as the working assumption it is: sound enough to design a deploy gate around, not
+something to cite as a measured fact.
+
 ## Symptoms
 
 Measured on eq12_docker (192.168.25.15), Grafana 13.2.0, 2026-08-24.
@@ -189,8 +206,8 @@ temperature, 4 Pool (row), 5 Pool status, 6 Pool used, 7 Days since scrub, 8 Poo
 
 Two different failure modes, closed by the two halves.
 
-The pairing closes a **loud** one. Grafana's provisioner is a hard schema gate on a
-startup-blocking module: valid pair or no process. Once every `__dashboardUid__` has a
+The pairing closes a **loud** one. Grafana's provisioner behaved here as a hard schema gate
+on a startup-blocking module: valid pair or no process. Once every `__dashboardUid__` has a
 `__panelId__` beside it the document passes and the boot completes — the proof is the
 `msg="HTTP Server Listen"` line at 19:51:26, the first in the whole incident window.
 
