@@ -1,6 +1,7 @@
 ---
 title: "An instant query cannot prove a series is live: it answers from a lookback window, and stamps the answer with the query time"
 date: 2026-08-22
+last_updated: 2026-08-24
 category: conventions
 module: services/observability
 problem_type: convention
@@ -86,8 +87,16 @@ To ask whether a series is *still being written*, use an instrument that can ans
 | --- | --- |
 | Is this series still being written? | `query_range` over the window, or `count_over_time(m[10m])` |
 | How old is the newest sample? | `timestamp(m)`, compared against now |
-| Has this series *ever* existed? | `/api/v1/series?match[]=m`, or the value itself for a monotonic counter |
+| Has this series *ever* existed? | `/api/v1/series?match[]=m` (but see the caveat below), or the value itself for a monotonic counter |
 | Is it live *right now*, at the source? | the exporter's own `/metrics` endpoint, not the TSDB |
+
+Caveat on that third row, measured 2026-08-24 (#171): `/api/v1/series` resolves
+against a per-**UTC-day** inverted index, so it answers neither "ever" nor "within
+my window" -- it answers "existed in the UTC day(s) overlapping the window", and
+its answer GROWS through the day for a *fixed* window (the same pinned window read
+245 pairs at one moment and 300 pairs 3.9 h later, while both query legs held at
+245). For this endpoint the caller's window is not the instrument's window. See
+[victoriametrics-series-index-is-per-utc-day](../integration-issues/victoriametrics-series-index-is-per-utc-day.md).
 
 ## Why This Matters
 

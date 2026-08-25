@@ -173,6 +173,27 @@ that rewrite — and then explicitly scoped to flows addressed to the host, or i
 silently catches unrelated forwarded traffic. Because the pattern fails open, it
 pairs with a Check-and-heal so its absence is detected rather than survived.
 
+### Affirmative-allow guard
+A protective check that permits an operation only when its target lies inside a
+positively approved set, so an unanticipated case lands on refusal rather than on
+permission.
+
+The alternative — enumerating the shapes that must be blocked and permitting
+everything else — makes the accept condition a negative, and a negative accept
+condition fails open by construction: it can only be as complete as its list, and
+the case that matters is the one nobody thought to list. The tell that an
+enumeration has been reached is repetition: each review closes exactly the hole
+the last one found and the next review finds another. Inverting to an allow-list
+is necessary but not sufficient. The gate must be evaluated on the target's fully
+canonical form, since a positive test applied to a string the system will later
+re-interpret is a negative test wearing a disguise; every error, ambiguity or
+unanswerable probe must resolve to refusal; and evidence gathered from outside the
+guard may widen the forbidden set but must never be what grants permission.
+Finally the guard declares its threat model and names the residuals it does not
+cover, because a guard with no stated scope has no definition of done and review
+cannot terminate. Not to be confused with a Fail-open firewall, where "open" names
+a deliberate lockout trade-off rather than a guard permitting what it forbids.
+
 ### Check-and-heal
 A deploy-time discipline for controls whose managing service can report healthy
 while the control's effect is gone: probe the real artifact on every run, treat its
@@ -216,6 +237,49 @@ table, since once state is synthetic the awkward rows — empty values, absent v
 reversed orderings, removals — cost nothing to add. This is the mirror image of a Canary
 dry-run: there a planted value proves a suppression fired, here planted state proves a
 report fires.
+
+### Source-code canary
+A check that holds for every possible input by construction, kept and labelled as a
+regression detector for the code that computes it rather than presented as evidence
+about the data.
+
+Such a check can only fail if someone edits the logic it mirrors, so reporting it
+alongside genuine data checks overstates what a run established — a partition that
+sums correctly because it is a partition proves nothing about whether the partition
+is the right one. The project keeps them, because they do catch the edit they
+watch, but names them in the output so a reader is not misled, and pairs them with
+at least one check that derives the same quantity a second, genuinely independent
+way. The discipline generalises: before trusting any check, ask what its output
+would look like if the thing it guards were broken, and if the answer is "the
+same", it is structural -- a regression detector, not evidence. Note the word does
+not carry the sense it has in Canary dry-run, where the planted value is precisely
+what makes the run evidence.
+
+### Right-by-condition claim
+A statement written together with the condition that makes it true, where the
+condition is visible in the same output the statement appears in.
+
+The project reaches for this when a claim is true of a particular run but not of
+every run — a result that holds because one contributing input happened to be empty
+this time, for instance. Stating it unconditionally is how a caveat becomes a false
+guarantee, and stating it with a condition nobody can check is no better. So the
+run prints which case it is in, from its own measured values, and the claim names
+the qualifier that would reverse it. A caveat that names a condition and then does
+not read it is the failure this exists to prevent.
+
+### Window-bounded candidate
+An entity a measurement could not observe within a stated window, published as a
+candidate for follow-up rather than as a conclusion.
+
+Silence is bounded below by the window and above by nothing, so absence over any
+finite window cannot distinguish a dead thing from one whose normal cadence is
+longer than the window — an irrigation zone that did not run today reads exactly
+like a device that died. The window therefore travels with every such finding
+rather than sitting in the preamble, the operator's knowledge of expected cadence
+is what promotes a candidate, and a later re-run may exonerate one when the thing
+finally reports. Where a measurement cannot even in principle see a class of
+entity, that class is reported as inconclusive and left unranked rather than
+folded in.
 
 ### Reconcile task
 An explicit task that converges one named attribute of an already-existing Guest,
