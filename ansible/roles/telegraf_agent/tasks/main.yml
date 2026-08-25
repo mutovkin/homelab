@@ -110,12 +110,16 @@
   ansible.builtin.assert:
     that:
       - telegraf_agent_expected_test_output | length > 0
+      - telegraf_agent_rapl_domain_count | int > 0
     fail_msg: >-
       telegraf_agent_expected_test_output is empty for {{ inventory_hostname }},
       which would turn the pre-flight input-output proof into `assert: true` — a
       guard that has never been seen to fail is not a guard (CLAUDE.md). Declare
       the measured sensor chips for this host in
       ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml.
+      telegraf_agent_rapl_domain_count must likewise be the MEASURED number of
+      RAPL domains this host exposes (#194) — it defaults to 0, which would make
+      the arrival count assert below unfalsifiable in the same way.
     quiet: true
 
 # The absence rules live in the OBSERVABILITY role's provisioning files, and its
@@ -461,17 +465,20 @@
   register: telegraf_agent_dropin
   when: not telegraf_agent_preview_only
 
-# eq12 only, and the gate is the host_vars flag rather than a fact probe: n5pro
-# has NO ACPI fan objects at all (measured 2026-08-24), so there is nothing here
-# to collect and nothing must pretend otherwise. `| bool` at every use site — a
-# host_vars value written as "false" is a non-empty string and therefore truthy.
+# UNGATED since #194: the RAPL script below is deployed to BOTH hosts, so the
+# directory is no longer eq12-only. It used to carry the fan flag's `when`, and
+# leaving it there would have created the one failure this role exists to catch —
+# a copy into a non-existent directory on n5pro.
 - name: Create the telegraf helper script directory
   ansible.builtin.file:
     path: /usr/local/lib/telegraf
     state: directory
     mode: "0755"
-  when: telegraf_agent_acpi_fan_state | bool
 
+# eq12 only, and the gate is the host_vars flag rather than a fact probe: n5pro
+# has NO ACPI fan objects at all (measured 2026-08-24), so there is nothing here
+# to collect and nothing must pretend otherwise. `| bool` at every use site — a
+# host_vars value written as "false" is a non-empty string and therefore truthy.
 - name: Deploy the ACPI fan-state exec script (binary state, not RPM)
   ansible.builtin.copy:
     src: acpi_fan_state.sh
@@ -479,6 +486,17 @@
     mode: "0755"
   register: telegraf_agent_fan_script
   when: telegraf_agent_acpi_fan_state | bool
+
+# Both hosts, unconditionally: eq12 and n5pro each expose /sys/class/powercap
+# (the AMD box via intel_rapl_msr). The script converts energy_uj deltas to WATTS
+# at the source with in-window wrap correction, and emits nothing for a domain it
+# cannot read — see files/rapl_power.sh and the input block in telegraf.conf.j2.
+- name: Deploy the RAPL power exec script (watts at source, wrap-corrected)
+  ansible.builtin.copy:
+    src: rapl_power.sh
+    dest: /usr/local/lib/telegraf/rapl_power.sh
+    mode: "0755"
+  register: telegraf_agent_rapl_script
 
 # --- The package -------------------------------------------------------------
 # `deb:` rather than a repository: a pinned, checksummed file is what makes this
@@ -623,7 +641,8 @@
          or telegraf_agent_config.changed
          or telegraf_agent_env.changed
          or telegraf_agent_dropin.changed
-         or telegraf_agent_fan_script.changed }}
+         or telegraf_agent_fan_script.changed
+         or telegraf_agent_rapl_script.changed }}
 
 - name: Preview the telegraf restart (check mode)
   ansible.builtin.debug:
@@ -1139,3 +1158,59 @@
   when:
     - not ansible_check_mode
     - telegraf_agent_acpi_fan_state | bool
+
+# Both hosts. The COUNT is the assertion, not presence: eq12 exposes three RAPL
+# domains and n5pro two (measured 2026-08-25), the numbers each host declares in
+# telegraf_agent_rapl_domain_count. A query that merely finds `rapl_power_watts`
+# would pass while two of eq12's three domains had gone unreadable — the script
+# skips a domain it cannot read rather than fabricating a zero, so a partial
+# failure is a LOW COUNT, never an absence.
+#
+# The domain LABELS come from each domain's sysfs `name` file, never its index
+# (indices are not stable across boots), which is why the count and not the label
+# set is what is pinned here.
+- name: Wait for this host's RAPL power series to reach VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'count(rapl_power_watts{host="{{ inventory_hostname }}"})'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_rapl_arrival
+  until: >-
+    telegraf_agent_rapl_arrival.status | default(0) == 200
+    and (telegraf_agent_rapl_arrival.json.data.result | default([]) | length) > 0
+    and (telegraf_agent_rapl_arrival.json.data.result[0].value[1] | int)
+        >= telegraf_agent_rapl_domain_count | int
+  retries: 12
+  delay: 10
+  changed_when: false
+  # ignore_errors, never failed_when: false — the latter ASSIGNS failed=False
+  # (CLAUDE.md). The assert below reads .status and the result list rather than
+  # .failed, so either would be safe here, but this role's own README states the
+  # house rule, and an exhausted retry loop should show as failed(ignored) in the
+  # recap rather than as a clean ok.
+  ignore_errors: true
+  when: not ansible_check_mode
+
+- name: Assert every measured RAPL domain actually reached VictoriaMetrics
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_rapl_arrival.status | default(0) == 200
+      - telegraf_agent_rapl_arrival.json.data.result | default([]) | length > 0
+      - (telegraf_agent_rapl_arrival.json.data.result[0].value[1] | int)
+        >= telegraf_agent_rapl_domain_count | int
+    fail_msg: >-
+      Expected {{ telegraf_agent_rapl_domain_count }} rapl_power_watts series
+      for {{ inventory_hostname }} in VictoriaMetrics, got
+      {{ telegraf_agent_rapl_arrival.json.data.result[0].value[1]
+         | default('none') }}. The agent is up and other families arrived, so
+      this is the exec input itself — run the script under systemd-run as the
+      unit user (README) and read telegraf's own log. Do NOT lower the count.
+      HTTP status was {{ telegraf_agent_rapl_arrival.status | default('none') }}.
+    quiet: true
+  when: not ansible_check_mode

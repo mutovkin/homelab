@@ -123,3 +123,19 @@
   timeout = "5s"
   data_format = "influx"
 {% endif %}
+
+# RAPL per-domain CPU package power in WATTS (#194) — both physical hosts
+# expose /sys/class/powercap (yes, the AMD box too: intel_rapl_msr drives it).
+# The script converts to watts at the source with in-window wrap correction —
+# n5pro's counter range is 65.5 kJ, a rollover every ~3 h idle, so a raw
+# counter + rate() would cliff at every wrap. Domain names come from the sysfs
+# `name` file. energy_uj is root-only; ambient CAP_DAC_OVERRIDE (measured, the
+# README staircase) reads it — no unit change. This is PACKAGE power, not wall
+# power: no NVMe, fans, PSU loss, or (n5pro) the drive bays. eq12 emits
+# package-0/core/uncore, n5pro package-0/core — nothing may hard-wire either
+# shape. n5pro core ≈0.04 W at idle is REAL (Zen5 core power-gating): measured
+# 2026-08-25, a 6 s single-core load moved it 0.04 → 4.41 W.
+[[inputs.exec]]
+  commands = ["/usr/local/lib/telegraf/rapl_power.sh"]
+  timeout = "15s"
+  data_format = "influx"

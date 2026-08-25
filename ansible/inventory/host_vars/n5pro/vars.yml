@@ -260,6 +260,8 @@ telegraf_agent_expected_test_output:
   - "chip=amdgpu-pci-c700" # iGPU edge temp + power (host-side view of CT-201 VAAPI load)
   - "chip=nvme-pci-c200"
   - "smart_device,"
+  - "rapl,domain=package-0," # RAPL package watts, #194 — exec input producing
+  - "rapl,domain=core," # 0.04 W idle is REAL (Zen5 power-gating; 4.41 W under load, measured 2026-08-25)
 # Fabricated zeros (CLAUDE.md): amdgpu vddgfx/vddnb read 0.000 V — unsupported,
 # not measured. THE EXCLUSION: what the sensors tagdrop in telegraf.conf.j2 drops
 # at the source.
@@ -269,3 +271,9 @@ telegraf_agent_sensors_tagdrop_features: [vddgfx, vddnb]
 telegraf_agent_forbidden_test_output:
   - "feature=vddgfx"
   - "feature=vddnb"
+# Measured 2026-08-25: intel-rapl:0 = package-0, :0:0 = core, NO uncore domain on
+# this Zen5 (max_energy_range_uj = 65532610987 — a wrap every ~3 h idle, which is
+# why files/rapl_power.sh corrects inside its own sample window rather than
+# leaving a raw counter to rate()). The arrival assert compares this COUNT
+# against VictoriaMetrics — a partial failure is a low count, not an absence.
+telegraf_agent_rapl_domain_count: 2

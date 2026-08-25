@@ -42,6 +42,12 @@ telegraf_agent_sensors_tagdrop_features: []
 telegraf_agent_expected_test_output: []
 telegraf_agent_forbidden_test_output: []
 
+# RAPL domains this host is measured to expose (#194): eq12 3 (package-0, core,
+# uncore), n5pro 2 (no uncore). Consumed by the arrival assert as a COUNT — the
+# #202-shape lesson that presence of one series does not prove the family.
+# Default 0 fails the assert below on any host that forgot to declare it.
+telegraf_agent_rapl_domain_count: 0
+
 # Let a restarted telegraf run long enough to crash on a bad config before the
 # liveness assert reads it (same reasoning/value as vector_agent).
 telegraf_agent_settle_seconds: 15

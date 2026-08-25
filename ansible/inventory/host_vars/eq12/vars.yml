@@ -171,4 +171,11 @@ telegraf_agent_expected_test_output:
   - "chip=nvme-pci-0300" # root NVMe Composite
   - "smart_device," # inputs.smart is actually producing
   - "acpi_fan_state," # the exec fan-state script is actually producing
+  - "rapl,domain=package-0," # RAPL package watts, #194 — exec input producing
+  - "rapl,domain=core,"
+  - "rapl,domain=uncore,"
 telegraf_agent_forbidden_test_output: []
+# Measured 2026-08-25: intel-rapl:0 = package-0, :0:0 = core, :0:1 = uncore, all
+# max_energy_range_uj = 262143328850. The arrival assert compares this COUNT
+# against VictoriaMetrics — a partial failure is a low count, not an absence.
+telegraf_agent_rapl_domain_count: 3
