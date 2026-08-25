@@ -37,8 +37,8 @@ groups:
         annotations:
           summary: No log lines reached VictoriaLogs in the last 5 minutes — from any host or source.
           description: |-
-            The whole ingest path is down: Vector on eq12_docker is wedged, cannot authenticate, or is not running.
-            Check `docker logs vector` on eq12_docker; a wedged disk buffer has its own runbook (linked).
+            Every shipper silent at once points at VictoriaLogs itself or something fleet-wide, not one host's Vector.
+            Check `docker logs victorialogs` and `docker logs vector` on eq12_docker; a wedged disk buffer has its own runbook (linked).
           runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
         labels:
           severity: critical
@@ -252,7 +252,9 @@ groups:
       # open: docker collection can stop — a wedged docker_logs source, a socket
       # permission change, the group id under `user:` drifting — while host
       # records keep obs-host-log-ingest-stalled Normal and the all-sources rule
-      # green on host traffic alone.
+      # green on host traffic alone. Host syslog may still be flowing — which is
+      # why neither the all-sources rule nor the source:host rule catches this;
+      # only source:docker reaching zero lands here.
       #
       # PRE-GATED, because this repo has made the burstiness mistake twice (#134
       # paged every ~30 min for 21 h on exactly this query shape against
