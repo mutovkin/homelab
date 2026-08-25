@@ -249,10 +249,10 @@ groups:
               reducer: last
               settings:
                 mode: dropNN
-          # C: < 1 host record in 15 minutes from a host that logs continuously
-          # (systemd, sshd, cron, and on the hypervisors pvestatd/pve-firewall every
-          # few seconds) means that host's shipper has stopped, not that the host
-          # went quiet.
+          # < 1 heartbeat record inside the 20m clause. The signal is the
+          # deliberate homelab-heartbeat marker, NOT incidental traffic — see
+          # the header: healthy hosts here are routinely silent for 15m+, so
+          # never re-tune this against "how often hosts log".
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:
