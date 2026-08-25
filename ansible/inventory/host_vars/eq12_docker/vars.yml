@@ -128,8 +128,16 @@ observability_firewall:
       # write to :8428/api/v1/write over the LAN. Without these grants the metrics
       # are dropped at this firewall with NO application-level error — Vector stays
       # up and reports nothing, which is the failure #160 exists to remove.
-      - 192.168.25.5/32   # eq12 hypervisor — native vector agent (#160)
-      - 192.168.30.5/32   # n5pro hypervisor — native vector agent (#160)
+      #
+      # #186 gave the two HYPERVISOR entries a SECOND, independent justification:
+      # they now also run a native systemd telegraf agent (roles/telegraf_agent)
+      # whose remote write goes to this same :8428, and whose deploy-time arrival
+      # asserts QUERY this port from the host. Revoking either entry would not
+      # merely un-instrument vector — it would silently stop host vitals, sensors
+      # and NVMe SMART for the machine every VM and LXC runs on, and would fail
+      # `task deploy:metricsagents` at the arrival assert.
+      - 192.168.25.5/32   # eq12 — vector agent (#160) + native telegraf agent remote write and deploy-time arrival asserts (roles/telegraf_agent, #186)
+      - 192.168.30.5/32   # n5pro — vector agent (#160) + native telegraf agent remote write and deploy-time arrival asserts (roles/telegraf_agent, #186)
       - 192.168.30.15/32  # n5pro_docker (CT 201) — native vector agent (#160)
     # VictoriaLogs HTTP API — governed since #134, which turned it from a port only
     # this host's own container wrote to into a FLEET INGEST ENDPOINT. The LAN is one

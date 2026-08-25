@@ -53,6 +53,19 @@ tasks:
     cmds:
       - ansible-playbook playbooks/log-agents.yml --check --diff {{.CLI_ARGS}}
 
+  # === Fleet metrics agents (native telegraf on eq12 / n5pro, #186) ===
+  deploy:metricsagents:
+    desc: 'Deploy the native telegraf metrics agents (usage: task deploy:metricsagents -- --limit n5pro)'
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/metrics-agents.yml {{.CLI_ARGS}}
+
+  deploy:metricsagents:check:
+    desc: Dry-run the native telegraf metrics agents (--check --diff, no changes)
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/metrics-agents.yml --check --diff {{.CLI_ARGS}}
+
   # === Full Deployment ===
   deploy:full:
     desc: Run the full deployment pipeline (hosts -> guests -> services)

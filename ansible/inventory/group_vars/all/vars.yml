@@ -47,3 +47,7 @@ victorialogs_ingest_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}
 # host_vars/eq12_docker/vars.yml lists each approved source.
 victoriametrics_ingest_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:8428/api/v1/write"
 victorialogs_query_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:9428/select/logsql/query"
+# Query side of the same VictoriaMetrics, for deploy-time arrival asserts
+# (roles/telegraf_agent, #186). Same eq12_docker address reasoning as the
+# ingest endpoint above.
+victoriametrics_query_endpoint: "http://{{ hostvars['eq12_docker'].ansible_host }}:8428/api/v1/query"

@@ -59,7 +59,7 @@ task deploy:services  # 3. Deploy compose stacks
 
 - **Cross-host:** Direct LAN (both machines on the same 192.168.x.x network)
 - **Docker networks:** 172.x.x.x ranges (avoid LAN conflicts). EQ12: 172.20–25.x pins (pool 172.20.0.0/14). N5 Pro: 172.26–29.x + .31 pins (pool 172.18.0.0/15 — fleet map in `host_vars/n5pro_docker`).
-- **Centralized monitoring:** Telegraf on each machine → VictoriaMetrics on EQ12
+- **Centralized monitoring:** Telegraf → VictoriaMetrics on EQ12 — a container on `eq12_docker` (observability stack) plus native agents on the two hypervisors `eq12` and `n5pro` (#186). `n5pro_docker` has no telegraf yet.
 - **NFS:** N5 Pro Docker LXC → TrueNAS VM for the Lyrion music library today; Frigate recordings and other media once those stacks land (#91)
 
 ## Hardware Passthrough
@@ -120,10 +120,29 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 | Role                                             | Hosts                          | Description                                          |
 | ------------------------------------------------ | ------------------------------ | ---------------------------------------------------- |
 | [vector_agent](ansible/roles/vector_agent/)      | eq12, n5pro, n5pro_docker      | Native systemd Vector log shipper → VictoriaLogs on eq12_docker (#134). No listening port. |
+| [telegraf_agent](ansible/roles/telegraf_agent/)  | eq12, n5pro                    | Native systemd telegraf metrics agent → VictoriaMetrics on eq12_docker (#186). Host vitals, ZFS, sensors, NVMe SMART. No listening port. |
 | [rsyslog_structured](ansible/roles/rsyslog_structured/) | all four                | The RFC5424 `/var/log/structured.log` side-stream every Vector reads |
 
-`task deploy:logagents` deploys the agents; `site.yml` runs them last, after the
-compose stacks, because their final assertion queries VictoriaLogs.
+`task deploy:logagents` and `task deploy:metricsagents` deploy the agents;
+`site.yml` runs both after the compose stacks, because their final assertions
+query VictoriaLogs and VictoriaMetrics respectively.
+
+The two physical hosts had **no** machine-level metrics at all before #186 — only
+Vector's own internal telemetry. Thermal, SMART and utilisation telemetry now
+flows from both, plus iGPU power on N5 Pro; CPU-package RAPL power is deferred to
+#194. Neither agent opens a listening port; both write outward to eq12_docker. `telegraf_agent` runs the shipped `User=telegraf` with
+`AmbientCapabilities=CAP_DAC_OVERRIDE CAP_SYS_ADMIN` (needed by the SMART input,
+measured) plus `NoNewPrivileges=yes` and systemd hardening — not root, and not
+sudo, which is not installed on either hypervisor.
+
+**Fan RPM — two mini-PCs, two ITE Super-I/O chips, opposite outcomes.** EQ12's
+IT8613E is close enough to a supported sibling that the **stock in-kernel**
+`it87` binds it with `force_id=0x8622` and reports **real RPM** — measured
+2026-08-25, currently unpersisted, export pending an operator decision. N5 Pro's
+IT5571 is unsupported **and** its EC publishes nothing to read (the fan/temp
+registers are zeros), so that one is definitive and vendor-gated. Neither host
+collects fan RPM today. Full measurements, caveats and re-check conditions in
+[docs/eq12.md](docs/eq12.md) and [docs/n5pro.md](docs/n5pro.md).
 
 ## Documentation
 
