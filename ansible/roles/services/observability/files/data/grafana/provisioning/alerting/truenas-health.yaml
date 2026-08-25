@@ -117,8 +117,8 @@ groups:
               # names WHICH disk. NOTE: the notification policy's group_by still
               # says `disk`, a pre-#174 label the expr no longer produces — two
               # drives firing together therefore collapse into one [FIRING:2]
-              # notification; tracked as a follow-up issue. Do NOT "fix" the expr
-              # to by (disk) to match the policy — that would empty every
+              # notification; tracked in #192. Do NOT "fix" the expr to by
+              # (disk) to match the policy — that would empty every
               # {{ $labels.devname }} in the summaries.
               expr: >-
                 max by (devname) (last_over_time(truenas_disk_temperature_celsius{host="truenas",
@@ -249,6 +249,8 @@ groups:
       # nftables allowlist still grants 192.168.30.20/32 — that grant is a source
       # /32, so if the NAS ever moves address its metrics are dropped silently with
       # no application-level error.
+      #
+      # Routing question (critical/nas-thermal vs the dashboards-only meaning): #193.
       - uid: truenas-metrics-absent
         title: TrueNAS metrics stopped arriving
         condition: C
