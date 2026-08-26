@@ -606,12 +606,23 @@
     _telegraf_health_rules: >-
       {{ (lookup('file', _obs_alerting_dir_grading ~ '/telegraf-health.yaml')
           | from_yaml).groups | map(attribute='rules') | flatten | list }}
-    # DERIVED, not a hand-kept list: the owners are exactly the warning-severity
-    # rules in this file, so the guard cannot drift from the rules themselves.
+    # DERIVED, not a hand-kept list, so the guard cannot drift from the rules
+    # themselves — but derived on TWO properties, and the second one is not
+    # decoration. Severity alone was the first version and it had a hole big
+    # enough to drive the whole guard through: a genuine CONSUMER added to this
+    # file as `severity: warning` — say an `obs-sensors-temp-high` thermal rule —
+    # would be classified as an OWNER, sail through half A (its expr does contain
+    # `sensors_temp`), and be REJECTED from half B's loop, which is the only
+    # check that exists to catch it. The family would gain a real alert consumer
+    # and this guard would report green. Requiring `-absent` in the uid as well
+    # means a non-absence warning rule falls into half B where it belongs. Half
+    # A's fail_msg has always said in prose that such a rule "does not belong in
+    # telegraf-health.yaml"; this is what makes that more than a wish.
     _family_owner_rules: >-
       {{ _telegraf_health_rules
          | selectattr('labels.severity', 'defined')
-         | selectattr('labels.severity', 'equalto', 'warning') | list }}
+         | selectattr('labels.severity', 'equalto', 'warning')
+         | selectattr('uid', 'search', '-absent') | list }}
     _family_owner_uids: >-
       {{ _family_owner_rules | map(attribute='uid') | sort | list }}
     # obs-docker-metrics-unlabelled reads `docker_.+` and is severity CRITICAL,
@@ -629,6 +640,35 @@
           {{ _obs_all_rules | default([])
              + ((lookup('file', item) | from_yaml).groups | default([])
                 | map(attribute='rules') | flatten | list) }}
+      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    # PER FILE, not just in aggregate. `.groups | default([])` above turns a file
+    # that lost its `groups` key — a restructure, a stray indent — into a silent
+    # zero-rule contribution, and the aggregate witness below cannot see it: 33
+    # is still comfortably greater than telegraf-health.yaml's 13 with an entire
+    # file missing. Every file in this directory is a rule document today, so
+    # "yields at least one rule" is the right claim; a future non-rule file here
+    # means teaching this assert about it, deliberately.
+    - name: Assert every alerting file actually contributed rules
+      vars:
+        _file_rules: >-
+          {{ ((lookup('file', item) | from_yaml).groups | default([]))
+             | map(attribute='rules') | flatten | list }}
+      ansible.builtin.assert:
+        that:
+          - _file_rules | length > 0
+        fail_msg: >-
+          {{ item | basename }} contributed ZERO rules to the grading check. Every
+          file in files/data/grafana/provisioning/alerting/ is a rule document, so
+          this means the file lost its top-level `groups:` key (a restructure or a
+          stray indent) and `| default([])` silently swallowed it. The aggregate
+          size check below cannot see this — the other files still add up to more
+          than one file's worth — so the consumer sweep would simply stop covering
+          that file's rules while every deploy stayed green. Fix the file, or, if
+          a genuine non-rule file now lives here, teach this assert about it.
+        quiet: true
       loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
       loop_control:
         label: "{{ item | basename }}"
@@ -697,11 +737,18 @@
           ALERTS on this family, so its disappearance blinds a rule while
           producing nothing louder than an email. This is #174's trap — a rule and
           its liveness owner drifting out of pairing, with the liveness side
-          staying green. Re-grade the absence owner in the same change that adds
-          the consumer (severity: critical routes to both channels), or, if this
-          rule genuinely does not depend on the family ARRIVING, allowlist it in
-          _family_consumer_allowlist with the reason written beside it — as
-          obs-docker-metrics-unlabelled is.
+          staying green.
+          THE RE-GRADE IS TWO EDITS, NOT ONE, and doing only the first leaves this
+          same guard failing on the owner itself: promoting the owner to
+          `severity: critical` takes it OUT of the derived owner set above, so it
+          drops into THIS loop and matches its own family fragment. So: promote
+          the owner's severity AND remove that family's fragment from
+          _dashboards_only_families in the same change — the fragment list is the
+          "dashboards-only" declaration, and a family that has gained an alert
+          consumer is by definition no longer dashboards-only.
+          Alternatively, if this rule genuinely does not depend on the family
+          ARRIVING, allowlist it in _family_consumer_allowlist with the reason
+          written beside it — as obs-docker-metrics-unlabelled is.
         quiet: true
       loop: >-
         {{ _obs_all_rules | default([])

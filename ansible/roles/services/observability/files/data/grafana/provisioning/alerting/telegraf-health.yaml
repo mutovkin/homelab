@@ -1249,6 +1249,17 @@ groups:
       # and neither is a substitute for the other: the unlabelled rule sees a
       # label going wrong while the stream is healthy, this one sees the stream
       # stopping while the label is fine.
+      #
+      # WHAT THIS ANCHOR DOES NOT COVER, stated rather than implied by an
+      # over-broad summary. docker_n_containers is produced by telegraf's ENGINE
+      # call (gatherInfo). The bulk of the family — docker_container_cpu/mem/
+      # net/blkio, the `perdevice_include`/`total_include` series — comes from a
+      # DIFFERENT call pair (ContainerList + ContainerStats). A failure confined
+      # to those leaves this rule green. That narrower split is not covered here
+      # and would need its own condition on a docker_container_* series; it is
+      # not added now because no such failure has been observed on this fleet,
+      # and an unobserved failure mode is a poor reason to double a rule. If one
+      # is ever seen, this comment is where to start.
       - uid: obs-docker-metrics-absent
         title: Docker metrics stopped arriving for eq12_docker
         condition: C
@@ -1265,10 +1276,11 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: No docker_* metrics from host=eq12_docker for over 10 minutes.
+          summary: The docker input on host=eq12_docker has stopped reporting to the engine for over 10 minutes.
           description: |-
             The docker input can die while the agent stays healthy, so this is separate from obs-telegraf-metrics-absent. On eq12_docker: `docker logs telegraf | grep -i docker` for socket or permission errors.
             Most likely causes: the /var/run/docker.sock bind mount, or DOCKER_GID in the templated .env no longer matching the host's docker group after an image or OS bump.
+            SCOPE: this watches docker_n_containers, which telegraf produces from the ENGINE call (gatherInfo). The per-container series (docker_container_cpu/mem/net/blkio) come from a different call pair (ContainerList/ContainerStats) and can in principle fail while this one keeps flowing — that narrower case is NOT covered here.
         labels:
           severity: warning
           component: metrics-pipeline

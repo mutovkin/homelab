@@ -251,24 +251,48 @@
     # the observability-side reconciler only runs when that stack deploys.
     _telegraf_rapl_rule_hosts: >-
       {{ _telegraf_rules_file | regex_findall('rapl_power_watts\{host="([^"]+)"') }}
+    # #202 added three more independent production paths, and this tripwire was
+    # not extended with them for a review round. Same argument as RAPL, one
+    # family each: smartctl is an external privileged binary, lm-sensors is an
+    # external library, and the fan state is a shell script — any of the three
+    # can die while the agent stream flows perfectly. A host is not "covered"
+    # because its system_uptime rule exists.
+    _telegraf_smart_rule_hosts: >-
+      {{ _telegraf_rules_file | regex_findall('smart_device_health_ok\{host="([^"]+)"') }}
+    _telegraf_sensors_rule_hosts: >-
+      {{ _telegraf_rules_file | regex_findall('sensors_temp\[0-9\]\+_input", host="([^"]+)"') }}
+    _telegraf_fan_rule_hosts: >-
+      {{ _telegraf_rules_file | regex_findall('acpi_fan_state_state\{host="([^"]+)"') }}
   ansible.builtin.assert:
     that:
       - inventory_hostname in _telegraf_agent_rule_hosts
       - not (telegraf_agent_rapl_power | bool)
         or inventory_hostname in _telegraf_rapl_rule_hosts
+      # sensors and SMART run on every host in this group, unconditionally.
+      - inventory_hostname in _telegraf_smart_rule_hosts
+      - inventory_hostname in _telegraf_sensors_rule_hosts
+      - not (telegraf_agent_acpi_fan_state | bool)
+        or inventory_hostname in _telegraf_fan_rule_hosts
     fail_msg: >-
       {{ inventory_hostname }} runs a telegraf agent but is MISSING a pinned
       absence rule in roles/services/observability/files/data/grafana/
       provisioning/alerting/telegraf-health.yaml. Agent-stream selectors found:
       {{ _telegraf_agent_rule_hosts }}; RAPL-stream selectors found:
       {{ _telegraf_rapl_rule_hosts }} (this host collects RAPL:
-      {{ telegraf_agent_rapl_power | bool }}). Whichever is absent, that stream
-      could stop and nothing would page — and they are INDEPENDENT: the exec
-      input can die while the agent stays healthy, so the agent rule does not
-      cover power. Add the rule (mirror obs-telegraf-metrics-absent-eq12 or
-      obs-rapl-power-absent-eq12, pinned selector, matching uid/title) AND deploy
-      the observability stack in the same change — the observability role's own
-      guard enforces the exact set and the RAPL threshold.
+      {{ telegraf_agent_rapl_power | bool }}); SMART: {{ _telegraf_smart_rule_hosts }};
+      sensors: {{ _telegraf_sensors_rule_hosts }}; fan:
+      {{ _telegraf_fan_rule_hosts }} (this host collects fan state:
+      {{ telegraf_agent_acpi_fan_state | bool }}).
+      Whichever is absent, that stream could stop and nothing would notice — and
+      they are INDEPENDENT of each other and of the agent: an exec script, an
+      external privileged binary (smartctl) and an external library (lm-sensors)
+      can each die while telegraf stays healthy and every other family flows. The
+      agent rule covers NONE of them. Add the rule (mirror the matching
+      obs-*-absent-eq12 rule — pinned selector, matching uid/title) AND deploy
+      the observability stack in the same change; that role's own guards enforce
+      the exact host sets, the thresholds and the `lt` polarity.
+      NOTE the sensors selector is matched through its __name__ regex, so if that
+      rule's expr shape changes this anchor must change with it.
     quiet: true
 
 # --- Check-mode reality gate -------------------------------------------------
@@ -821,6 +845,34 @@
   ansible.builtin.command: date +%s
   register: telegraf_agent_restart_epoch
   changed_when: false
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_needs_restart | bool
+
+# THE FRESHNESS COMPARISONS' OWN INPUT, validated before anything trusts it.
+# Every gate below compares stored timestamps against this value with `| float`
+# or `| int` — and those filters turn an empty or non-numeric stdout into 0,
+# which EVERY timestamp exceeds. The guards would then pass unconditionally,
+# silently, with no error anywhere: a guard that stopped guarding because its own
+# input was garbage. This repo has already shipped that exact shape once, in
+# #194's awk plausibility ceiling (`-v ceiling=abc` made `watts > ceiling` a
+# string comparison and every implausible reading passed). Fail closed instead.
+# The bound is a sanity floor, not a clock check: 1600000000 is 2020-09, so any
+# plausible host clock clears it while an empty string, a shell error message or
+# a truncated value does not.
+- name: Assert the restart epoch is a usable timestamp
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_restart_epoch.stdout | default('') | trim | int > 1600000000
+    fail_msg: >-
+      The host clock read back as
+      '{{ telegraf_agent_restart_epoch.stdout | default('') }}', which is not a
+      plausible unix timestamp. Every freshness gate in this role compares sample
+      timestamps against it through `| int`/`| float`, and those filters turn a
+      non-numeric value into 0 — which every timestamp exceeds, so all of those
+      gates would pass unconditionally and silently. Fix `date +%s` on
+      {{ inventory_hostname }} rather than relaxing this bound.
+    quiet: true
   when:
     - not ansible_check_mode
     - telegraf_agent_needs_restart | bool
@@ -1492,45 +1544,88 @@
 # the rehearsal and dies under the unit, and closing it is why an arrival proof
 # runs after the restart at all.
 #
-# THE TWO CLAIMS ARE COMPLEMENTARY AND BOTH ARE NEEDED. Do not delete either as
-# redundant:
-#   * the COUNT asserts above answer "does the right NUMBER of series exist?" —
-#     and they are the only thing that can see a series which died long enough
-#     ago to have dropped out of VictoriaMetrics' 5m instant lookback entirely,
-#     because a series that is not returned cannot drag down a min();
-#   * this answers "was every series that IS there written by THIS process?" —
-#     which no count can see, because residual samples count perfectly.
+# ONE QUERY, COUNTING FRESH SERIES — and the obvious `min(timestamp(...))` form
+# is WRONG in a way that took a review round to see. This block first shipped as
+#     min(timestamp(<selector>)) > restart_epoch
+# with a comment claiming that it and the COUNT asserts above were complementary
+# and jointly complete. Each claim is true alone; together they are not, because
+# THEY ARE EVALUATED AT DIFFERENT TIMES and a PARTIAL loss caused by this run's
+# own restart falls straight between them:
 #
-# THE QUERY IS THE MEASURED FORM AND THE OBVIOUS ONE IS WRONG (measured in #194,
-# recorded at the system_uptime gate above): wrapping the selector in
-# last_over_time makes VictoriaMetrics evaluate it as a subquery on a 5-MINUTE
-# GRID and return the grid point rather than the sample time, which reports a
-# timestamp up to 5 minutes stale and fails on a perfectly healthy restart. The
-# selector must be BARE inside timestamp().
+#   1. the count assert issues a BARE INSTANT count() at roughly restart+30..150s.
+#      A series that died at the restart still has a sample inside
+#      VictoriaMetrics' 5m instant lookback, so it is still counted and the assert
+#      passes on the first attempt;
+#   2. min(timestamp(...)) is a min over the series STILL RETURNED. The dead
+#      series ages out of that same 5m lookback at last_sample+300s — and the
+#      moment it does, min() is taken over the survivors alone, goes fresh, and
+#      the `until` is satisfied.
 #
-# min(), not max(): max() passes as soon as ONE series in the family has turned
-# over, which for a 9-series family is a proof about one ninth of it. min() is
-# the least-fresh series, so the claim is about every series present.
+# So the verdict on a partial production loss depended on whether the retry budget
+# outlasted the age-out, which it usually does. A min() over a SHRINKING SET is
+# self-healing: the longer the guard waits, the more certainly it passes. That is
+# a guard that stops guarding — the exact failure class this change exists to
+# remove, sitting inside the fix for it.
+#
+# The form below has no such property. `timestamp(sel) > epoch` FILTERS the
+# instant vector to series with a sample newer than the restart, and count()
+# reports how many survived. One instant query, no dependence on task ordering or
+# on how long the retries ran, and it subsumes both original claims:
+#
+#   total absence     -> empty result              -> fails the length check
+#   residual samples  -> every series filtered out -> empty result -> fails
+#   PARTIAL loss      -> count below expected      -> fails the equality
+#
+# Verified against live VictoriaMetrics 2026-08-25 INCLUDING THE FALSIFIER: with
+# an epoch an hour in the PAST it returns 7 for eq12's sensors; with an epoch an
+# hour in the FUTURE it returns an EMPTY result rather than a misleading 0. That
+# empty case is why the assert checks `length > 0` before comparing.
+#
+# THE SELECTOR MUST STAY BARE inside timestamp() (measured in #194, recorded at
+# the system_uptime gate above): wrapping it in last_over_time makes
+# VictoriaMetrics evaluate a subquery on a 5-MINUTE GRID and return the grid
+# point rather than the sample time — up to 5 minutes stale, failing on a
+# perfectly healthy restart.
+#
+# WHAT THE COUNT ASSERTS ABOVE ARE STILL FOR, since this subsumes them on a
+# restart run: they are UNGATED, so they run on every converged pass, while
+# everything here is gated on a restart having happened. A family that thins out
+# BETWEEN deploys is caught by them and by the absence rules in
+# telegraf-health.yaml; a family this run's own restart broke is caught here.
 #
 # ONE LOOP, NOT FOUR HAND-WRITTEN PAIRS. #207 asks for a uniform anchor
-# explicitly, and the reason is maintenance: four copies drift, and a family
-# added later gets an arrival proof and silently no freshness proof, which is the
-# state this task exists to end.
+# explicitly, and the reason is maintenance: four copies drift.
 - name: Build the per-family freshness anchor list
   ansible.builtin.set_fact:
     telegraf_agent_freshness_families: >-
       {{ [
            {'name': 'sensors',
-            'selector': '{__name__=~"sensors_temp[0-9]+_input", host="' ~ inventory_hostname ~ '"}'},
+            'selector': '{__name__=~"sensors_temp[0-9]+_input", host="' ~ inventory_hostname ~ '"}',
+            'expected': telegraf_agent_expected_sensor_series | int,
+            'exact': true},
            {'name': 'smart',
-            'selector': 'smart_device_health_ok{host="' ~ inventory_hostname ~ '"}'}
+            'selector': 'smart_device_health_ok{host="' ~ inventory_hostname ~ '"}',
+            'expected': 1,
+            'exact': false}
          ]
          + ([{'name': 'acpi_fan_state',
-              'selector': 'acpi_fan_state_state{host="' ~ inventory_hostname ~ '"}'}]
+              'selector': 'acpi_fan_state_state{host="' ~ inventory_hostname ~ '"}',
+              'expected': telegraf_agent_acpi_fan_expected_count | int,
+              'exact': true}]
             if telegraf_agent_acpi_fan_state | bool else [])
          + ([{'name': 'rapl',
-              'selector': 'rapl_power_watts{host="' ~ inventory_hostname ~ '"}'}]
+              'selector': 'rapl_power_watts{host="' ~ inventory_hostname ~ '"}',
+              'expected': telegraf_agent_rapl_expected_domains | length,
+              'exact': true}]
             if telegraf_agent_rapl_power | bool else []) }}
+
+# `exact: false` on SMART alone, and it is the documented single-device limit
+# rather than an oversight: both hosts have exactly one SMART device and there is
+# no host_vars declaration of disks to pin a count against, so the claim here is
+# "at least one device produced a real read since the restart". With a second
+# device installed this must become an exact count, via the
+# telegraf_agent_smart_expected_devices declaration described in README.md —
+# added in the same change that installs the disk.
 
 # GUARD THE GUARD. A conditional list built by concatenation can silently come
 # out short — a mistyped flag, an `if` that never fires — and a loop over a short
@@ -1540,10 +1635,19 @@
 #
 # The count is recomputed here as ARITHMETIC rather than by re-deriving the list,
 # so the two expressions can actually disagree; re-running the same concatenation
-# would be circular and prove nothing. The second check is independent of the
-# first: every selector must be scoped to THIS host, which catches a copy-paste
-# that left another machine's name in a selector — a mistake that would make the
-# proof pass against a healthy peer while this host shipped nothing.
+# would be circular and prove nothing. The other two checks are independent of
+# it: every selector must be scoped to THIS host (catching a copy-paste that left
+# another machine's name in, which would prove the family fresh on a healthy
+# PEER), and every expected count must be POSITIVE (a 0 would make the comparison
+# below satisfiable by a family that delivered nothing).
+#
+# WHAT THIS DOES NOT CATCH, stated because an earlier version of this comment
+# claimed otherwise: the `2 +` is a LITERAL, not a count of the arrival proofs
+# above, so adding a FIFTH family with an arrival proof and no entry here leaves
+# the list, this arithmetic and the loop all mutually consistent and green. This
+# guard catches a builder typo, a wrongly-scoped selector and an undeclared
+# count — NOT a family someone forgot entirely. Adding a family means editing the
+# list AND this number; nothing will remind you.
 #
 # Deliberately NOT gated on ansible_check_mode or on a restart: it is pure
 # computation, so it runs on every pass including --check, and a broken list is
@@ -1557,18 +1661,24 @@
       - telegraf_agent_freshness_families
         | selectattr('selector', 'search', 'host="' ~ inventory_hostname ~ '"')
         | list | length == telegraf_agent_freshness_families | length
+      - telegraf_agent_freshness_families
+        | selectattr('expected', 'gt', 0)
+        | list | length == telegraf_agent_freshness_families | length
     fail_msg: >-
       The freshness anchor list for {{ inventory_hostname }} is
       {{ telegraf_agent_freshness_families | map(attribute='name') | list }}
-      ({{ telegraf_agent_freshness_families | length }} entries), which does not
-      match the families this role proves on this host: sensors and smart always,
-      plus acpi_fan_state when telegraf_agent_acpi_fan_state
+      ({{ telegraf_agent_freshness_families | length }} entries, expected counts
+      {{ telegraf_agent_freshness_families | map(attribute='expected') | list }}),
+      which does not match the families this role proves on this host: sensors and
+      smart always, plus acpi_fan_state when telegraf_agent_acpi_fan_state
       ({{ telegraf_agent_acpi_fan_state }}) and rapl when
       telegraf_agent_rapl_power ({{ telegraf_agent_rapl_power }}) — or one of the
-      selectors is not scoped to host="{{ inventory_hostname }}". A short list
-      makes the freshness loop below report ok for families it never checked, and
-      a wrongly-scoped selector makes it pass against a different machine. Fix the
-      list construction in this task; do not weaken this assert.
+      selectors is not scoped to host="{{ inventory_hostname }}", or one expected
+      count is not positive. A short list makes the freshness loop below report ok
+      for families it never checked; a wrongly-scoped selector makes it pass
+      against a different machine; a zero expected count makes its comparison
+      satisfiable by a family that delivered nothing. Fix the list construction in
+      this task; do not weaken this assert.
     quiet: true
 
 # Restart-gated, exactly like the system_uptime pair above and for the same
@@ -1578,18 +1688,21 @@
 # RETRIES 18x10s = 180s, not the 12x10s the presence proofs use. The measured
 # worst case from restart to visibility is ~105s (VictoriaMetrics'
 # -search.latencyOffset defaults to 30s, plus up to 65s to the next
-# round_interval collection, plus a 10s flush), and this assert is stricter than
-# a presence check: it needs EVERY series in the family to have turned over, not
-# just the first one to arrive.
-- name: Wait for each metric family to ship a sample that postdates the restart
+# round_interval collection, plus a 10s flush), and this is stricter than a
+# presence check: it needs EVERY series in the family to have turned over, not
+# just the first to arrive. Unlike the min() form this replaced, a longer retry
+# budget cannot turn a real failure into a pass — the query counts fresh series,
+# and a series that is not being produced never becomes fresh.
+- name: Wait for each family to ship a full set of samples that postdate the restart
   ansible.builtin.uri:
     url: "{{ victoriametrics_query_endpoint }}"
     method: POST
     body_format: form-urlencoded
     body:
-      # BARE selector inside timestamp() — see the measured note above. Wrapping
-      # it in last_over_time returns a 5-minute grid point, not the sample time.
-      query: 'min(timestamp({{ item.selector }}))'
+      # BARE selector inside timestamp(). The comparison FILTERS the instant
+      # vector to series newer than the restart; count() reports how many
+      # survived that filter.
+      query: 'count(timestamp({{ item.selector }}) > {{ telegraf_agent_restart_epoch.stdout | int }})'
     url_username: "{{ vault_vm_auth_username }}"
     url_password: "{{ vault_vm_auth_password }}"
     force_basic_auth: true
@@ -1598,8 +1711,10 @@
   until: >-
     telegraf_agent_family_freshness.status | default(0) == 200
     and (telegraf_agent_family_freshness.json.data.result | default([]) | length) > 0
-    and (telegraf_agent_family_freshness.json.data.result[0].value[1] | float)
-    > (telegraf_agent_restart_epoch.stdout | float)
+    and ((telegraf_agent_family_freshness.json.data.result[0].value[1] | int)
+         == (item.expected | int) if item.exact
+         else (telegraf_agent_family_freshness.json.data.result[0].value[1] | int)
+              >= (item.expected | int))
   retries: 18
   delay: 10
   changed_when: false
@@ -1617,33 +1732,39 @@
     - not ansible_check_mode
     - telegraf_agent_needs_restart | bool
 
-- name: Assert every family was produced by the RESTARTED telegraf
+- name: Assert every family was produced in full by the RESTARTED telegraf
   ansible.builtin.assert:
     that:
       - item.status | default(0) == 200
       - item.json.data.result | default([]) | length > 0
-      - (item.json.data.result[0].value[1] | float)
-        > (telegraf_agent_restart_epoch.stdout | float)
+      - ((item.json.data.result[0].value[1] | int) == (item.item.expected | int)
+         if item.item.exact
+         else (item.json.data.result[0].value[1] | int) >= (item.item.expected | int))
     fail_msg: >-
-      The OLDEST sample in the `{{ item.item.name }}` family for
-      host="{{ inventory_hostname }}" is
-      {{ item.json.data.result[0].value[1] | default('absent') }}, which does not
-      postdate this run's restart at
-      {{ telegraf_agent_restart_epoch.stdout | default('unknown') }} (host clock).
-      The presence and count proofs above passed, so the series ARE in
-      VictoriaMetrics — they were just written by the telegraf process this run
-      REPLACED, whose final flush is at most ~90s old and therefore sits inside
-      those proofs' windows. The restarted agent has not produced this family.
+      The `{{ item.item.name }}` family for host="{{ inventory_hostname }}" has
+      {{ item.json.data.result[0].value[1] | default('no') }} series carrying a
+      sample that postdates this run's restart at
+      {{ telegraf_agent_restart_epoch.stdout | default('unknown') }} (host clock),
+      against {{ 'exactly' if item.item.exact else 'at least' }}
+      {{ item.item.expected }} expected.
+      An EMPTY result means NOTHING in this family has been produced since the
+      restart — the presence and count proofs above may well have passed, on
+      samples written by the telegraf process this run REPLACED (its final flush
+      is at most ~90s old and sits inside their windows).
+      A LOW-BUT-NONZERO result is a PARTIAL production loss: some series survived
+      the restart and some did not. That is the case a plain count cannot see at
+      all, because the dead series' residual samples keep counting until they age
+      out of VictoriaMetrics' 5m lookback.
       Because system_uptime's own freshness gate above passed, the OUTPUT path is
-      fine and this is a PRODUCTION failure specific to
-      `{{ item.item.name }}` — and the likeliest cause is the one
-      `telegraf --test` structurally cannot catch, since it does not run under the
-      unit: CONFINEMENT. Check
+      fine and this is a PRODUCTION failure specific to `{{ item.item.name }}` —
+      and the likeliest cause is the one `telegraf --test` structurally cannot
+      catch, since it does not run under the unit: CONFINEMENT. Check
       `systemctl show telegraf -p AmbientCapabilities -p NoNewPrivileges -p ProtectSystem -p PrivateTmp`
       against roles/telegraf_agent/templates/telegraf-systemd-dropin.conf.j2, then
       `journalctl -u telegraf -n 100` for that input's errors. Query used:
-      min(timestamp({{ item.item.selector }})). Retries here already cover the
-      measured ~105s worst-case visibility delay, so exhaustion is real.
+      count(timestamp({{ item.item.selector }}) > {{ telegraf_agent_restart_epoch.stdout | default('?') }}).
+      Retries here already cover the measured ~105s worst-case visibility delay,
+      so exhaustion is real.
       HTTP status was {{ item.status | default('none') }}.
     quiet: true
   loop: "{{ telegraf_agent_family_freshness.results | default([]) }}"

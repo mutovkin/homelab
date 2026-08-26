@@ -165,9 +165,10 @@ total. Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
 
 **Absence ownership, so the table is not read as covering more than it does.**
-Absence is deliberately owned exactly once per signal. Since #189 every family
-telegraf collects has an owner; the table records which rule, because "is this
-already covered?" is the question #178 got wrong once.
+Absence is deliberately owned exactly once per signal. Every family with its
+OWN production mechanism now has an owner; the table records which rule, because
+"is this already covered?" is the question #178 got wrong once — so it also has
+to record what is **not** individually owned, or it overstates its own coverage.
 
 | signal | absence owner |
 | ------ | ------------- |
@@ -180,6 +181,30 @@ already covered?" is the question #178 got wrong once.
 | `smart_device_*` | `obs-smart-metrics-absent-{eq12,n5pro}` (#202) — anchored on `smart_device_health_ok`, see below |
 | `sensors_temp*` | `obs-sensors-metrics-absent-{eq12,n5pro}` (#202) |
 | `acpi_fan_state_*` | `obs-fan-state-absent-eq12` (#202) |
+| `http_response` (probe stream) | `obs-http-probe-absent` |
+| `truenas_*` (graphite / poller) | `truenas-metrics-absent` / `truenas-poller-absent` |
+| **`cpu`, `disk`, `diskio`, `kernel`, `mem`, `processes`, `swap`, `net`, `netstat`, `zfs`** | **not individually owned — see below** |
+
+**Why those last ones have no rule of their own, and what that is worth.** Every
+family above them is produced by a mechanism that can fail *on its own*: an
+external binary (`smartctl`, `/usr/bin/ping`), a library (`lm-sensors`), a shell
+script (`acpi_fan_state.sh`, `rapl_power.sh`), or a socket (`/var/run/docker.sock`).
+That is what makes a separate liveness rule necessary — #174's "two delivery
+paths need two liveness rules".
+
+The gopsutil-based inputs have no such mechanism: they read `/proc` and `/sys`
+in-process, with no external dependency, on the same collection tick and through
+the same code path as `[[inputs.system]]` — which *is* owned, by
+`obs-telegraf-metrics-absent*`. So they are covered by coupling rather than by a
+rule of their own.
+
+**That is a coupling argument, not a proof, and it is written down as such.** The
+coupling is strong but not total: `/proc/stat` becoming unreadable would take out
+`cpu` while `system_uptime` (from `/proc/uptime`) kept flowing. Nothing here would
+see that. It is accepted because the shared failure modes dominate and because
+none of these families is read by an alert rule either — but if one of them ever
+acquires a consumer, or a real per-input failure is ever observed, it needs an
+owner and this row is where to notice that.
 
 `obs-docker-metrics-unlabelled` is **not** the absence owner for `docker_*` — it
 catches those series arriving *mislabelled*, and its `noDataState: OK` is correct
@@ -234,7 +259,7 @@ via the agent rule.
 
 ### Why every per-family absence rule is `severity: warning` (#189, #194, #202)
 
-The eight per-input absence owners are email-only, and the three agent-liveness
+The nine per-input absence owners are email-only, and the three agent-liveness
 rules are `critical`. That split is **derived**, not a default:
 
 - No rule in this folder reads `docker_*`, `ping_*`, `smart_device_*`,

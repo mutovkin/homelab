@@ -270,6 +270,13 @@ telegraf_agent_expected_test_output:
 telegraf_agent_sensors_tagdrop_features: [vddgfx, vddnb]
 # THE PROOF, a separate list on purpose (#186 review round): what must then be
 # absent from telegraf's own output, asserted every deploy. Literal substrings.
+telegraf_agent_forbidden_test_output:
+  - "feature=vddgfx"
+  - "feature=vddnb"
+  # The excluded RAPL domain must not reappear in telegraf's own output either
+  # (see below for why it is excluded).
+  - "rapl,domain=core"
+
 # Sensor temperature SERIES this host must deliver, asserted for equality against
 # VictoriaMetrics at the end of the deploy and reconciled against
 # obs-sensors-metrics-absent-n5pro's threshold by a static guard in the
@@ -296,12 +303,6 @@ telegraf_agent_sensors_tagdrop_features: [vddgfx, vddnb]
 # the same change — never to lower this number alone, which would silently stop
 # detecting a real loss of the chips that remain.
 telegraf_agent_expected_sensor_series: 9
-telegraf_agent_forbidden_test_output:
-  - "feature=vddgfx"
-  - "feature=vddnb"
-  # The excluded RAPL domain must not reappear in telegraf's own output either
-  # (see below for why it is excluded).
-  - "rapl,domain=core"
 
 # --- RAPL package power (#194) -----------------------------------------------
 # TWO powercap domains on this Zen 5 box — intel-rapl:0 = package-0,

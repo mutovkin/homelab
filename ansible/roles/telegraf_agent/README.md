@@ -342,6 +342,16 @@ went to NO DATA while the container stayed healthy. The expected list must be
 non-empty for every host in the group, and the role asserts that too: an empty
 list would silently turn the whole proof into `assert: true`.
 
+The two boards genuinely differ, which is why these live in host_vars rather than
+in a shared default. eq12 has `coretemp` with Package + Core 0..3;
+n5pro's `k10temp` gives **one** `Tctl` value and no per-core temps at all (and
+`Tctl` on AMD can carry an offset, so nothing should put a threshold on it
+without a second source), plus two `spd5118` DDR5 DIMM sensors and an `amdgpu`
+iGPU block that is the only host-side view of what CT 201's VAAPI workloads cost.
+Any dashboard written against eq12's five coretemp readings shows empty panels for
+n5pro unless it is written for both shapes.
+
+
 ### The per-host COUNTS (#202)
 
 Two more per-host facts sit beside the substring lists, and they are counts
@@ -453,12 +463,3 @@ arithmetic count (re-deriving the list would be circular) and every selector is
 checked against this host's own name. That guard runs unconditionally, including
 under `--check`, so a broken list is caught on a converged host rather than only
 on the run that happens to restart telegraf.
-
-The two boards genuinely differ, which is why these live in host_vars rather than
-in a shared default. eq12 has `coretemp` with Package + Core 0..3;
-n5pro's `k10temp` gives **one** `Tctl` value and no per-core temps at all (and
-`Tctl` on AMD can carry an offset, so nothing should put a threshold on it
-without a second source), plus two `spd5118` DDR5 DIMM sensors and an `amdgpu`
-iGPU block that is the only host-side view of what CT 201's VAAPI workloads cost.
-Any dashboard written against eq12's five coretemp readings shows empty panels for
-n5pro unless it is written for both shapes.
