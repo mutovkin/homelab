@@ -290,6 +290,144 @@
       loop_control:
         label: "{{ item.uid }}"
 
+# #202: the SMART / sensors / fan absence rules, reconciled against inventory the
+# same way the RAPL pair above is, and for the same measured reason — a threshold
+# in a rule file and a count in host_vars are TWO COPIES OF ONE FACT, and both
+# drift directions are silent:
+#   * host_vars SHRINKS (a chip stops being collected on purpose): the role's own
+#     deploy assert still passes — it compares DELIVERED against host_vars and
+#     never reads this file — while the rule's threshold now fires forever.
+#   * host_vars GROWS: the role's assert passes again, and the stale lower
+#     threshold can no longer see one series go missing. Partial loss stops being
+#     detectable, which is the entire reason these thresholds are COUNTS.
+#
+# The expected host sets key on the COUNT VARIABLE BEING DECLARED in host_vars
+# rather than on a feature flag, exactly as the RAPL guard does and for the same
+# reason: a role DEFAULT is not visible in hostvars for another host, only what
+# host_vars actually sets. That is sound rather than a workaround — the
+# telegraf_agent role refuses to run with the count left at its 0 default, so a
+# host reaching this guard undeclared is one where the feature is off (nothing to
+# own) or one whose own play has already failed.
+#
+# inventory_hostname is deliberately NOT in any expected set here: this stack's
+# host runs the CONTAINER agent, which has no lm-sensors, no SMART devices of its
+# own and no ACPI fan objects.
+#
+# Static (control-machine lookup + inventory only), so it runs under --check and
+# fails before anything touches state.
+- name: Verify the per-family absence rules match each host's declared counts
+  vars:
+    _fam_all_rules: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+          | from_yaml).groups | map(attribute='rules') | flatten | list }}
+    # uid prefix -> the host_vars fact that is the single source of truth for
+    # that rule's threshold. Adding a counted family means adding a row here in
+    # the same change, or its threshold goes unreconciled.
+    _fam_count_specs:
+      - prefix: obs-sensors-metrics-absent-
+        var: telegraf_agent_expected_sensor_series
+      - prefix: obs-fan-state-absent-
+        var: telegraf_agent_acpi_fan_expected_count
+    _fam_counted_rules: >-
+      {{ _fam_all_rules
+         | selectattr('uid', 'match', '^(obs-sensors-metrics-absent-|obs-fan-state-absent-)')
+         | list }}
+    _smart_rule_hosts: >-
+      {{ _fam_all_rules | map(attribute='uid')
+         | select('match', '^obs-smart-metrics-absent-')
+         | map('regex_replace', '^obs-smart-metrics-absent-', '') | sort | list }}
+  block:
+    - name: Assert every host declaring a per-family count has an absence rule of its own
+      vars:
+        _fam_rule_hosts: >-
+          {{ _fam_all_rules | map(attribute='uid')
+             | select('match', '^' ~ item.prefix)
+             | map('regex_replace', '^' ~ item.prefix, '') | sort | list }}
+        _fam_expected_hosts: >-
+          {{ groups['telegraf_agents'] | map('extract', hostvars)
+             | selectattr(item.var, 'defined')
+             | map(attribute='inventory_hostname') | sort | list }}
+      ansible.builtin.assert:
+        that:
+          - _fam_rule_hosts == _fam_expected_hosts
+        fail_msg: >-
+          The `{{ item.prefix }}*` absence rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
+          to {{ _fam_rule_hosts }}, but the hosts declaring `{{ item.var }}` are
+          {{ _fam_expected_hosts }}. A MISSING rule means that host's input can
+          die while telegraf itself stays healthy and NOTHING notices — a separate
+          producer from the agent stream, and two producers need two liveness
+          owners (#174). An EXTRA rule means one pinned to a host that no longer
+          collects the family, which will sit in NoData and fire forever. Adding
+          the declaration and adding the rule are one change. Do not delete the
+          guard to get past it.
+        quiet: true
+      loop: "{{ _fam_count_specs }}"
+      loop_control:
+        label: "{{ item.prefix }}"
+
+    # SMART has no declared count — both hosts have exactly one device and there
+    # is no host_vars list of disks to reconcile against, so its rules are
+    # presence (`lt 1`) rather than a count. Coverage still has to be total,
+    # so it keys on group membership: every native agent runs [[inputs.smart]].
+    - name: Assert every native telegraf agent has a SMART absence rule
+      ansible.builtin.assert:
+        that:
+          - _smart_rule_hosts == groups['telegraf_agents'] | sort | list
+        fail_msg: >-
+          The SMART absence rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
+          to {{ _smart_rule_hosts }}, but inventory group `telegraf_agents` is
+          {{ groups['telegraf_agents'] | sort | list }} and every member runs
+          [[inputs.smart]] against its root NVMe. SMART is the family that depends
+          on elevated privilege, and it fails QUIETLY — measured 2026-08-25, an
+          unprivileged telegraf still emits smart_device_exit_status=2 and drops
+          the other thirteen fields — so an uncovered host loses its disk wear,
+          media-error and temperature data behind a perfectly green agent rule.
+          Adding a host to `telegraf_agents` means adding its rule here in the
+          same change.
+        quiet: true
+
+    - name: Assert each counted family rule's threshold equals that host's declared count
+      vars:
+        _fam_host: >-
+          {{ item.uid | regex_replace('^(obs-sensors-metrics-absent-|obs-fan-state-absent-)', '') }}
+        _fam_var: >-
+          {{ 'telegraf_agent_expected_sensor_series'
+             if item.uid.startswith('obs-sensors-metrics-absent-')
+             else 'telegraf_agent_acpi_fan_expected_count' }}
+        _fam_threshold: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.params[0] }}
+        _fam_evaluator: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.type }}
+      ansible.builtin.assert:
+        that:
+          - _fam_threshold | int == hostvars[_fam_host][_fam_var] | int
+          # The COUNT alone is not the rule. `lt` is what makes a low count mean
+          # "series went missing"; an lt->gt edit would invert this into a rule
+          # that fires whenever collection is HEALTHY and never when it breaks,
+          # while the count still matched and a shape-only guard still passed.
+          # That exact hole was found in the RAPL reconciler during #194, which
+          # is why it is checked here from the start rather than added later.
+          - _fam_evaluator == 'lt'
+        fail_msg: >-
+          Alert rule {{ item.uid }} fires {{ _fam_evaluator }}
+          {{ _fam_threshold }}, but {{ _fam_host }} declares
+          `{{ _fam_var }}: {{ hostvars[_fam_host][_fam_var] }}` in its host_vars,
+          with comparison `{{ _fam_evaluator }}` (must be `lt`). These are two
+          copies of one board fact and they have drifted. If the hardware or the
+          collected set changed, the threshold moves WITH the declaration in the
+          same change: a threshold above the real count fires forever, one below
+          it stops detecting partial loss — the failure the count shape exists to
+          catch. Do not "fix" this by lowering the threshold to silence an alert;
+          find out which series stopped arriving.
+        quiet: true
+      loop: "{{ _fam_counted_rules }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
 # #189: the ping absence rule's threshold is the NUMBER OF PING TARGETS, and that
 # number lives in telegraf.conf's `urls` list. Two copies of one fact, and the
 # drift is silent in the direction that matters: add a third ping target and the

@@ -140,6 +140,51 @@
     quiet: true
   when: telegraf_agent_rapl_power | bool
 
+# Same reasoning again, for the two per-board COUNTS the arrival proofs at the
+# end of this role compare against (#202). Both default to 0, and 0 is not a
+# valid count — it is the "nobody declared this" value. Left at 0 the equality
+# `delivered == 0` would be satisfied by an EMPTY result, so the proof would read
+# green precisely when the family had stopped arriving. That is the same
+# cannot-fail shape as the two asserts above, and it is why the default is 0
+# rather than a plausible-looking number: a wrong default that happens to match
+# one board would be worse than no default, because it would travel silently to
+# the next machine.
+- name: Assert this host declares the sensor series count it must deliver
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_expected_sensor_series | int > 0
+    fail_msg: >-
+      telegraf_agent_expected_sensor_series is
+      {{ telegraf_agent_expected_sensor_series }} for {{ inventory_hostname }}.
+      The sensor arrival proof at the end of this role compares the DELIVERED
+      series count against it for equality, so 0 would make that proof trivially
+      true against an empty result — green while nothing arrives. Count the
+      sensors_temp<N>_input series this board actually delivers
+      (`sensors` on the host, or
+      `count by (chip, feature) ({__name__=~"sensors_temp[0-9]+_input", host="..."})`
+      against VictoriaMetrics) and declare it in
+      ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml. It is a
+      per-BOARD fact — eq12 has 7 across 3 chips, n5pro 9 across 8 — so do not
+      copy one host's number to another.
+    quiet: true
+
+- name: Assert this host declares the ACPI fan object count it must deliver
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_acpi_fan_expected_count | int > 0
+    fail_msg: >-
+      telegraf_agent_acpi_fan_state is enabled for {{ inventory_hostname }} but
+      telegraf_agent_acpi_fan_expected_count is
+      {{ telegraf_agent_acpi_fan_expected_count }}. files/acpi_fan_state.sh emits
+      NOTHING for a device it cannot read rather than a fabricated zero, so the
+      count is the whole assertion — a presence check would stay green through
+      5 -> 4 -> 3 and only notice at zero. A declared count of 0 makes the
+      equality trivially true against an empty result. Count the objects with
+      `grep . /sys/class/thermal/cooling_device*/type` on the host and declare it
+      in ansible/inventory/host_vars/{{ inventory_hostname }}/vars.yml.
+    quiet: true
+  when: telegraf_agent_acpi_fan_state | bool
+
 # Both RAPL domain lists are interpolated into telegraf.conf.j2 — the exclusions
 # into a TOML DOUBLE-QUOTED string (the exec `commands` argv). A value containing
 # a `"` would end that scalar early and break the parse of the WHOLE config, and
@@ -1098,30 +1143,55 @@
     body_format: form-urlencoded
     body:
       query: 'count({__name__=~"sensors_temp[0-9]+_input", host="{{ inventory_hostname }}"})'
+      # A bare instant count, deliberately NOT windowed with last_over_time: the
+      # freshness of these samples is proven separately by the restart anchor
+      # below (#207), and a window here would let a chip that died before the
+      # restart keep being counted for the width of the window.
     url_username: "{{ vault_vm_auth_username }}"
     url_password: "{{ vault_vm_auth_password }}"
     force_basic_auth: true
     return_content: true
   register: telegraf_agent_sensors_arrival
+  # The until requires the DECLARED count, not merely a non-empty result, so a
+  # partially-arrived first batch keeps retrying instead of passing here and
+  # failing the assert a second later.
   until: >-
     telegraf_agent_sensors_arrival.status | default(0) == 200
     and (telegraf_agent_sensors_arrival.json.data.result | default([]) | length) > 0
+    and (telegraf_agent_sensors_arrival.json.data.result[0].value[1] | int)
+        == (telegraf_agent_expected_sensor_series | int)
   retries: 12
   delay: 10
   changed_when: false
   failed_when: false
   when: not ansible_check_mode
 
+# THE COUNT, NOT MERE PRESENCE (#202). A presence check passes on one surviving
+# chip out of three, and a thinning sensor set is exactly how an hwmon module
+# rename or a late-loading driver shows up — silently, with the agent healthy.
+# The number is the host's own declaration, so a board change has to be made in
+# host_vars rather than absorbed here.
 - name: Assert this host's sensor temperatures actually reached VictoriaMetrics
   ansible.builtin.assert:
     that:
       - telegraf_agent_sensors_arrival.status | default(0) == 200
       - telegraf_agent_sensors_arrival.json.data.result | default([]) | length > 0
+      - (telegraf_agent_sensors_arrival.json.data.result[0].value[1] | int)
+        == (telegraf_agent_expected_sensor_series | int)
     fail_msg: >-
-      No sensors_temp<N>_input series for host="{{ inventory_hostname }}" in
-      VictoriaMetrics, although `telegraf --test` produced the declared chips on
-      this host (the assert above passed). So the thermal surface exists at the
-      agent and is not arriving — check `journalctl -u telegraf -n 100` for
+      sensors_temp<N>_input for host="{{ inventory_hostname }}" counts
+      {{ telegraf_agent_sensors_arrival.json.data.result[0].value[1] | default('no result') }}
+      series in VictoriaMetrics, not the declared
+      {{ telegraf_agent_expected_sensor_series }}, although `telegraf --test`
+      produced the declared chips on this host (the assert above passed).
+      A LOW count means chips went unreadable — an hwmon module rename or a
+      driver that stopped loading — not that the metric is missing. A HIGH count
+      means the board is now exposing MORE than the declaration: that is not a
+      fault (a forced it87 binding did it on eq12, measured 2026-08-25), but the
+      declaration must be raised to match, in the same change that explains why,
+      or partial-loss detection quietly loses resolution. Note the corresponding
+      ALERT rule compares `lt` and so does not fire on the high case.
+      If the count is 0, check `journalctl -u telegraf -n 100` for
       output errors, and confirm the stored metric NAMES with
       `curl -su "$U:$P" '{{ victoriametrics_query_endpoint | regex_replace('/query$', '') }}/label/__name__/values'`
       | grep sensors. prometheusremotewrite names a series
@@ -1207,9 +1277,13 @@
     force_basic_auth: true
     return_content: true
   register: telegraf_agent_fan_arrival
+  # The until requires the DECLARED count so a partially-arrived first batch
+  # keeps retrying rather than passing here and failing the assert a second later.
   until: >-
     telegraf_agent_fan_arrival.status | default(0) == 200
     and (telegraf_agent_fan_arrival.json.data.result | default([]) | length) > 0
+    and (telegraf_agent_fan_arrival.json.data.result[0].value[1] | int)
+        == (telegraf_agent_acpi_fan_expected_count | int)
   retries: 12
   delay: 10
   changed_when: false
@@ -1218,15 +1292,26 @@
     - not ansible_check_mode
     - telegraf_agent_acpi_fan_state | bool
 
-- name: Assert all five ACPI fan objects actually reached VictoriaMetrics
+# The count comes from host_vars now, not from a literal in this file (#202).
+# It was `== '5'` here, and the SAME 5 was written into the alert rule
+# obs-fan-state-absent-eq12 — two copies of one board fact with nothing
+# reconciling them, which is the #188/#194 matched-pair defect. Both now read
+# telegraf_agent_acpi_fan_expected_count, and a static guard in the observability
+# role fails the deploy if the rule's threshold ever drifts from it.
+#
+# Note `| int` on both sides: the API returns the count as a STRING, and the old
+# assert compared it to the string '5' — which worked, but would have broken
+# silently the day someone wrote the expected value as a YAML integer.
+- name: Assert every declared ACPI fan object actually reached VictoriaMetrics
   ansible.builtin.assert:
     that:
       - telegraf_agent_fan_arrival.status | default(0) == 200
       - telegraf_agent_fan_arrival.json.data.result | default([]) | length > 0
-      - telegraf_agent_fan_arrival.json.data.result[0].value[1] == '5'
+      - (telegraf_agent_fan_arrival.json.data.result[0].value[1] | int)
+        == (telegraf_agent_acpi_fan_expected_count | int)
     fail_msg: >-
-      acpi_fan_state_state{host="{{ inventory_hostname }}"} does not count 5
-      series — got
+      acpi_fan_state_state{host="{{ inventory_hostname }}"} does not count
+      {{ telegraf_agent_acpi_fan_expected_count }} series — got
       {{ telegraf_agent_fan_arrival.json.data.result[0].value[1] | default('no result') }}.
       This board has five ACPI fan objects (PNP0C0B:00-04, measured 2026-08-24)
       and files/acpi_fan_state.sh emits nothing for a device it cannot read, so a

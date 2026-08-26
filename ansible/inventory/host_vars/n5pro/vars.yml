@@ -270,6 +270,32 @@ telegraf_agent_expected_test_output:
 telegraf_agent_sensors_tagdrop_features: [vddgfx, vddnb]
 # THE PROOF, a separate list on purpose (#186 review round): what must then be
 # absent from telegraf's own output, asserted every deploy. Literal substrings.
+# Sensor temperature SERIES this host must deliver, asserted for equality against
+# VictoriaMetrics at the end of the deploy and reconciled against
+# obs-sensors-metrics-absent-n5pro's threshold by a static guard in the
+# observability role. NINE series across EIGHT chips, measured 2026-08-25:
+#   acpitz-acpi-0            temp1
+#   amdgpu-pci-c700          edge
+#   k10temp-pci-00c3         tctl
+#   nic1-pci-c400            mac_temperature, phy_temperature
+#   nvme-pci-c200            composite
+#   r8169_0_c500:00-mdio-0   temp1
+#   spd5118-i2c-0-50         temp1          (DIMM)
+#   spd5118-i2c-0-51         temp1          (DIMM)
+#
+# HOW LONG THIS HAS BEEN OBSERVED STABLE, stated honestly because it bounds what
+# the number is worth: all nine had identical sample counts (1026) at the time of
+# measurement, with no series ever dropping out — but that is ~17 HOURS of
+# history, not weeks, since the native agents only landed in #186. Three of the
+# nine are NIC-adjacent (nic1 mac/phy, r8169 temp1) and are the plausible
+# flappers if a link drops or the driver reloads.
+#
+# The alert rule is email-only with a 10m lookback and for: 5m, so a brief
+# dropout costs one email rather than a page. IF IT PROVES FLAPPY, the remedy is
+# to narrow the rule's selector to exclude the NIC chips AND lower this number in
+# the same change — never to lower this number alone, which would silently stop
+# detecting a real loss of the chips that remain.
+telegraf_agent_expected_sensor_series: 9
 telegraf_agent_forbidden_test_output:
   - "feature=vddgfx"
   - "feature=vddnb"
