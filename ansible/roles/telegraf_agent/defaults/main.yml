@@ -26,6 +26,28 @@ telegraf_agent_controller_cache: "{{ lookup('env', 'HOME') }}/.cache/homelab/tel
 # "false" from host_vars is a truthy string (vector_agent precedent).
 telegraf_agent_acpi_fan_state: false
 
+# How many fan objects that host must deliver, asserted for EQUALITY against
+# VictoriaMetrics. 0 here means "not declared": the role refuses to run with fan
+# state enabled and a count of 0, because `count == 0` would be satisfied by an
+# empty result — a guard that reads green while nothing arrives, which is the
+# same trap telegraf_agent_rapl_expected_domains guards against below.
+telegraf_agent_acpi_fan_expected_count: 0
+
+# How many sensor temperature SERIES this host must deliver, asserted for
+# EQUALITY against VictoriaMetrics and reconciled against the host's
+# obs-sensors-metrics-absent-<host> threshold by a static guard in the
+# observability role. Per-BOARD, never copied between hosts: eq12 has 7 across 3
+# chips, n5pro 9 across 8. Must be non-zero on every host in this group, for the
+# same reason as the fan count above — the role asserts that.
+#
+# The ALERT RULE compares `lt` while this deploy assert compares EQUALITY, and
+# the asymmetry is deliberate. A sensor set can GROW without any change to this
+# repo (a forced it87 binding added two series on eq12 for one collection
+# interval, measured 2026-08-25), and paging for a module load would be wrong —
+# but a deploy is exactly the moment to notice that the declared model no longer
+# matches the machine, so the deploy is strict and the alert is one-sided.
+telegraf_agent_expected_sensor_series: 0
+
 # RAPL package power in WATTS via files/rapl_power.sh (#194) — both physical
 # hosts expose /sys/class/powercap and load intel_rapl_msr + intel_rapl_common
 # (yes, on the AMD box too), and the unit's ambient CAP_DAC_OVERRIDE was measured

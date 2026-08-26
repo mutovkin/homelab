@@ -123,9 +123,20 @@
 # there: that those rules WORK. It matches selector STRINGS, so a rule that is
 # `isPaused: true`, or whose noDataState is not Alerting, or whose `for:` was
 # widened to hours, satisfies it exactly as a working rule does. Coverage of the
-# host SET is this guard's whole claim; that the rules are actually served and
-# evaluated is proven separately, by this deploy's Grafana rule-count and
-# rule-evaluation checks further down.
+# host SET is this guard's whole claim.
+#
+# THIS PARAGRAPH USED TO END "...is proven separately, by this deploy's Grafana
+# rule-count and rule-evaluation checks further down". THERE ARE NO SUCH CHECKS —
+# this role never calls Grafana's alerting API at all. Corrected in #189/#202
+# rather than left standing, because a comment that points at a guard which does
+# not exist is the same defect class as a guard that cannot fail, and it is worse
+# in one respect: it stops the next reader from noticing the gap. What this
+# deploy DOES prove about Grafana is that the PROCESS came back
+# (`/api/health`) — which, since file provisioning is startup-blocking, means a
+# rejected rule document would have been caught. It does not prove the expected
+# NUMBER of rules is served, nor that any of them evaluates to Normal rather than
+# sitting in NoData on a typo'd selector. Building that check is tracked
+# separately; do not re-assert it here until it exists.
 #
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
@@ -287,6 +298,462 @@
           out which domain stopped arriving.
         quiet: true
       loop: "{{ _rapl_rules }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
+# #202: the SMART / sensors / fan absence rules, reconciled against inventory the
+# same way the RAPL pair above is, and for the same measured reason — a threshold
+# in a rule file and a count in host_vars are TWO COPIES OF ONE FACT, and both
+# drift directions are silent:
+#   * host_vars SHRINKS (a chip stops being collected on purpose): the role's own
+#     deploy assert still passes — it compares DELIVERED against host_vars and
+#     never reads this file — while the rule's threshold now fires forever.
+#   * host_vars GROWS: the role's assert passes again, and the stale lower
+#     threshold can no longer see one series go missing. Partial loss stops being
+#     detectable, which is the entire reason these thresholds are COUNTS.
+#
+# The expected host sets key on the COUNT VARIABLE BEING DECLARED in host_vars
+# rather than on a feature flag, exactly as the RAPL guard does and for the same
+# reason: a role DEFAULT is not visible in hostvars for another host, only what
+# host_vars actually sets. That is sound rather than a workaround — the
+# telegraf_agent role refuses to run with the count left at its 0 default, so a
+# host reaching this guard undeclared is one where the feature is off (nothing to
+# own) or one whose own play has already failed.
+#
+# inventory_hostname is deliberately NOT in any expected set here: this stack's
+# host runs the CONTAINER agent, which has no lm-sensors, no SMART devices of its
+# own and no ACPI fan objects.
+#
+# Static (control-machine lookup + inventory only), so it runs under --check and
+# fails before anything touches state.
+- name: Verify the per-family absence rules match each host's declared counts
+  vars:
+    _fam_all_rules: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+          | from_yaml).groups | map(attribute='rules') | flatten | list }}
+    # uid prefix -> the host_vars fact that is the single source of truth for
+    # that rule's threshold. Adding a counted family means adding a row here in
+    # the same change, or its threshold goes unreconciled.
+    _fam_count_specs:
+      - prefix: obs-sensors-metrics-absent-
+        var: telegraf_agent_expected_sensor_series
+      - prefix: obs-fan-state-absent-
+        var: telegraf_agent_acpi_fan_expected_count
+    # DERIVED from _fam_count_specs, never a second copy of those prefixes.
+    # Written longhand, this regex listed the two uid prefixes a SECOND time, and
+    # a drift between the two copies would have been silent in the worst way: the
+    # threshold loop at the end of this block would match nothing, iterate zero
+    # times, and report ok for every rule it never checked — while the coverage
+    # assert (which reads the specs) kept passing. An empty loop is `assert: true`
+    # wearing a loop. Deriving the pattern makes that particular drift
+    # unrepresentable; the per-spec size check in the coverage assert below is
+    # what catches the general case.
+    _fam_counted_rules: >-
+      {{ _fam_all_rules
+         | selectattr('uid', 'match',
+                      '^(' ~ (_fam_count_specs | map(attribute='prefix') | join('|')) ~ ')')
+         | list }}
+    _smart_rule_hosts: >-
+      {{ _fam_all_rules | map(attribute='uid')
+         | select('match', '^obs-smart-metrics-absent-')
+         | map('regex_replace', '^obs-smart-metrics-absent-', '') | sort | list }}
+  block:
+    - name: Assert every host declaring a per-family count has an absence rule of its own
+      vars:
+        _fam_rule_hosts: >-
+          {{ _fam_all_rules | map(attribute='uid')
+             | select('match', '^' ~ item.prefix)
+             | map('regex_replace', '^' ~ item.prefix, '') | sort | list }}
+        _fam_expected_hosts: >-
+          {{ groups['telegraf_agents'] | map('extract', hostvars)
+             | selectattr(item.var, 'defined')
+             | map(attribute='inventory_hostname') | sort | list }}
+      ansible.builtin.assert:
+        that:
+          - _fam_rule_hosts == _fam_expected_hosts
+          # The same claim, made against the list the THRESHOLD loop actually
+          # iterates. Without this, a restructured rule file or a renamed uid
+          # scheme could leave that list empty and the threshold/polarity
+          # reconciliation would retire itself silently — every deploy green, no
+          # rule checked. Cheap to state here because _fam_expected_hosts is
+          # already computed.
+          - _fam_counted_rules | selectattr('uid', 'match', '^' ~ item.prefix)
+            | list | length == _fam_expected_hosts | length
+        fail_msg: >-
+          The `{{ item.prefix }}*` absence rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
+          to {{ _fam_rule_hosts }}, but the hosts declaring `{{ item.var }}` are
+          {{ _fam_expected_hosts }}. A MISSING rule means that host's input can
+          die while telegraf itself stays healthy and NOTHING notices — a separate
+          producer from the agent stream, and two producers need two liveness
+          owners (#174). An EXTRA rule means one pinned to a host that no longer
+          collects the family, which will sit in NoData and fire forever. Adding
+          the declaration and adding the rule are one change. Do not delete the
+          guard to get past it.
+        quiet: true
+      loop: "{{ _fam_count_specs }}"
+      loop_control:
+        label: "{{ item.prefix }}"
+
+    # SMART has no declared count — both hosts have exactly one device and there
+    # is no host_vars list of disks to reconcile against, so its rules are
+    # presence (`lt 1`) rather than a count. Coverage still has to be total,
+    # so it keys on group membership: every native agent runs [[inputs.smart]].
+    - name: Assert every native telegraf agent has a SMART absence rule
+      ansible.builtin.assert:
+        that:
+          - _smart_rule_hosts == groups['telegraf_agents'] | sort | list
+        fail_msg: >-
+          The SMART absence rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
+          to {{ _smart_rule_hosts }}, but inventory group `telegraf_agents` is
+          {{ groups['telegraf_agents'] | sort | list }} and every member runs
+          [[inputs.smart]] against its root NVMe. SMART is the family that depends
+          on elevated privilege, and it fails QUIETLY — measured 2026-08-25, an
+          unprivileged telegraf still emits smart_device_exit_status=2 and drops
+          the other thirteen fields — so an uncovered host loses its disk wear,
+          media-error and temperature data behind a perfectly green agent rule.
+          Adding a host to `telegraf_agents` means adding its rule here in the
+          same change.
+        quiet: true
+
+    - name: Assert each counted family rule's threshold equals that host's declared count
+      vars:
+        _fam_host: >-
+          {{ item.uid | regex_replace('^(obs-sensors-metrics-absent-|obs-fan-state-absent-)', '') }}
+        _fam_var: >-
+          {{ 'telegraf_agent_expected_sensor_series'
+             if item.uid.startswith('obs-sensors-metrics-absent-')
+             else 'telegraf_agent_acpi_fan_expected_count' }}
+        _fam_threshold: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.params[0] }}
+        _fam_evaluator: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.type }}
+      ansible.builtin.assert:
+        that:
+          - _fam_threshold | int == hostvars[_fam_host][_fam_var] | int
+          # The COUNT alone is not the rule. `lt` is what makes a low count mean
+          # "series went missing"; an lt->gt edit would invert this into a rule
+          # that fires whenever collection is HEALTHY and never when it breaks,
+          # while the count still matched and a shape-only guard still passed.
+          # That exact hole was found in the RAPL reconciler during #194, which
+          # is why it is checked here from the start rather than added later.
+          - _fam_evaluator == 'lt'
+        fail_msg: >-
+          Alert rule {{ item.uid }} fires {{ _fam_evaluator }}
+          {{ _fam_threshold }}, but {{ _fam_host }} declares
+          `{{ _fam_var }}: {{ hostvars[_fam_host][_fam_var] }}` in its host_vars,
+          with comparison `{{ _fam_evaluator }}` (must be `lt`). These are two
+          copies of one board fact and they have drifted. If the hardware or the
+          collected set changed, the threshold moves WITH the declaration in the
+          same change: a threshold above the real count fires forever, one below
+          it stops detecting partial loss — the failure the count shape exists to
+          catch. Do not "fix" this by lowering the threshold to silence an alert;
+          find out which series stopped arriving.
+        quiet: true
+      loop: "{{ _fam_counted_rules }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
+# #189: the ping absence rule's threshold is the NUMBER OF PING TARGETS, and that
+# number lives in telegraf.conf's `urls` list. Two copies of one fact, and the
+# drift is silent in the direction that matters: add a third ping target and the
+# rule still fires only below 2, so that target can stop reporting forever and
+# nothing sees it — the exact partial-loss blindness the count shape exists to
+# prevent. Drop to one target and the rule fires permanently instead.
+#
+# The parse is SCOPED to the [[inputs.ping]] section rather than run over the
+# whole file, and that scoping is load-bearing rather than tidy:
+# [[inputs.http_response]] in the same file has its own `urls` list of FOUR
+# entries, so an unscoped count would read 6 and this guard would be measuring
+# something else while still looking like it worked. Verified both ways
+# 2026-08-25 — the ping block parses to 2 and the http_response block to 4.
+#
+# `^\s*"` at line start matches only array ELEMENT lines: a commented-out target
+# (`# "${ROUTER_IP}"`, in the file today) starts with `#` and is correctly not
+# counted, and `interface = ""` does not start with a quote.
+# Static, so it runs under --check before anything touches state.
+- name: Verify the ping absence rule's threshold matches the configured ping targets
+  vars:
+    _ping_conf_block: >-
+      {{ (lookup('file', role_path ~ '/files/data/telegraf/telegraf.conf')
+          | regex_search('(?s)\[\[inputs\.ping\]\](.*?)(?=\n\[\[)', '\1')
+          or ['']) | first }}
+    _ping_targets: >-
+      {{ _ping_conf_block | regex_findall('(?m)^\s*"[^"]+"') }}
+    _ping_rules: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+          | from_yaml).groups | map(attribute='rules') | flatten
+         | selectattr('uid', 'equalto', 'obs-ping-metrics-absent') | list }}
+  block:
+    # The parse anchors are checked BEFORE the comparison. A block that failed to
+    # match yields an empty string and a target count of 0, which would then be
+    # compared against a threshold on a rule that may not exist — two wrongs
+    # reading green. Same assert-the-count-first ordering the pinned-host guard
+    # above uses, and for the same reason.
+    - name: Assert the ping absence rule and the ping target list are both readable
+      ansible.builtin.assert:
+        that:
+          - _ping_rules | length == 1
+          - _ping_targets | length > 0
+        fail_msg: >-
+          This guard could not read what it compares: found
+          {{ _ping_rules | length }} rule(s) with uid obs-ping-metrics-absent
+          (expected exactly 1) and {{ _ping_targets | length }} ping target(s)
+          parsed out of the [[inputs.ping]] section of
+          files/data/telegraf/telegraf.conf (expected at least 1). Either the
+          alert file was restructured, the rule was renamed, or the telegraf
+          config no longer has an [[inputs.ping]] section followed by another
+          [[inputs.*]] section — the parse is anchored on that. Teach this guard
+          the new shape in the same change; do not delete it to get past this.
+        quiet: true
+
+    - name: Assert the ping absence rule's threshold equals the ping target count
+      vars:
+        _ping_threshold: >-
+          {{ (_ping_rules[0].data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.params[0] }}
+        _ping_evaluator: >-
+          {{ (_ping_rules[0].data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.type }}
+      ansible.builtin.assert:
+        that:
+          - _ping_threshold | int == _ping_targets | length
+          # The COUNT alone is not the rule: `lt` is what makes a low count mean
+          # "a target stopped reporting". An lt->gt edit would invert this into a
+          # rule that fires whenever collection is HEALTHY and never when it
+          # breaks, while the count still matched and this guard still passed —
+          # the #194 finding, applied here rather than rediscovered.
+          - _ping_evaluator == 'lt'
+        fail_msg: >-
+          Alert rule obs-ping-metrics-absent fires {{ _ping_evaluator }}
+          {{ _ping_threshold }} targets, but [[inputs.ping]] in
+          files/data/telegraf/telegraf.conf configures
+          {{ _ping_targets | length }} ({{ _ping_targets }}), with comparison
+          `{{ _ping_evaluator }}` (must be `lt`). These are two copies of one fact
+          and they have drifted. Adding or removing a ping target means moving
+          this threshold in the SAME change: a threshold below the real count
+          makes a dead target undetectable, one above it fires forever. Do not
+          "fix" this by lowering the threshold to silence an alert — find out
+          which target stopped reporting.
+        quiet: true
+
+# #189/#202: THE SEVERITY GRADING OF THE FAMILY-ABSENCE RULES IS A DERIVED CLAIM,
+# AND THIS IS WHAT KEEPS IT TRUE.
+#
+# Every per-input absence rule in telegraf-health.yaml is `severity: warning`,
+# which routes email-only. That is not a default — it was derived from a fact
+# measured across the whole alerting folder on 2026-08-25: NO RULE READS ANY OF
+# THESE FAMILIES. They feed dashboards. Nothing safety-relevant goes blind while
+# one of them fires, and the case that IS worth a page — the agent or the host
+# gone — is already owned at severity critical by the obs-telegraf-metrics-absent
+# rules. Same reasoning #193 used to demote truenas-metrics-absent.
+#
+# THE MOMENT A RULE READS ONE OF THESE FAMILIES, THAT GRADING IS FALSE, and the
+# family's absence owner is silently under-graded: a rule would be alerting on
+# data whose disappearance produces nothing louder than an email. That is #174's
+# measured trap one level over — there, a thermal rule was paired with a liveness
+# rule watching the wrong delivery path, the pairing broke, and the thermal rule
+# went mute behind a green liveness rule. Nothing noticed, because nothing was
+# checking the RELATIONSHIP.
+#
+# Both halves fail loudly, and both are needed:
+#   A. every warning-severity rule in telegraf-health.yaml must declare a family
+#      below — so adding a family rule without registering it FAILS, rather than
+#      quietly opting that family out of half B;
+#   B. no rule ANYWHERE in the alerting folder, other than those owners, may read
+#      a declared family — so adding a consumer FAILS until the grading is redone.
+#
+# IT PARSES YAML, NEVER GREPS THE TEXT, and that is deliberate: this very task
+# names `smart_device_` and `rapl_power_watts` in its own prose, and the rule
+# files carry the family names throughout their comments. A text search would
+# match the commentary and report consumers that do not exist — the
+# guard-shadowed-by-prose trap the pinned-host assert above documents, inverted.
+# Only `data[].model.expr` is read.
+#
+# Static (control-machine lookups only), so it runs under --check.
+- name: Verify the dashboards-only families still have no alert consumers
+  vars:
+    _obs_alerting_dir_grading: "{{ role_path }}/files/data/grafana/provisioning/alerting"
+    # Metric-name FRAGMENTS of the families whose absence is owned at WARNING.
+    # A fragment, not a full name, so it matches every member of the family —
+    # `smart_device_` matches smart_device_temp_c as well as the health_ok the
+    # owner rule watches, which is the point: a consumer of ANY member re-grades
+    # the whole family.
+    #
+    # THE TRAILING UNDERSCORES ARE LOAD-BEARING, and `docker_` is one character
+    # away from breaking every deploy. Measured both ways 2026-08-25 rather than
+    # argued: broadening `docker_` to `docker` makes this guard report TWO false
+    # consumers and fail the observability deploy permanently —
+    #   obs-telegraf-metrics-absent   expr contains host="eq12_docker", a HOST
+    #                                 NAME; the rule is severity CRITICAL and
+    #                                 reads no docker metric at all
+    #   obs-docker-log-ingest-stalled a LogsQL rule, `_time:10m source:docker |
+    #                                 count()` — a log source, not a metric
+    # With the underscore, neither matches: there is no `_` after `docker` in
+    # either. Same reasoning for `ping_`. Do not "tidy" these into bare words —
+    # the fragment has to be narrow enough that only a real METRIC NAME matches
+    # it, and a host name is the near-miss this fleet actually contains.
+    _dashboards_only_families:
+      - docker_
+      - ping_
+      - smart_device_
+      - sensors_temp
+      - acpi_fan_state
+      - rapl_power_watts
+    _telegraf_health_rules: >-
+      {{ (lookup('file', _obs_alerting_dir_grading ~ '/telegraf-health.yaml')
+          | from_yaml).groups | map(attribute='rules') | flatten | list }}
+    # DERIVED, not a hand-kept list, so the guard cannot drift from the rules
+    # themselves — but derived on TWO properties, and the second one is not
+    # decoration. Severity alone was the first version and it had a hole big
+    # enough to drive the whole guard through: a genuine CONSUMER added to this
+    # file as `severity: warning` — say an `obs-sensors-temp-high` thermal rule —
+    # would be classified as an OWNER, sail through half A (its expr does contain
+    # `sensors_temp`), and be REJECTED from half B's loop, which is the only
+    # check that exists to catch it. The family would gain a real alert consumer
+    # and this guard would report green. Requiring `-absent` in the uid as well
+    # means a non-absence warning rule falls into half B where it belongs. Half
+    # A's fail_msg has always said in prose that such a rule "does not belong in
+    # telegraf-health.yaml"; this is what makes that more than a wish.
+    _family_owner_rules: >-
+      {{ _telegraf_health_rules
+         | selectattr('labels.severity', 'defined')
+         | selectattr('labels.severity', 'equalto', 'warning')
+         | selectattr('uid', 'search', '-absent') | list }}
+    _family_owner_uids: >-
+      {{ _family_owner_rules | map(attribute='uid') | sort | list }}
+    # obs-docker-metrics-unlabelled reads `docker_.+` and is severity CRITICAL,
+    # so half B would flag it. Allowlisted with the reason rather than by
+    # widening the family list: it is not a CONSUMER of docker metrics. Its
+    # selector is `host=""`, i.e. it matches only the broken state in which the
+    # label has been stripped, and the value is never read as docker data. It
+    # detects mislabelling; it does not depend on the family arriving at all.
+    _family_consumer_allowlist:
+      - obs-docker-metrics-unlabelled
+  block:
+    - name: Read every provisioned alert rule for the grading check
+      ansible.builtin.set_fact:
+        _obs_all_rules: >-
+          {{ _obs_all_rules | default([])
+             + ((lookup('file', item) | from_yaml).groups | default([])
+                | map(attribute='rules') | flatten | list) }}
+      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    # PER FILE, not just in aggregate. `.groups | default([])` above turns a file
+    # that lost its `groups` key — a restructure, a stray indent — into a silent
+    # zero-rule contribution, and the aggregate witness below cannot see it: 33
+    # is still comfortably greater than telegraf-health.yaml's 13 with an entire
+    # file missing. Every file in this directory is a rule document today, so
+    # "yields at least one rule" is the right claim; a future non-rule file here
+    # means teaching this assert about it, deliberately.
+    - name: Assert every alerting file actually contributed rules
+      vars:
+        _file_rules: >-
+          {{ ((lookup('file', item) | from_yaml).groups | default([]))
+             | map(attribute='rules') | flatten | list }}
+      ansible.builtin.assert:
+        that:
+          - _file_rules | length > 0
+        fail_msg: >-
+          {{ item | basename }} contributed ZERO rules to the grading check. Every
+          file in files/data/grafana/provisioning/alerting/ is a rule document, so
+          this means the file lost its top-level `groups:` key (a restructure or a
+          stray indent) and `| default([])` silently swallowed it. The aggregate
+          size check below cannot see this — the other files still add up to more
+          than one file's worth — so the consumer sweep would simply stop covering
+          that file's rules while every deploy stayed green. Fix the file, or, if
+          a genuine non-rule file now lives here, teach this assert about it.
+        quiet: true
+      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    # The witness set must be non-empty and BIGGER than this one file, or half B
+    # is checking almost nothing while reporting success. A fileglob that matched
+    # nothing would otherwise turn the consumer assert into `assert: true` — a
+    # guard that cannot fail, which is the thing this whole change is about.
+    - name: Assert the grading check actually read the whole alerting folder
+      ansible.builtin.assert:
+        that:
+          - _obs_all_rules | default([]) | length > _telegraf_health_rules | length
+          - _family_owner_uids | length > 0
+        fail_msg: >-
+          This guard read {{ _obs_all_rules | default([]) | length }} rules across
+          {{ _obs_alerting_dir_grading }} and found
+          {{ _family_owner_uids | length }} warning-severity family owners in
+          telegraf-health.yaml, which cannot be right — the folder holds several
+          rule files and telegraf-health.yaml alone has
+          {{ _telegraf_health_rules | length }} rules. A fileglob that matches
+          nothing turns the consumer check below into `assert: true`. Fix the path
+          or the parse; do not delete this.
+        quiet: true
+
+    - name: Assert every warning-severity absence rule declares a dashboards-only family
+      vars:
+        _owner_exprs: >-
+          {{ item.data | default([]) | map(attribute='model') | map('default', {}, true)
+             | map(attribute='expr', default='') | join(' ') }}
+      ansible.builtin.assert:
+        that:
+          - _dashboards_only_families | select('in', _owner_exprs) | list | length > 0
+        fail_msg: >-
+          Alert rule {{ item.uid }} is severity=warning in telegraf-health.yaml,
+          but none of the declared dashboards-only families
+          {{ _dashboards_only_families }} appears in its expression
+          ({{ _owner_exprs }}). Every warning-severity rule in that file is a
+          per-input ABSENCE OWNER, and its warning grading rests on the family it
+          watches having no alert consumers. A family that is not declared here is
+          not checked for consumers at all — so the grading would be an unverified
+          assumption rather than an enforced one. Add the family's metric-name
+          fragment to _dashboards_only_families in this task, in the same change
+          that adds the rule. If this rule is warning for some OTHER reason, it
+          does not belong in telegraf-health.yaml.
+        quiet: true
+      loop: "{{ _family_owner_rules }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
+    - name: Assert no other rule consumes a family whose absence is only a warning
+      vars:
+        _other_exprs: >-
+          {{ item.data | default([]) | map(attribute='model') | map('default', {}, true)
+             | map(attribute='expr', default='') | join(' ') }}
+        _consumed: >-
+          {{ _dashboards_only_families | select('in', _other_exprs) | list }}
+      ansible.builtin.assert:
+        that:
+          - _consumed | length == 0
+        fail_msg: >-
+          Alert rule {{ item.uid }} reads the metric family/families
+          {{ _consumed }}, whose absence owner in telegraf-health.yaml is only
+          `severity: warning` (email-only). That grading was DERIVED from those
+          families having no alert consumers — a dashboards-only outage does not
+          deserve a page, which is the #193 posture. It is now false: something
+          ALERTS on this family, so its disappearance blinds a rule while
+          producing nothing louder than an email. This is #174's trap — a rule and
+          its liveness owner drifting out of pairing, with the liveness side
+          staying green.
+          THE RE-GRADE IS TWO EDITS, NOT ONE, and doing only the first leaves this
+          same guard failing on the owner itself: promoting the owner to
+          `severity: critical` takes it OUT of the derived owner set above, so it
+          drops into THIS loop and matches its own family fragment. So: promote
+          the owner's severity AND remove that family's fragment from
+          _dashboards_only_families in the same change — the fragment list is the
+          "dashboards-only" declaration, and a family that has gained an alert
+          consumer is by definition no longer dashboards-only.
+          Alternatively, if this rule genuinely does not depend on the family
+          ARRIVING, allowlist it in _family_consumer_allowlist with the reason
+          written beside it — as obs-docker-metrics-unlabelled is.
+        quiet: true
+      loop: >-
+        {{ _obs_all_rules | default([])
+           | rejectattr('uid', 'in', _family_owner_uids)
+           | rejectattr('uid', 'in', _family_consumer_allowlist) | list }}
       loop_control:
         label: "{{ item.uid }}"
 
