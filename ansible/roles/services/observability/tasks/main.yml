@@ -339,9 +339,19 @@
         var: telegraf_agent_expected_sensor_series
       - prefix: obs-fan-state-absent-
         var: telegraf_agent_acpi_fan_expected_count
+    # DERIVED from _fam_count_specs, never a second copy of those prefixes.
+    # Written longhand, this regex listed the two uid prefixes a SECOND time, and
+    # a drift between the two copies would have been silent in the worst way: the
+    # threshold loop at the end of this block would match nothing, iterate zero
+    # times, and report ok for every rule it never checked — while the coverage
+    # assert (which reads the specs) kept passing. An empty loop is `assert: true`
+    # wearing a loop. Deriving the pattern makes that particular drift
+    # unrepresentable; the per-spec size check in the coverage assert below is
+    # what catches the general case.
     _fam_counted_rules: >-
       {{ _fam_all_rules
-         | selectattr('uid', 'match', '^(obs-sensors-metrics-absent-|obs-fan-state-absent-)')
+         | selectattr('uid', 'match',
+                      '^(' ~ (_fam_count_specs | map(attribute='prefix') | join('|')) ~ ')')
          | list }}
     _smart_rule_hosts: >-
       {{ _fam_all_rules | map(attribute='uid')
@@ -361,6 +371,14 @@
       ansible.builtin.assert:
         that:
           - _fam_rule_hosts == _fam_expected_hosts
+          # The same claim, made against the list the THRESHOLD loop actually
+          # iterates. Without this, a restructured rule file or a renamed uid
+          # scheme could leave that list empty and the threshold/polarity
+          # reconciliation would retire itself silently — every deploy green, no
+          # rule checked. Cheap to state here because _fam_expected_hosts is
+          # already computed.
+          - _fam_counted_rules | selectattr('uid', 'match', '^' ~ item.prefix)
+            | list | length == _fam_expected_hosts | length
         fail_msg: >-
           The `{{ item.prefix }}*` absence rules in
           files/data/grafana/provisioning/alerting/telegraf-health.yaml are scoped
