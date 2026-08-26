@@ -158,32 +158,56 @@ perfectly labelled — the state that existed for the whole life of the
 deployment). Every other telegraf-fed rule here aggregates the `host` dimension
 away, so nothing else can see telegraf alive but stamping the wrong host.
 
-The table below itemises **all twenty-two**. It is what someone consults to
+The table below itemises **all twenty-eight**. It is what someone consults to
 answer "does this signal already have an absence owner?", which is exactly the
 question #178 got wrong once — so a rule missing from it is worse than a wrong
 total. Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
 
 **Absence ownership, so the table is not read as covering more than it does.**
-Absence is deliberately owned exactly once per signal, and two families are
-currently **unowned**:
+Absence is deliberately owned exactly once per signal. Since #189 every family
+telegraf collects has an owner; the table records which rule, because "is this
+already covered?" is the question #178 got wrong once.
 
 | signal | absence owner |
 | ------ | ------------- |
 | `system_uptime` (telegraf AGENT stream) | `obs-telegraf-metrics-absent` |
 | `http_response` (probe stream) | `obs-http-probe-absent` |
 | `vector_uptime_seconds` | `obs-vector-metrics-absent` |
-| **`docker_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
-| **`ping_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
+| `docker_*` | `obs-docker-metrics-absent` (#189) |
+| `ping_*` | `obs-ping-metrics-absent` (#189) — anchored on `ping_percent_packet_loss`, see below |
 
-`obs-docker-metrics-unlabelled` is **not** an absence owner for `docker_*` — it
+`obs-docker-metrics-unlabelled` is **not** the absence owner for `docker_*` — it
 catches those series arriving *mislabelled*, and its `noDataState: OK` is correct
-precisely because its signal only exists while something is broken. If
-`[[inputs.docker]]` dies on its own, `system_uptime` keeps flowing, both telegraf
-rules stay green, and nothing pages. Per-input death with a healthy agent is
-measured here, not hypothetical — `no_new_privs` once stripped setuid off
-`/usr/bin/ping` and eight ping metrics went NO DATA while the container stayed
-healthy.
+precisely because its signal only exists while something is broken. Absence is a
+different fault and `obs-docker-metrics-absent` owns it. Per-input death with a
+healthy agent is measured here, not hypothetical — `no_new_privs` once stripped
+the file capability off `/usr/bin/ping` and eight ping metrics went NO DATA while
+the container stayed healthy.
+
+**The ping anchor is the whole design of that rule, and the obvious field is
+wrong.** `[[inputs.ping]]` emits nine fields and they do not disappear together:
+
+| field | plugin cannot run | genuine 100% packet loss |
+| ----- | ----------------- | ------------------------ |
+| `ping_result_code` | **present**, pinned at 2 | **present**, 1 |
+| `ping_percent_packet_loss` | absent | **present**, 100 |
+| `ping_average_response_ms` and the four other timing fields | absent | absent |
+
+Both columns are measured, not argued. The left one twice over: the #95 incident
+recorded beside telegraf's `security_opt` block in `files/compose.yaml`, and a
+53-sample window in VictoriaMetrics itself where the retired
+`host="homelab-telegraf"` series carried 7391 `result_code` samples against 7338
+for the rest. The right one from a disposable `telegraf --test` against
+`192.0.2.1` (RFC5737 TEST-NET-1) on 2026-08-25, with `8.8.8.8` in the same run as
+a positive control that produced all nine fields.
+
+So an absence rule on `ping_result_code` is a guard that can never fire, and one
+on `ping_average_response_ms` would page on every ISP blip while being unable to
+tell that apart from a dead plugin. `ping_percent_packet_loss` is the only field
+that survives a real outage and disappears only when the plugin cannot execute.
+Do not "simplify" that selector — a `ping_.+` regex has the same defect, because
+`result_code` matches it.
 
 | uid | rule | fires when | noData |
 | --- | ---- | ---------- | ------ |
@@ -200,6 +224,8 @@ healthy.
 | `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
 | `obs-telegraf-metrics-absent` | Telegraf metrics stopped arriving for eq12_docker (#178) | `min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-docker-metrics-unlabelled` | Docker metrics have lost their host label (#178) | `count({__name__=~"docker_.+", host=""})` > 0, `for: 5m` | OK |
+| `obs-docker-metrics-absent` | Docker metrics stopped arriving for eq12_docker (#189) | `count by (host) (last_over_time(docker_n_containers{host="eq12_docker"}[10m]))` < 1, `for: 5m` | **Alerting** |
+| `obs-ping-metrics-absent` | Ping metrics stopped arriving for eq12_docker (#189) | `count by (host) (last_over_time(ping_percent_packet_loss{host="eq12_docker"}[10m]))` < 2, `for: 5m` | **Alerting** |
 | `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_alertmanager_receivers[24h]))` > 600, `for: 5m` | **Alerting** |
@@ -210,8 +236,8 @@ healthy.
 | `truenas-pool-degraded` | TrueNAS pool is not healthy (#174) | `min by (pool) (truenas_pool_healthy{host="truenas"})` < 1, `for: 0s` | OK |
 | `truenas-scrub-overdue` | TrueNAS pool scrub is overdue (#174) | `max by (pool) (truenas_pool_scrub_age_seconds{host="truenas"})` > 3024000 (35d), `for: 1h` | OK |
 
-`execErrState: Alerting` on all twenty-two — a datasource that cannot be reached
-is not evidence of health. Counted, not assumed: 22 uids and 22
+`execErrState: Alerting` on all twenty-eight — a datasource that cannot be reached
+is not evidence of health. Counted, not assumed: 28 uids and 28
 `execErrState: Alerting` lines across the seven files in `alerting/`, with no
 other value present.
 
