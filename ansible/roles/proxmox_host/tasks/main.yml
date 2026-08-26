@@ -268,3 +268,97 @@
   when:
     - hostonly_bridge is defined
     - not hostonly_bridge_exists or (hostonly_bridge_ip.changed | default(false))
+
+# --- Super-I/O hwmon modules (#fan) ------------------------------------------
+# Some boards expose fan tachometers only through a Super-I/O chip the stock
+# driver does not list. Binding it needs force_id, which is a per-host hardware
+# fact, so the whole block is opt-in via host_vars and no-ops elsewhere.
+- name: Configure Super-I/O hwmon module options
+  ansible.builtin.copy:
+    dest: "/etc/modprobe.d/{{ item.name }}.conf"
+    content: |
+      # Managed by Ansible (proxmox_host). Manual edits will be overwritten.
+      options {{ item.name }} {{ item.options }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ proxmox_host_hwmon_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.options | length > 0
+  tags: [hwmon]
+
+- name: Ensure Super-I/O hwmon modules load at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/proxmox-host-hwmon.conf
+    content: |
+      # Managed by Ansible (proxmox_host). Manual edits will be overwritten.
+      {% for m in proxmox_host_hwmon_modules %}
+      {{ m.name }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+  when: proxmox_host_hwmon_modules | length > 0
+  tags: [hwmon]
+
+# Plain command rather than community.general.modprobe: that module does not
+# resolve under this repo's ansible-lint collection path, and the load needs no
+# module-level cleverness — `lsmod` gates it and the assert below proves the
+# outcome, which is a stronger check than the module's own idempotency anyway.
+- name: Check which Super-I/O hwmon modules are already loaded
+  ansible.builtin.command: "cat /proc/modules"
+  register: proxmox_host_loaded_modules
+  changed_when: false
+  check_mode: false # read-only; without this the gate below is blind in --check
+  when: proxmox_host_hwmon_modules | length > 0
+  tags: [hwmon]
+
+- name: Load Super-I/O hwmon modules now
+  ansible.builtin.command: "modprobe {{ item.name }}"
+  loop: "{{ proxmox_host_hwmon_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - proxmox_host_hwmon_modules | length > 0
+    - "'\n' ~ item.name ~ ' ' not in '\n' ~ proxmox_host_loaded_modules.stdout"
+  changed_when: true
+  tags: [hwmon]
+
+# The guard. `modprobe it87` succeeds even when force_id is wrong and the module
+# binds nothing at all — the chip simply never appears in hwmon. Asserting on the
+# CHIP NAME in sensors' own output is the only check that can distinguish "bound"
+# from "loaded but inert", and it is what makes the fan panel's data trustworthy.
+# Deliberately NOT failed_when:false — that would ASSIGN failed:False and turn
+# the assert below into `assert: true` (CLAUDE.md: a guard you have not seen fail).
+- name: Read hwmon chips visible to lm-sensors
+  ansible.builtin.command: sensors -A
+  register: proxmox_host_sensors_out
+  changed_when: false
+  check_mode: false # read-only. A `command` is SKIPPED under --check, leaving
+  # the register empty, and `chip in <undefined>` is falsy rather than an error
+  # — so without this line the assert below fails on ABSENT DATA in every
+  # dry-run and reports it as an unbound chip. Measured 2026-08-25.
+  when: proxmox_host_hwmon_modules | length > 0
+  tags: [hwmon]
+
+- name: Assert each Super-I/O module actually bound its chip
+  ansible.builtin.assert:
+    that: item.expect in proxmox_host_sensors_out.stdout
+    fail_msg: >-
+      Module {{ item.name }} loaded but chip '{{ item.expect }}' is absent from
+      `sensors -A`. The module is inert: check the force_id against the chip the
+      board really has (dmesg | grep {{ item.name }}), and do NOT trust any fan
+      or temperature panel that reads from it.
+    success_msg: "{{ item.name }} bound {{ item.expect }}"
+  loop: "{{ proxmox_host_hwmon_modules }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - proxmox_host_hwmon_modules | length > 0
+    # In --check the load above is skipped, so a not-yet-loaded module would
+    # assert against a chip that check mode was never going to produce. Assert
+    # in check mode ONLY where the module is already loaded and the reading is
+    # therefore real; a live run always asserts.
+    - not ansible_check_mode or ('\n' ~ item.name ~ ' ') in ('\n' ~ proxmox_host_loaded_modules.stdout)
+  tags: [hwmon]

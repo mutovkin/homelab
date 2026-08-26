@@ -8,3 +8,11 @@ gpu_sharing:
 # proxmox-boot-tool). Per-host opt-in (e.g. n5pro sets pcie_ports=native to force
 # native PCIe AER on a passthrough host). Empty = leave the cmdline untouched.
 kernel_cmdline_extra: []
+
+# Super-I/O / hwmon kernel modules to bind at boot, per-host opt-in. Each entry:
+#   name:    module name (e.g. it87)
+#   options: modprobe options string, or "" for none
+#   expect:  hwmon chip name that MUST appear in `sensors` once bound — the guard.
+#            Without it, a module that loads but binds NOTHING reports success.
+# Empty = touch no modules. See docs/eq12.md for why eq12 needs force_id.
+proxmox_host_hwmon_modules: []

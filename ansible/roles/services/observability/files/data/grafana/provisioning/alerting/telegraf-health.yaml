@@ -966,10 +966,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Fewer than 7 sensor temperature series for host=eq12 (coretemp x5, acpitz, root NVMe).
+          summary: Fewer than 11 sensor temperature series for host=eq12 (coretemp x5, acpitz, root NVMe, it8622 x4).
           description: |-
             A LOW count means chips went unreadable, not that the metric is missing — which is why this is a count and not a presence check. On the host: `sensors` to see what lm-sensors still enumerates, then `journalctl -u telegraf -n 100 | grep -i sensors`. A kernel upgrade that renamed or stopped loading an hwmon module is the usual cause.
-            Extra chips never fire this rule: the comparison is one-sided on purpose, because a forced it87 binding on this board has added series before.
+            Extra chips never fire this rule: the comparison is one-sided on purpose, because a forced it87 binding on this board has added series before — and as of 2026-08-25 that binding is PERSISTED, which is what took this count from 7 to 11.
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1006,9 +1006,19 @@ groups:
               reducer: last
               settings:
                 mode: dropNN
-          # < 7: coretemp-isa-0000 package_id_0 + core_0..core_3 (five),
-          # acpitz-acpi-0 temp1, nvme-pci-0300 composite. Measured 2026-08-25 and
-          # declared in host_vars as telegraf_agent_expected_sensor_series.
+          # < 11: coretemp-isa-0000 package_id_0 + core_0..core_3 (five),
+          # acpitz-acpi-0 temp1, nvme-pci-0300 composite, and it8622-isa-0a30
+          # temp1..temp4 from the now-PERSISTED forced it87 binding.
+          #
+          # Only TEMPERATURES count: the expr matches sensors_temp<N>_input, so
+          # the same chip's fan2/fan3 and pwm1..pwm5 have no seat here despite
+          # arriving from the same input. They are separate metric names and
+          # would need their own owners.
+          #
+          # Measured 2026-08-25 and declared in host_vars as
+          # telegraf_agent_expected_sensor_series; a deploy-time guard asserts
+          # this threshold equals that declaration, and it is what caught the
+          # drift when the it87 binding landed.
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange:
@@ -1025,7 +1035,7 @@ groups:
                 - evaluator:
                     type: lt
                     params:
-                      - 7
+                      - 11
 
       # n5pro has NINE sensor series across EIGHT chips — a much wider surface
       # than eq12's three chips, and two of them are NIC PHY sensors. See that

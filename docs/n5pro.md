@@ -352,7 +352,8 @@ the two double-counts it.
 **None of this is wall power.** RAPL excludes NVMe, fans, PSU conversion loss and
 — on this machine specifically — the five drive bays and the whole NAS side of
 the box, and there is no wall meter here. Grafana:
-`Homelab / hosts / Hosts — CPU package power` (uid `host-power`); liveness is
+`Homelab / hosts / Host — n5pro (Minisforum N5 Pro, HX 370)` (uid
+`host-n5pro`), Power row; liveness is
 `obs-rapl-power-absent-n5pro`, on the domain count.
 
 ### Measured sensor surface

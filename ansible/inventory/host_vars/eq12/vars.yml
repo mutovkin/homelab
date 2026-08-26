@@ -182,12 +182,20 @@ telegraf_agent_acpi_fan_expected_count: 5
 # sensors_temp_input in the store.
 #
 # THE ALERT RULE COMPARES `lt`, NOT EQUALITY, and this host is why. A 7-day
-# windowed count here returned the seven steady series at 1050 samples each PLUS
+# windowed count here returned seven steady series at 1050 samples each PLUS
 # it8622-isa-0a30 temp1/temp2 at ONE sample each — the one-off forced it87
-# binding in docs/eq12.md. The set can grow with no change to this repo, so
-# extra chips must be free and only losses may fire. If it87 is ever persisted,
-# raise this number in the same change so partial-loss detection stays accurate.
-telegraf_agent_expected_sensor_series: 7
+# binding then documented in docs/eq12.md. The set can grow with no change to
+# this repo, so extra chips must be free and only losses may fire.
+#
+# it87 IS NOW PERSISTED, so this count rises 7 -> 11 in the same change, exactly
+# as the note above demanded. The four added are it8622-isa-0a30's temp1..temp4.
+#
+# ONLY temperatures count here: the assert matches `sensors_temp<N>_input`, so
+# the chip's other survivors — fan2, fan3 and pwm1..pwm5 — are NOT in this
+# number despite arriving from the same input. Declaring 18 (every surviving
+# feature) failed against a measured 11 on first apply. Those families are
+# separate metric names and need their own owners, not a seat in this count.
+telegraf_agent_expected_sensor_series: 11
 # Substrings that MUST appear in `telegraf --test` output on this host — the
 # input's OWN output, per CLAUDE.md's ping lesson. chip names measured 2026-08-24.
 # Matched as LITERAL SUBSTRINGS, not as regexes: a `.` or `-` here is that
@@ -204,7 +212,72 @@ telegraf_agent_expected_test_output:
   - "rapl,domain=package-0"
   - "rapl,domain=core"
   - "rapl,domain=uncore"
-telegraf_agent_forbidden_test_output: []
+  # it87 fan tachometers (persisted 2026-08-25). These are the ONLY proof that
+  # the forced binding produced the thing it exists for: the module can load,
+  # the chip can appear in `sensors`, and the tachometer fields can still be
+  # absent. Assert the FANS, not the chip.
+  #
+  # Bare `feature=` and not `chip=...,feature=...`, for the same reason the RAPL
+  # entries below are written the way they are: influx line protocol SORTS tag
+  # keys, and the agent's own `environment` tag sorts between `chip` and
+  # `feature`. The pair is never contiguous, so the intuitive substring can
+  # never match. Measured — this assert failed exactly that way on first apply,
+  # before restarting telegraf, which is the guard doing its job.
+  # No other chip on this host exposes fan2/fan3, so the bare form is unambiguous.
+  - "feature=fan2"
+  - "feature=fan3"
+# The junk half of the same chip, proven ABSENT from the input's own output.
+# Kept in sync with telegraf_agent_sensors_tagdrop_features by hand and on
+# purpose — the role infers neither from the other (see that role's defaults).
+telegraf_agent_forbidden_test_output:
+  - "feature=3vsb"      # reads 600 mV on a 3.3 V rail — fabricated, not measured
+  - "feature=intrusion0" # permanent phantom ALARM on a chassis with no switch
+  - "feature=vbat"
+
+# it8622-isa-0a30 offers 22 features; 11 are meaningless on this board and are
+# dropped before they can reach VictoriaMetrics. The voltage rails (in0..in6,
+# +3.3v, 3vsb, vbat) come off an uncalibrated divider whose board-specific
+# scaling ITE never published — +3.3v reads 3.58 V and 3vsb reads 0.60 V, so the
+# numbers are not merely imprecise, they are wrong. intrusion0 is a permanent
+# ALARM on a chassis with no intrusion switch wired.
+#
+# NOTE WHAT IS *NOT* HERE: it87's temp1..temp4. This filter matches on FEATURE
+# NAME ALONE, across every chip, and `temp1` is also acpitz-acpi-0's only
+# feature — dropping it here would silently delete an unrelated working sensor.
+# The four board thermistors are therefore KEPT, distinguishable by their chip
+# tag, and the dashboard labels them as unidentified board sensors rather than
+# claiming to know what they measure. Three of them read an identical 49 C,
+# which is consistent with unconnected pins; that is a reason to label them
+# honestly, not a reason to break acpitz.
+telegraf_agent_sensors_tagdrop_features:
+  - "3vsb"
+  - "intrusion0"
+  - "vbat"
+  - "+3.3v"
+  - "in0"
+  - "in1"
+  - "in2"
+  - "in3"
+  - "in4"
+  - "in5"
+  - "in6"
+
+# --- Super-I/O fan tachometers (proxmox_host) --------------------------------
+# The EQ12's ITE chip reports itself as IT8613E, which the in-kernel it87 driver
+# does not list among its 20 supported IDs. force_id=0x8622 binds it as the
+# register-compatible IT8622E and yields two REAL tachometers (measured
+# 3688 / 1890 RPM, 2026-08-25). This is in-tree, so there is no DKMS treadmill
+# and a kernel upgrade cannot orphan it.
+#
+# The cost: ACPI already claims I/O region 0x0a30, so the driver refuses to
+# attach without ignore_resource_conflict=1. We are overriding a claim the
+# firmware made, on every boot. Nothing on this board is known to drive that
+# region from the ACPI side, and dmesg reports a clean bind with no conflict
+# warning — but that is an absence of observed harm, not a proof of safety.
+proxmox_host_hwmon_modules:
+  - name: it87
+    options: "force_id=0x8622 ignore_resource_conflict=1"
+    expect: "it8622-isa-0a30"
 # RAPL package power (#194). THREE domains on this N100, enumerated from the
 # `name` files and not the node indices: intel-rapl:0 = package-0,
 # intel-rapl:0:0 = core, intel-rapl:0:1 = uncore.
