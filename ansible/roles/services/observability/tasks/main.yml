@@ -123,9 +123,20 @@
 # there: that those rules WORK. It matches selector STRINGS, so a rule that is
 # `isPaused: true`, or whose noDataState is not Alerting, or whose `for:` was
 # widened to hours, satisfies it exactly as a working rule does. Coverage of the
-# host SET is this guard's whole claim; that the rules are actually served and
-# evaluated is proven separately, by this deploy's Grafana rule-count and
-# rule-evaluation checks further down.
+# host SET is this guard's whole claim.
+#
+# THIS PARAGRAPH USED TO END "...is proven separately, by this deploy's Grafana
+# rule-count and rule-evaluation checks further down". THERE ARE NO SUCH CHECKS —
+# this role never calls Grafana's alerting API at all. Corrected in #189/#202
+# rather than left standing, because a comment that points at a guard which does
+# not exist is the same defect class as a guard that cannot fail, and it is worse
+# in one respect: it stops the next reader from noticing the gap. What this
+# deploy DOES prove about Grafana is that the PROCESS came back
+# (`/api/health`) — which, since file provisioning is startup-blocking, means a
+# rejected rule document would have been caught. It does not prove the expected
+# NUMBER of rules is served, nor that any of them evaluates to Normal rather than
+# sitting in NoData on a typo'd selector. Building that check is tracked
+# separately; do not re-assert it here until it exists.
 #
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
@@ -553,6 +564,20 @@
     # `smart_device_` matches smart_device_temp_c as well as the health_ok the
     # owner rule watches, which is the point: a consumer of ANY member re-grades
     # the whole family.
+    #
+    # THE TRAILING UNDERSCORES ARE LOAD-BEARING, and `docker_` is one character
+    # away from breaking every deploy. Measured both ways 2026-08-25 rather than
+    # argued: broadening `docker_` to `docker` makes this guard report TWO false
+    # consumers and fail the observability deploy permanently —
+    #   obs-telegraf-metrics-absent   expr contains host="eq12_docker", a HOST
+    #                                 NAME; the rule is severity CRITICAL and
+    #                                 reads no docker metric at all
+    #   obs-docker-log-ingest-stalled a LogsQL rule, `_time:10m source:docker |
+    #                                 count()` — a log source, not a metric
+    # With the underscore, neither matches: there is no `_` after `docker` in
+    # either. Same reasoning for `ping_`. Do not "tidy" these into bare words —
+    # the fragment has to be narrow enough that only a real METRIC NAME matches
+    # it, and a host name is the near-miss this fleet actually contains.
     _dashboards_only_families:
       - docker_
       - ping_
