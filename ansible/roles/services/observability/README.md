@@ -190,7 +190,7 @@ healthy.
 | `obs-log-ingest-stalled` | VictoriaLogs ingest stalled | `_time:5m \| count()` < 1, `for: 10m` | **Alerting** |
 | `obs-host-log-ingest-stalled` | Host log ingest stalled (fleet-wide) | `_time:10m source:host \| count()` < 1, `for: 10m` | **Alerting** |
 | `obs-docker-log-ingest-stalled` | Docker log ingest stalled (#154) | `_time:10m source:docker \| count()` < 1, `for: 10m` | **Alerting** |
-| `obs-host-log-ingest-stalled-per-host` | A host stopped shipping logs | `_time:24h source:host \| stats by (hostname) count() if (_time:15m)` < 1, `for: 10m` | OK |
+| `obs-host-log-ingest-stalled-per-host` | A host stopped shipping logs | `_time:24h source:host "homelab-heartbeat" \| stats by (hostname) count() if (_time:20m)` < 1, `for: 5m` | OK |
 | `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
 | `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
 | `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
@@ -322,16 +322,17 @@ declare the dead host healthy.
 The working form keeps a 24 h outer window and counts recency inside it:
 
 ```
-_time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
+_time:24h source:host | stats by (hostname) count() if (_time:20m) as recent
 ```
 
 A dead shipper is still in the 24 h window, so it returns a row with `recent = 0` —
 which a `< 1` threshold can fire on. Measured 2026-08-19 against the live
-VictoriaLogs, running the deployed expression and then the naive form as a control.
-The **pair** is the proof; neither line means much on its own:
+VictoriaLogs, running that shape and then the naive form as a control. The **pair**
+is the proof; neither line means much on its own:
 
 ```
-Q1 — the expression this rule deploys
+Q1 — the deployed shape, measured here with a 15m inner clause (the deployed expr
+     uses 20m; the point of the control is the OUTER window, not the inner)
 _time:24h source:host | stats by (hostname) count() if (_time:15m) as recent
   {"hostname":"d7d7d4e8c59e","recent":"0"}    <- stopped, and STILL RETURNED
   {"hostname":"eq12_docker","recent":"116"}   <- alive
