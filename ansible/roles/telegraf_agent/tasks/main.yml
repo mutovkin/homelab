@@ -785,6 +785,59 @@
 # task is not "never reached", it is skipped, which is the very mechanism the
 # paragraph above relies on. Reading the term bare is therefore uniform, and a renamed register
 # fails loudly instead of silently voting "no restart".
+# DURABLE staleness term, ORed into the six one-shot `changed` flags below.
+#
+# Those six describe only what THIS run did. A run that writes the config and
+# then dies before the restart — an assert failing between the two, which is the
+# normal shape here because the arrival proofs are asserts — strands a NEW config
+# under an OLD process. Every later run then sees changed=false on all six,
+# votes "no restart", and reports a green converged host that is running config
+# it stopped matching hours ago. Idempotency HIDES the defect rather than
+# healing it, and it cannot self-heal, because the signal it needs was consumed
+# by the run that failed.
+#
+# Measured on eq12, 2026-08-25: config mtime 22:24, telegraf running since 18:00,
+# three consecutive green-or-asserting runs in between, and an it87 tagdrop that
+# was on disk and doing nothing. This is CLAUDE.md's "arm a guard from durable
+# state, not a one-shot changed" (#127) in a second location.
+#
+# The fix reads the host: is any managed file newer than the unit's last start?
+# That question has the same answer no matter which run wrote the file, so the
+# next run repairs the previous run's casualty.
+- name: Detect managed files newer than the running telegraf
+  ansible.builtin.shell: |
+    set -euo pipefail
+    started=$(systemctl show telegraf -p ActiveEnterTimestampMonotonic --value)
+    # Never started (or monotonic unavailable) => definitively stale.
+    if [ -z "$started" ] || [ "$started" = "0" ]; then echo stale; exit 0; fi
+    boot_us=$(( $(date +%s) * 1000000 - $(awk '{printf "%.0f", $1 * 1000000}' /proc/uptime) ))
+    started_epoch=$(( (boot_us + started) / 1000000 ))
+    newest=0
+    for f in /etc/telegraf/telegraf.conf \
+             /etc/telegraf/telegraf.env \
+             /etc/systemd/system/telegraf.service.d/10-homelab.conf \
+             /usr/local/lib/telegraf/acpi_fan_state.sh \
+             /usr/local/lib/telegraf/rapl_power.sh; do
+      [ -f "$f" ] || continue
+      m=$(stat -c %Y "$f")
+      [ "$m" -gt "$newest" ] && newest=$m
+    done
+    if [ "$newest" -gt "$started_epoch" ]; then echo stale; else echo fresh; fi
+  register: telegraf_agent_staleness
+  changed_when: false
+  check_mode: false # read-only, and a skipped read would vote "fresh" every
+  # dry-run — the exact silent-no-op this task exists to close.
+
+- name: Assert the staleness probe returned a verdict it is allowed to return
+  ansible.builtin.assert:
+    that: telegraf_agent_staleness.stdout | trim in ['stale', 'fresh']
+    fail_msg: >-
+      The telegraf staleness probe returned
+      '{{ telegraf_agent_staleness.stdout | trim }}', which is neither 'stale'
+      nor 'fresh'. Treat this as stale and fix the probe: an unreadable verdict
+      compared with == would silently vote "no restart", which is the failure
+      this whole block exists to prevent.
+
 - name: Determine whether telegraf must be restarted
   ansible.builtin.set_fact:
     telegraf_agent_needs_restart: >-
@@ -793,7 +846,8 @@
          or telegraf_agent_env.changed
          or telegraf_agent_dropin.changed
          or telegraf_agent_fan_script.changed
-         or telegraf_agent_rapl_script.changed }}
+         or telegraf_agent_rapl_script.changed
+         or (telegraf_agent_staleness.stdout | trim == 'stale') }}
 
 - name: Preview the telegraf restart (check mode)
   ansible.builtin.debug:
