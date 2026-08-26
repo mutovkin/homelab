@@ -161,6 +161,33 @@ proxmox_lxcs:
 # eq12 is the one host with ACPI fan objects (five, binary cur_state 0/1 —
 # measured 2026-08-24; NOT tachometers, there is no RPM on this board).
 telegraf_agent_acpi_fan_state: true
+# How many of them, asserted for EQUALITY against VictoriaMetrics at the end of
+# the deploy and reconciled against obs-fan-state-absent-eq12's threshold by a
+# static guard in the observability role. Five ACPI fan objects, PNP0C0B:00-04,
+# measured 2026-08-24 and confirmed 2026-08-25 as cooling_device3..7.
+#
+# THE COUNT IS THE POINT, not mere presence: files/acpi_fan_state.sh emits
+# nothing for a device it cannot read rather than a fabricated zero, so a
+# permission or sysfs change thins this 5 -> 4 silently. This number used to be
+# hardcoded inside the role's assert; it lives here now so the alert rule and the
+# deploy proof read ONE fact from ONE place.
+telegraf_agent_acpi_fan_expected_count: 5
+# Sensor temperature SERIES this host must deliver (not chips — five of the seven
+# come from one chip). Measured 2026-08-25:
+#   coretemp-isa-0000  package_id_0, core_0, core_1, core_2, core_3   (5)
+#   acpitz-acpi-0      temp1                                          (1)
+#   nvme-pci-0300      composite                                      (1)
+# Stored names carry a digit (sensors_temp1_input .. sensors_temp5_input) because
+# remove_numbers=false keeps core_0..3 from merging; there is no bare
+# sensors_temp_input in the store.
+#
+# THE ALERT RULE COMPARES `lt`, NOT EQUALITY, and this host is why. A 7-day
+# windowed count here returned the seven steady series at 1050 samples each PLUS
+# it8622-isa-0a30 temp1/temp2 at ONE sample each — the one-off forced it87
+# binding in docs/eq12.md. The set can grow with no change to this repo, so
+# extra chips must be free and only losses may fire. If it87 is ever persisted,
+# raise this number in the same change so partial-loss detection stays accurate.
+telegraf_agent_expected_sensor_series: 7
 # Substrings that MUST appear in `telegraf --test` output on this host — the
 # input's OWN output, per CLAUDE.md's ping lesson. chip names measured 2026-08-24.
 # Matched as LITERAL SUBSTRINGS, not as regexes: a `.` or `-` here is that

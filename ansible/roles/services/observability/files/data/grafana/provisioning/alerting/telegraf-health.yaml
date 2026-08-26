@@ -724,6 +724,748 @@ groups:
                       - 1
 
       # ---------------------------------------------------------------------
+      # THE NATIVE AGENTS' REMAINING PER-INPUT ABSENCE OWNERS (#202): SMART,
+      # sensors and ACPI fan state. Same reasoning as the RAPL pair above and the
+      # container-agent pair below — the agent-liveness rules watch
+      # [[inputs.system]], and each of these families is produced by a DIFFERENT
+      # mechanism that can fail on its own while that stream keeps flowing.
+      # roles/telegraf_agent proves all of them at DEPLOY time; between deploys
+      # they had no owner at all, so a Debian upgrade that moved
+      # /usr/sbin/smartctl, an hwmon module rename, or eq12's fan sysfs going
+      # unreadable produced silent family loss behind a green liveness rule.
+      #
+      # ALL WARNING, and derived exactly as the RAPL pair's grading is: no rule in
+      # this folder reads any of these families (enumerated across all seven files
+      # 2026-08-25), so they are dashboards-only, and the case worth a page — the
+      # agent or the machine gone — is already owned at severity critical. The
+      # static guard "Assert no other rule consumes a family whose absence is only
+      # a warning" in roles/services/observability/tasks/main.yml fails the deploy
+      # if that ever stops being true, rather than leaving it to memory.
+      #
+      # NO DEEP LINKS on any of these, for the reason above the native-agent
+      # rules: an unpaired __dashboardUid__ is boot-fatal for EVERY provisioned
+      # rule, and "a delivery path went dark" has no one panel to point at.
+
+      # THE ANCHOR IS smart_device_health_ok, NOT A smart_device_.+ REGEX, and
+      # that is the whole design of these two rules. Measured on eq12,
+      # 2026-08-25, by running `telegraf --test` under `setpriv --reuid=65534` —
+      # i.e. the REAL failure mode, the unit losing its ambient capabilities so
+      # smartctl opens the device and the NVMe admin ioctl is denied:
+      #
+      #   > smart_device,device=nvme0 exit_status=2i
+      #
+      # ONE field survives. The other thirteen — health_ok, temp_c,
+      # percentage_used, media_errors, the lot — are gone, and so are the `model`
+      # and `serial_no` tags. So a presence check over `smart_device_.+` still
+      # matches (exit_status matches it) and reports healthy while the disk data
+      # this exists to collect has stopped. That is not hypothetical: the deploy
+      # assert in roles/telegraf_agent used exactly that regex until #207 fixed
+      # it, which means it would have PASSED on the capability regression its own
+      # fail_msg tells you to go and check.
+      #
+      # The two neighbouring failure modes are NOT silent and are deliberately not
+      # this rule's job, measured in the same run: `smartctl` present but failing
+      # at --scan emits NOTHING (an ordinary total absence, caught here by
+      # NoData), and `smartctl` MISSING stops telegraf initialising at all, which
+      # takes out system_uptime and pages via the agent rule.
+      #
+      # `lt 1` = "no device is reporting a real SMART read". Both hosts have
+      # exactly one SMART device (the root NVMe), and there is no host_vars
+      # declaration of disks to reconcile a larger count against — so unlike the
+      # sensors and fan rules below this threshold is presence, not a count. THE
+      # COST, stated rather than hidden: with a SECOND device installed, losing
+      # one of the two would not fire this. The fix at that point is a
+      # telegraf_agent_smart_expected_devices declaration in host_vars plus a
+      # reconciler, added in the same change that installs the disk — not a
+      # widening of this rule.
+      - uid: obs-smart-metrics-absent-eq12
+        title: SMART attributes stopped arriving for eq12
+        condition: C
+        for: 5m
+        # Alerting, not OK, on the #151 test: [[inputs.smart]] runs every
+        # collection interval and emits this field whenever it can read the
+        # device at all, so absence is never its healthy state.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: No SMART health data for host=eq12 — the root NVMe is no longer being read.
+          description: |-
+            This is the family that depends on elevated privilege, and it fails QUIETLY: with the ambient capabilities gone, telegraf still emits smart_device_exit_status=2 and nothing else, so the agent stays healthy and only the real readings stop. Check, in order:
+            (1) `systemctl show telegraf -p AmbientCapabilities -p NoNewPrivileges` — the pair must be cap_dac_override + cap_sys_admin;
+            (2) `journalctl -u telegraf -n 100 | grep -i smart`;
+            (3) `/usr/sbin/smartctl --scan` still finds the root NVMe.
+            Do NOT "fix" this by moving the unit to User=root — relax the specific hardening directive that broke, with the measured failure recorded beside it (roles/telegraf_agent/README.md).
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s collection interval: ten samples of headroom,
+              # so a restart cannot empty the window. relativeTimeRange above must
+              # stay >= this lookbehind. `by (host)` around a pinned selector so
+              # widening the selector later evaluates each host on its own rather
+              # than letting a healthy peer mask a dead one (#160).
+              expr: 'count by (host) (last_over_time(smart_device_health_ok{host="eq12"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not become a real 0, which would
+          # trip this `lt` threshold and read as a genuine count while the truth is
+          # that nothing came back. With no numeric value the rule falls through to
+          # noDataState, Alerting on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+
+      # n5pro's copy of the rule above — same anchor, same reasoning, same single
+      # root NVMe. The measurement that chose the anchor was taken on eq12; the
+      # mechanism is telegraf's smart plugin and the kernel's NVMe ioctl
+      # permission check, neither of which is board-specific, and both hosts run
+      # the same unit from the same role with the same ambient capability pair.
+      - uid: obs-smart-metrics-absent-n5pro
+        title: SMART attributes stopped arriving for n5pro
+        condition: C
+        for: 5m
+        # Alerting, not OK — same #151 reasoning as the eq12 rule above.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: No SMART health data for host=n5pro — the root NVMe is no longer being read.
+          description: |-
+            This is the family that depends on elevated privilege, and it fails QUIETLY: with the ambient capabilities gone, telegraf still emits smart_device_exit_status=2 and nothing else, so the agent stays healthy and only the real readings stop. Check, in order:
+            (1) `systemctl show telegraf -p AmbientCapabilities -p NoNewPrivileges` — the pair must be cap_dac_override + cap_sys_admin;
+            (2) `journalctl -u telegraf -n 100 | grep -i smart`;
+            (3) `/usr/sbin/smartctl --scan` still finds the root NVMe.
+            The pool disks are NOT covered here — they belong to the TrueNAS VM and are owned by truenas-poller-absent and the truenas thermal rules.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s interval, as above; relativeTimeRange must
+              # stay >= this lookbehind.
+              expr: 'count by (host) (last_over_time(smart_device_health_ok{host="n5pro"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — same reasoning as the rule above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+
+      # THE SENSOR RULES ARE A COUNT, AND THE THRESHOLD IS A PER-BOARD FACT that
+      # lives in host_vars as telegraf_agent_expected_sensor_series. The static
+      # reconciler in roles/services/observability/tasks/main.yml asserts the two
+      # agree AND that the comparison is `lt`, so a chip change has to be made in
+      # both places in one commit.
+      #
+      # WHY `lt` AND NOT AN EQUALITY, measured rather than assumed: the sensor set
+      # can GROW with no change to this repo. `count_over_time(...[7d])` on eq12
+      # 2026-08-25 returned the seven steady series at 1050 samples each PLUS two
+      # more at 1 sample each — it8622-isa-0a30 temp1/temp2, the one-off forced
+      # it87 binding recorded in docs/eq12.md. An instant count() hides that
+      # entirely. An equality would have paged the operator for loading a module;
+      # `lt` is one-sided, so extra chips are free and only LOSSES fire.
+      #
+      # The metric NAMES carry a digit — sensors_temp1_input .. sensors_temp5_input
+      # — because remove_numbers=false in telegraf.conf.j2 keeps eq12's core_0..3
+      # from merging into one series, and that also keeps the digit in the field
+      # name. There is no `sensors_temp_input` in the store and there never was,
+      # which is why this is a __name__ regex and not a literal.
+      - uid: obs-sensors-metrics-absent-eq12
+        title: Sensor temperatures stopped arriving for eq12
+        condition: C
+        for: 5m
+        # Alerting, not OK, on the #151 test: [[inputs.sensors]] emits every
+        # readable feature every collection interval unconditionally, so absence
+        # is never its healthy state.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Fewer than 7 sensor temperature series for host=eq12 (coretemp x5, acpitz, root NVMe).
+          description: |-
+            A LOW count means chips went unreadable, not that the metric is missing — which is why this is a count and not a presence check. On the host: `sensors` to see what lm-sensors still enumerates, then `journalctl -u telegraf -n 100 | grep -i sensors`. A kernel upgrade that renamed or stopped loading an hwmon module is the usual cause.
+            Extra chips never fire this rule: the comparison is one-sided on purpose, because a forced it87 binding on this board has added series before.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s interval; relativeTimeRange must stay >= it.
+              expr: 'count by (host) (last_over_time({__name__=~"sensors_temp[0-9]+_input", host="eq12"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — same reasoning as the rules above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 7: coretemp-isa-0000 package_id_0 + core_0..core_3 (five),
+          # acpitz-acpi-0 temp1, nvme-pci-0300 composite. Measured 2026-08-25 and
+          # declared in host_vars as telegraf_agent_expected_sensor_series.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 7
+
+      # n5pro has NINE sensor series across EIGHT chips — a much wider surface
+      # than eq12's three chips, and two of them are NIC PHY sensors. See that
+      # host's vars for the honest caveat about how long the set has been observed
+      # stable and what to do if it flaps.
+      - uid: obs-sensors-metrics-absent-n5pro
+        title: Sensor temperatures stopped arriving for n5pro
+        condition: C
+        for: 5m
+        # Alerting, not OK — same #151 reasoning as the eq12 rule above.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Fewer than 9 sensor temperature series for host=n5pro (k10temp, amdgpu, 2x spd5118 DIMM, NVMe, acpitz, 2x NIC PHY).
+          description: |-
+            A LOW count means chips went unreadable, not that the metric is missing. On the host: `sensors`, then `journalctl -u telegraf -n 100 | grep -i sensors`.
+            Two of the nine are NIC PHY sensors (nic1-pci-c400 mac/phy, r8169_0_c500 temp1). If this rule proves flappy, the recorded remedy is to narrow the selector to exclude those chips and lower the declared count in host_vars in the same change — NOT to lower the count alone, which would stop detecting a real loss.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s interval; relativeTimeRange must stay >= it.
+              expr: 'count by (host) (last_over_time({__name__=~"sensors_temp[0-9]+_input", host="n5pro"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — same reasoning as the rules above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 9: acpitz temp1, amdgpu edge, k10temp tctl, nic1 mac + phy,
+          # nvme composite, r8169 temp1, spd5118 x2. Measured 2026-08-25 and
+          # declared in host_vars as telegraf_agent_expected_sensor_series.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 9
+
+      # eq12 ONLY — n5pro's EC publishes no cooling devices at all (measured
+      # #186, docs/n5pro.md), so there is deliberately no n5pro counterpart and
+      # the coverage guard keys on telegraf_agent_acpi_fan_state rather than on
+      # group membership.
+      #
+      # THE COUNT IS THE ASSERTION, and this family is the clearest case for it in
+      # the fleet: files/acpi_fan_state.sh emits NOTHING for a device it cannot
+      # read rather than a fabricated zero — correct gauge semantics — so a
+      # permission or sysfs change shows up as FOUR series, not as an obvious
+      # absence. A presence check would stay green through 5 -> 4 -> 3 -> 1 and
+      # only notice at zero. Device indices are not stable across boots, which is
+      # why the count and not the device names is what is pinned.
+      #
+      # THIS IS BINARY STATE, NEVER RPM. No tachometer is collected on either host
+      # under the default driver set (measured #186). Nothing here may be read,
+      # graphed or alerted on as a fan speed, and this rule says nothing about
+      # whether the fans are SPINNING — only about whether their state is being
+      # collected.
+      - uid: obs-fan-state-absent-eq12
+        title: ACPI fan state stopped arriving for eq12
+        condition: C
+        for: 5m
+        # Alerting, not OK, on the #151 test: the exec script runs every
+        # collection interval and emits one line per readable cooling device
+        # unconditionally, so absence is never its healthy state.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Fewer than 5 ACPI fan objects reporting for host=eq12 (PNP0C0B:00-04).
+          description: |-
+            The script emits nothing for a device it cannot read rather than a fabricated zero, so a LOW count means devices went unreadable — this thins silently and a presence check would not see it. On the host: `grep . /sys/class/thermal/cooling_device*/type` and the matching cur_state files, then `journalctl -u telegraf -n 100 | grep -i exec`.
+            This is BINARY state, not RPM — it says the fan state is being collected, nothing about whether the fans are spinning.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s interval; relativeTimeRange must stay >= it.
+              expr: 'count by (host) (last_over_time(acpi_fan_state_state{host="eq12"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — same reasoning as the rules above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 5: five ACPI fan objects on this board, PNP0C0B:00-04, measured
+          # 2026-08-24 and again 2026-08-25 (cooling_device3..7). Declared in
+          # host_vars as telegraf_agent_acpi_fan_expected_count, which the role's
+          # own deploy assert and the static reconciler both read — this number
+          # used to be hardcoded in the role and is now one fact in one place.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 5
+
+      # ---------------------------------------------------------------------
+      # THE CONTAINER AGENT'S PER-INPUT ABSENCE OWNERS (#189).
+      #
+      # SEPARATE FROM obs-telegraf-metrics-absent ABOVE, for #174's measured
+      # reason: that rule watches system_uptime, i.e. the AGENT stream. A single
+      # input can die while the agent stays up and every other input keeps
+      # flowing — telegraf logs the error once and carries on. That is not a
+      # hypothetical here, it is this container's own history: no_new_privs
+      # stripped the file capability off /usr/bin/ping and eight of the nine
+      # ping_* fields went NO DATA while the container stayed healthy and every
+      # deploy stayed green. Two producers need two liveness rules.
+      #
+      # WARNING, NOT CRITICAL, on both — and this is a DERIVED grading, not a
+      # default. Neither family is read by any alert rule in this folder
+      # (enumerated across all seven files, 2026-08-25): they feed dashboards
+      # only. Nothing safety-relevant is blind while these fire, and the case
+      # that IS worth a page — the agent or the host gone — is already owned at
+      # severity critical by obs-telegraf-metrics-absent above. That keeps the
+      # #193 fatigue posture, which demoted truenas-metrics-absent on exactly
+      # this reasoning. IF A FUTURE RULE EVER READS docker_* OR ping_*, THIS
+      # GRADING STOPS BEING TRUE and these rules must be re-graded; the static
+      # guard "Assert no other rule reads a family whose absence owner is only a
+      # warning" in roles/services/observability/tasks/main.yml is what fails the
+      # deploy until that happens, rather than leaving it to memory.
+      #
+      # ACCEPTED COST, stated as arithmetic so nobody rediscovers it as a
+      # surprise: when the whole agent dies, the agent rule AND every family rule
+      # for that agent fire together. #189 asked whether to suppress the family
+      # rules in that case. It cannot be done in this shape:
+      # `count(family) and on() count(system_uptime{...})` returns an EMPTY
+      # result when the agent is dead, which is NoData, which noDataState:
+      # Alerting fires on anyway. Suppression would require noDataState: OK,
+      # which destroys the family rule's own absence detection — the two are
+      # mutually exclusive. So the co-fire is accepted and the SEVERITIES are
+      # what keep it cheap: one page, plus emails.
+      #
+      # NO DEEP LINKS, for the reason spelled out above the native-agent rules: a
+      # dashboard-only __dashboardUid__ is not representable and its rejection is
+      # boot-fatal for ALL provisioned rules.
+
+      # docker_n_containers is ENGINE-level (not per-container), emitted every
+      # collection interval whenever [[inputs.docker]] runs at all, and it churns
+      # no per-target labels — the same three properties that make system_uptime
+      # and vector_uptime_seconds good absence signals. Exactly one series exists
+      # (measured 2026-08-25: `count by (host) (docker_n_containers)` -> 1), so
+      # the threshold is 1 and there is no partial-loss case to size for.
+      #
+      # This rule also happens to catch the taginclude defect that
+      # obs-docker-metrics-unlabelled below owns, because a stripped host label
+      # makes the host="eq12_docker" selector stop matching. That overlap is
+      # harmless and deliberate — two detectors on one fault is the #174 posture,
+      # and neither is a substitute for the other: the unlabelled rule sees a
+      # label going wrong while the stream is healthy, this one sees the stream
+      # stopping while the label is fine.
+      #
+      # WHAT THIS ANCHOR DOES NOT COVER, stated rather than implied by an
+      # over-broad summary. docker_n_containers is produced by telegraf's ENGINE
+      # call (gatherInfo). The bulk of the family — docker_container_cpu/mem/
+      # net/blkio, the `perdevice_include`/`total_include` series — comes from a
+      # DIFFERENT call pair (ContainerList + ContainerStats). A failure confined
+      # to those leaves this rule green. That narrower split is not covered here
+      # and would need its own condition on a docker_container_* series; it is
+      # not added now because no such failure has been observed on this fleet,
+      # and an unobserved failure mode is a poor reason to double a rule. If one
+      # is ever seen, this comment is where to start.
+      - uid: obs-docker-metrics-absent
+        title: Docker metrics stopped arriving for eq12_docker
+        condition: C
+        for: 5m
+        # Alerting, not OK, and the #151 test settles it: [[inputs.docker]]
+        # exports docker_n_containers every 60s unconditionally whenever it runs,
+        # so absence is NEVER its healthy state. Contrast the rule directly below
+        # — count({__name__=~"docker_.+", host=""}) — whose series only EXISTS
+        # while something is broken and which is therefore correctly
+        # noDataState: OK. Same file, same family, opposite answer, because the
+        # question is about the SIGNAL and not about the family.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: The docker input on host=eq12_docker has stopped reporting to the engine for over 10 minutes.
+          description: |-
+            The docker input can die while the agent stays healthy, so this is separate from obs-telegraf-metrics-absent. On eq12_docker: `docker logs telegraf | grep -i docker` for socket or permission errors.
+            Most likely causes: the /var/run/docker.sock bind mount, or DOCKER_GID in the templated .env no longer matching the host's docker group after an image or OS bump.
+            SCOPE: this watches docker_n_containers, which telegraf produces from the ENGINE call (gatherInfo). The per-container series (docker_container_cpu/mem/net/blkio) come from a different call pair (ContainerList/ContainerStats) and can in principle fail while this one keeps flowing — that narrower case is NOT covered here.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s collection interval: ten samples of headroom,
+              # so a telegraf restart cannot empty the window. relativeTimeRange
+              # above must stay >= this lookbehind. `by (host)` around a pinned
+              # selector for the same reason as every rule above — widening the
+              # selector then evaluates each host on its own rather than letting
+              # a healthy peer mask a dead one (#160).
+              expr: 'count by (host) (last_over_time(docker_n_containers{host="eq12_docker"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — a null must not become a real 0, which would
+          # trip this `lt` threshold and read as a genuine count while the truth
+          # is that nothing came back at all. With no numeric value the rule falls
+          # through to noDataState, which is Alerting on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 1, i.e. the single engine-level series is gone. With one series the
+          # threshold and the noDataState catch the same fault by two paths; kept
+          # in the count shape anyway so every family rule in this file reads
+          # identically and so ONE static reconciler can check them all.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1
+
+      # THE ANCHOR FIELD IS THE WHOLE DESIGN OF THIS RULE, and the obvious choice
+      # is wrong. [[inputs.ping]] emits NINE fields, and they do not disappear
+      # together:
+      #
+      #   * PLUGIN CANNOT RUN (the measured #95 failure — no_new_privs makes the
+      #     kernel ignore the cap_net_raw file capability on /usr/bin/ping):
+      #     ping_result_code is still emitted, pinned at 2, and the other EIGHT
+      #     fields stop. Recorded in files/compose.yaml beside the security_opt
+      #     block, and independently visible in VictoriaMetrics: over 7 days on
+      #     the retired host="homelab-telegraf" label, result_code has 7391
+      #     samples against 7338 for percent_packet_loss and average_response_ms
+      #     — a 53-sample window where only result_code flowed.
+      #   * GENUINE 100% PACKET LOSS (the internet is down, plugin perfectly
+      #     healthy): measured 2026-08-25 with a disposable `telegraf --test`
+      #     against 192.0.2.1 (RFC5737 TEST-NET-1), with 8.8.8.8 in the same run
+      #     as a positive control that produced all nine fields —
+      #       > ping,url=192.0.2.1 packets_received=0i,packets_transmitted=10i,
+      #                            percent_packet_loss=100,result_code=1i
+      #     The five TIMING fields (average/minimum/maximum/standard_deviation,
+      #     ttl) are gone; percent_packet_loss survives, carrying 100.
+      #
+      # So, per family member:
+      #   ping_result_code        — survives BOTH failures. An absence rule on it
+      #                             is a guard that can never fire. NOT USED.
+      #   ping_average_response_ms — absent during a REAL outage. A rule on it
+      #                             would page on every ISP blip and could not
+      #                             distinguish that from a dead plugin. NOT USED.
+      #   ping_percent_packet_loss — present during a real outage, absent only
+      #                             when the plugin cannot execute. THIS ONE.
+      # Do not "simplify" this selector to result_code or to a ping_.+ regex; the
+      # regex has the same defect as result_code, because result_code matches it.
+      #
+      # THE COUNT IS THE ASSERTION, not mere presence: there are two targets
+      # (8.8.8.8 and 1.1.1.1, the `urls` list under [[inputs.ping]] in
+      # files/data/telegraf/telegraf.conf), and one target failing to resolve
+      # while the other works thins the family 2 -> 1 rather than emptying it.
+      # That threshold is reconciled against the actual urls list by a static
+      # guard in roles/services/observability/tasks/main.yml, so adding a third
+      # ping target FAILS the deploy until this number moves with it.
+      - uid: obs-ping-metrics-absent
+        title: Ping metrics stopped arriving for eq12_docker
+        condition: C
+        for: 5m
+        # Alerting, not OK, and the #151 test settles it: the ping input runs
+        # every 60s and emits percent_packet_loss whether the target answers or
+        # not — including 100 during a total outage, measured above — so absence
+        # is NEVER this signal's healthy state.
+        noDataState: Alerting
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: Fewer than 2 ping targets reporting from host=eq12_docker (expected 8.8.8.8 and 1.1.1.1).
+          description: |-
+            This is the plugin failing to RUN, not the internet being down — a real outage still reports percent_packet_loss=100, which is why this rule is anchored on that field and not on ping_result_code (which survives both, pinned at 2).
+            Check `docker logs telegraf | grep -i ping`. The usual cause is telegraf losing the cap_net_raw file capability on /usr/bin/ping: it is the one container in this stack deliberately WITHOUT no-new-privileges:true, because no_new_privs makes the kernel ignore file caps on exec (#95).
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # [10m] against a 60s interval, as above; relativeTimeRange must
+              # stay >= this lookbehind. `by (host)` around a pinned selector for
+              # the #160 reason. Note `count by (host)` and NOT `by (url)`: the
+              # point is the NUMBER of reporting targets collapsed onto one row,
+              # so that losing one of the two is a value of 1 rather than a
+              # silently-missing instance.
+              expr: 'count by (host) (last_over_time(ping_percent_packet_loss{host="eq12_docker"}[10m]))'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — same reasoning as the rule above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # < 2 = the two configured ping targets. LOW means one target stopped
+          # reporting, which the count shape exists to make legible; empty means
+          # the plugin is not running at all and falls through to noDataState.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 2
+
+      # ---------------------------------------------------------------------
       # WHERE TO LOOK, and it is almost certainly one word: `taginclude` under
       # [[inputs.docker]] in
       # ansible/roles/services/observability/files/data/telegraf/telegraf.conf.

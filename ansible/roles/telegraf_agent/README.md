@@ -350,3 +350,116 @@ without a second source), plus two `spd5118` DDR5 DIMM sensors and an `amdgpu`
 iGPU block that is the only host-side view of what CT 201's VAAPI workloads cost.
 Any dashboard written against eq12's five coretemp readings shows empty panels for
 n5pro unless it is written for both shapes.
+
+
+### The per-host COUNTS (#202)
+
+Two more per-host facts sit beside the substring lists, and they are counts
+rather than substrings because the failure they exist for is a family *thinning*
+rather than vanishing:
+
+| variable | eq12 | n5pro | what a low value means |
+| -------- | ---- | ----- | ---------------------- |
+| `telegraf_agent_expected_sensor_series` | 7 | 9 | chips went unreadable — an hwmon module renamed or stopped loading |
+| `telegraf_agent_acpi_fan_expected_count` | 5 | *(n/a)* | cooling devices went unreadable; `files/acpi_fan_state.sh` emits nothing for one it cannot read rather than a fabricated zero |
+
+Both default to `0`, and `0` is the "nobody declared this" value, not a plausible
+count: the arrival proofs compare for **equality**, so a declared 0 would be
+satisfied by an empty result — green precisely when the family had stopped. The
+role asserts both are non-zero before it will run.
+
+The fan count used to be the literal `'5'` inside the role's assert, with *the
+same 5* independently written into the `obs-fan-state-absent-eq12` alert rule —
+two copies of one board fact with nothing reconciling them, which is the
+#188/#194 matched-pair defect. Both now read this variable, and a static guard in
+`roles/services/observability` fails the deploy if the rule's threshold drifts
+from it.
+
+**The deploy assert compares EQUALITY while the alert rule compares `lt`, and the
+asymmetry is deliberate.** A sensor set can grow with no change to this repo: a
+7-day windowed count on eq12 (2026-08-25) returned the seven steady series at
+1050 samples each *plus* `it8622-isa-0a30` `temp1`/`temp2` at **one sample each**
+— the one-off forced `it87` binding recorded in `docs/eq12.md`. An instant
+`count()` hides that completely. Paging an operator for loading a module would be
+wrong, so the alert is one-sided; but a deploy is exactly the moment to notice
+that the declared model no longer matches the machine, so the deploy is strict.
+
+### The SMART proof anchors on `health_ok`, and the regex it replaced could not fail
+
+`smart_device_*` is the only family needing elevated privilege, and it fails in a
+shape that defeats the obvious check. Measured on eq12 2026-08-25 by running
+`telegraf --test` under `setpriv --reuid=65534` — the real failure mode, the unit
+losing its ambient capabilities so `smartctl` opens the device and the NVMe admin
+ioctl is denied:
+
+```
+> smart_device,device=nvme0 exit_status=2i
+```
+
+**One field of fourteen survives**, and the `model` and `serial_no` tags go with
+the rest. The arrival proof used to query `{__name__=~"smart_device_.+"}` and
+require a non-empty result — and `smart_device_exit_status` matches that regex.
+So the proof would have **passed on the exact capability regression its own
+`fail_msg` names as the first thing to check**. It now anchors on
+`smart_device_health_ok`, a field that only exists after a successful read.
+
+The two neighbouring failures are not silent, measured in the same run, and are
+deliberately not this proof's job:
+
+| case | result |
+| ---- | ------ |
+| `smartctl` runs but fails at `--scan` (`path_smartctl = /bin/false`) | plugin emits **nothing** — an ordinary absence |
+| `smartctl` missing (`path_smartctl = /nonexistent`) | telegraf **refuses to start**: `could not initialize input inputs.smart` — so `system_uptime` stops and the liveness rule pages |
+| unprivileged (`setpriv --reuid=65534`) | **`exit_status=2i` only** — the silent one, and what this anchor exists for |
+
+Known limit, stated rather than left implicit: the proof is `> 0` devices, not a
+pinned count, because both hosts have exactly one SMART device and there is no
+host_vars declaration of disks to compare against. With a *second* device
+installed, losing one of the two would not fail it. The fix at that point is a
+`telegraf_agent_smart_expected_devices` declaration plus the reconciler the
+sensors and fan counts already have — added in the same change that installs the
+disk, not retrofitted afterwards.
+
+### Freshness: every family, not just `system_uptime` (#207)
+
+Every family proof is issued shortly after a restart, and `flush_interval` is
+10s — so the process the run **replaced** has a final batch at most ~90s old,
+sitting comfortably inside every one of those windows. A regression that killed a
+family's production while leaving the agent healthy would be satisfied by samples
+a program that no longer exists had written.
+
+The role's original freshness gate covers `system_uptime` only, and its comment
+used to conclude that the family asserts inherited that proof because "every
+family rides the same batched output". That is true of **delivery** and false of
+**production**: an `[[inputs.exec]]` family is produced by a separate program,
+and `telegraf --test` rehearses it *outside* the unit — no `ProtectSystem=strict`,
+no `PrivateTmp`, no ambient capabilities. A confinement regression is exactly the
+class that survives the rehearsal and dies under the unit, which is why an
+arrival proof runs after the restart at all.
+
+So every family now carries its own anchor, in one loop rather than four copies:
+
+```
+min(timestamp(<BARE selector>))  >  telegraf_agent_restart_epoch
+```
+
+- **the selector must be BARE.** Measured in #194: wrapping it in
+  `last_over_time` makes VictoriaMetrics evaluate a subquery on a **5-minute
+  grid** and return the grid point, not the sample time — up to 5 minutes stale,
+  failing on a perfectly healthy restart.
+- **`min()`, not `max()`.** `max()` passes as soon as one series in the family has
+  turned over, which for a 9-series family is a proof about one ninth of it.
+
+**Count and freshness are complementary; neither is redundant.** The count asserts
+are the only thing that can see a series stale enough to have dropped out of
+VictoriaMetrics' 5m instant lookback entirely — a series that is not returned
+cannot drag down a `min()`. Freshness is the only thing that can see residual
+samples, which count perfectly. Deleting either leaves a real gap.
+
+A single loop introduces a failure mode four hand-written pairs did not have: a
+conditionally-built list that comes out short reports `ok` for every family it
+does not contain. So the list is checked against an **independently computed**
+arithmetic count (re-deriving the list would be circular) and every selector is
+checked against this host's own name. That guard runs unconditionally, including
+under `--check`, so a broken list is caught on a converged host rather than only
+on the run that happens to restart telegraf.

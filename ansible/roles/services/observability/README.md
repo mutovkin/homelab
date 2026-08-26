@@ -158,32 +158,134 @@ perfectly labelled — the state that existed for the whole life of the
 deployment). Every other telegraf-fed rule here aggregates the `host` dimension
 away, so nothing else can see telegraf alive but stamping the wrong host.
 
-The table below itemises **all twenty-two**. It is what someone consults to
+The table below itemises **all thirty-three**. It is what someone consults to
 answer "does this signal already have an absence owner?", which is exactly the
 question #178 got wrong once — so a rule missing from it is worse than a wrong
 total. Routing is no longer "all by email" — see
 [Notification channel](#notification-channel).
 
 **Absence ownership, so the table is not read as covering more than it does.**
-Absence is deliberately owned exactly once per signal, and two families are
-currently **unowned**:
+Absence is deliberately owned exactly once per signal. Every family with its
+OWN production mechanism now has an owner; the table records which rule, because
+"is this already covered?" is the question #178 got wrong once — so it also has
+to record what is **not** individually owned, or it overstates its own coverage.
 
 | signal | absence owner |
 | ------ | ------------- |
 | `system_uptime` (telegraf AGENT stream) | `obs-telegraf-metrics-absent` |
 | `http_response` (probe stream) | `obs-http-probe-absent` |
 | `vector_uptime_seconds` | `obs-vector-metrics-absent` |
-| **`docker_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
-| **`ping_*`** | **none — see [#189](https://github.com/mutovkin/homelab/issues/189)** |
+| `docker_*` | `obs-docker-metrics-absent` (#189) |
+| `ping_*` | `obs-ping-metrics-absent` (#189) — anchored on `ping_percent_packet_loss`, see below |
+| `rapl_power_watts` | `obs-rapl-power-absent-{eq12,n5pro}` (#194) |
+| `smart_device_*` | `obs-smart-metrics-absent-{eq12,n5pro}` (#202) — anchored on `smart_device_health_ok`, see below |
+| `sensors_temp*` | `obs-sensors-metrics-absent-{eq12,n5pro}` (#202) |
+| `acpi_fan_state_*` | `obs-fan-state-absent-eq12` (#202) |
+| `http_response` (probe stream) | `obs-http-probe-absent` |
+| `truenas_*` (graphite / poller) | `truenas-metrics-absent` / `truenas-poller-absent` |
+| **`cpu`, `disk`, `diskio`, `kernel`, `mem`, `processes`, `swap`, `net`, `netstat`, `zfs`** | **not individually owned — see below** |
 
-`obs-docker-metrics-unlabelled` is **not** an absence owner for `docker_*` — it
+**Why those last ones have no rule of their own, and what that is worth.** Every
+family above them is produced by a mechanism that can fail *on its own*: an
+external binary (`smartctl`, `/usr/bin/ping`), a library (`lm-sensors`), a shell
+script (`acpi_fan_state.sh`, `rapl_power.sh`), or a socket (`/var/run/docker.sock`).
+That is what makes a separate liveness rule necessary — #174's "two delivery
+paths need two liveness rules".
+
+The gopsutil-based inputs have no such mechanism: they read `/proc` and `/sys`
+in-process, with no external dependency, on the same collection tick and through
+the same code path as `[[inputs.system]]` — which *is* owned, by
+`obs-telegraf-metrics-absent*`. So they are covered by coupling rather than by a
+rule of their own.
+
+**That is a coupling argument, not a proof, and it is written down as such.** The
+coupling is strong but not total: `/proc/stat` becoming unreadable would take out
+`cpu` while `system_uptime` (from `/proc/uptime`) kept flowing. Nothing here would
+see that. It is accepted because the shared failure modes dominate and because
+none of these families is read by an alert rule either — but if one of them ever
+acquires a consumer, or a real per-input failure is ever observed, it needs an
+owner and this row is where to notice that.
+
+`obs-docker-metrics-unlabelled` is **not** the absence owner for `docker_*` — it
 catches those series arriving *mislabelled*, and its `noDataState: OK` is correct
-precisely because its signal only exists while something is broken. If
-`[[inputs.docker]]` dies on its own, `system_uptime` keeps flowing, both telegraf
-rules stay green, and nothing pages. Per-input death with a healthy agent is
-measured here, not hypothetical — `no_new_privs` once stripped setuid off
-`/usr/bin/ping` and eight ping metrics went NO DATA while the container stayed
-healthy.
+precisely because its signal only exists while something is broken. Absence is a
+different fault and `obs-docker-metrics-absent` owns it. Per-input death with a
+healthy agent is measured here, not hypothetical — `no_new_privs` once stripped
+the file capability off `/usr/bin/ping` and eight ping metrics went NO DATA while
+the container stayed healthy.
+
+**The ping anchor is the whole design of that rule, and the obvious field is
+wrong.** `[[inputs.ping]]` emits nine fields and they do not disappear together:
+
+| field | plugin cannot run | genuine 100% packet loss |
+| ----- | ----------------- | ------------------------ |
+| `ping_result_code` | **present**, pinned at 2 | **present**, 1 |
+| `ping_percent_packet_loss` | absent | **present**, 100 |
+| `ping_average_response_ms` and the four other timing fields | absent | absent |
+
+Both columns are measured, not argued. The left one twice over: the #95 incident
+recorded beside telegraf's `security_opt` block in `files/compose.yaml`, and a
+53-sample window in VictoriaMetrics itself where the retired
+`host="homelab-telegraf"` series carried 7391 `result_code` samples against 7338
+for the rest. The right one from a disposable `telegraf --test` against
+`192.0.2.1` (RFC5737 TEST-NET-1) on 2026-08-25, with `8.8.8.8` in the same run as
+a positive control that produced all nine fields.
+
+So an absence rule on `ping_result_code` is a guard that can never fire, and one
+on `ping_average_response_ms` would page on every ISP blip while being unable to
+tell that apart from a dead plugin. `ping_percent_packet_loss` is the only field
+that survives a real outage and disappears only when the plugin cannot execute.
+Do not "simplify" that selector — a `ping_.+` regex has the same defect, because
+`result_code` matches it.
+
+**The SMART anchor has the same shape, and it is measured too.** Running
+`telegraf --test` under `setpriv --reuid=65534` on eq12 (2026-08-25) — the real
+failure mode, the unit losing its ambient capabilities so `smartctl` opens the
+device and the NVMe admin ioctl is denied — emits exactly this and nothing else:
+
+```
+> smart_device,device=nvme0 exit_status=2i
+```
+
+One field of fourteen survives, and the `model`/`serial_no` tags go with the
+rest. So a presence check over `smart_device_.+` still matches and reports
+healthy while the disk data has stopped. That is not hypothetical: the deploy
+assert in `roles/telegraf_agent` used that regex until #207, which means it would
+have **passed on the capability regression its own `fail_msg` tells you to check**.
+The two neighbouring failures are not silent, measured in the same run — a
+`smartctl` that runs and fails at `--scan` emits nothing at all, and a *missing*
+`smartctl` stops telegraf initialising, which takes out `system_uptime` and pages
+via the agent rule.
+
+### Why every per-family absence rule is `severity: warning` (#189, #194, #202)
+
+The nine per-input absence owners are email-only, and the three agent-liveness
+rules are `critical`. That split is **derived**, not a default:
+
+- No rule in this folder reads `docker_*`, `ping_*`, `smart_device_*`,
+  `sensors_temp*`, `acpi_fan_state_*` or `rapl_power_watts` — they feed
+  dashboards. Nothing safety-relevant goes blind while one of them fires. That is
+  the same condition #193 used to demote `truenas-metrics-absent`.
+- The case that *is* worth waking someone — the agent or the whole machine gone —
+  is already owned at `critical` by `obs-telegraf-metrics-absent*`.
+
+**It is enforced, not remembered.** `tasks/main.yml` carries a static guard that
+fails the deploy if any rule outside the declared owners reads one of those
+families, because at that moment the grading becomes false and the owner has to
+be re-graded. It parses the rule YAML rather than grepping, since these files
+name the families throughout their prose.
+
+**The accepted cost, as arithmetic.** When a whole agent dies its liveness rule
+*and* every family rule for that host fire together — for eq12 that is one page
+plus four emails, batched at `group_interval: 5m`. Suppressing the family rules
+in that case was considered and is **not implementable** in this rule shape:
+`count(family) and on() count(system_uptime{...})` returns an empty result when
+the agent is dead, which is NoData, which `noDataState: Alerting` fires on
+anyway. Making it work would need `noDataState: OK`, which destroys the family
+rule's own absence detection. The two are mutually exclusive, so the co-fire is
+accepted and the severity split is what keeps it cheap. Merging the families into
+one rule per host would fix the count and produce a `[FIRING:4]` naming none of
+them — the #188 defect.
 
 | uid | rule | fires when | noData |
 | --- | ---- | ---------- | ------ |
@@ -200,6 +302,17 @@ healthy.
 | `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
 | `obs-telegraf-metrics-absent` | Telegraf metrics stopped arriving for eq12_docker (#178) | `min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-docker-metrics-unlabelled` | Docker metrics have lost their host label (#178) | `count({__name__=~"docker_.+", host=""})` > 0, `for: 5m` | OK |
+| `obs-docker-metrics-absent` | Docker metrics stopped arriving for eq12_docker (#189) | `count by (host) (last_over_time(docker_n_containers{host="eq12_docker"}[10m]))` < 1, `for: 5m` | **Alerting** |
+| `obs-ping-metrics-absent` | Ping metrics stopped arriving for eq12_docker (#189) | `count by (host) (last_over_time(ping_percent_packet_loss{host="eq12_docker"}[10m]))` < 2, `for: 5m` | **Alerting** |
+| `obs-telegraf-metrics-absent-eq12` | Telegraf metrics stopped arriving for eq12 (#186) | `min by (host) (lag(system_uptime{host="eq12"}[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-telegraf-metrics-absent-n5pro` | Telegraf metrics stopped arriving for n5pro (#186) | `min by (host) (lag(system_uptime{host="n5pro"}[24h]))` > 600, `for: 5m` | **Alerting** |
+| `obs-rapl-power-absent-eq12` | RAPL power domains stopped arriving for eq12 (#194) | `count by (host) (last_over_time(rapl_power_watts{host="eq12"}[10m]))` < 3, `for: 5m` | **Alerting** |
+| `obs-rapl-power-absent-n5pro` | RAPL power domains stopped arriving for n5pro (#194) | `count by (host) (last_over_time(rapl_power_watts{host="n5pro"}[10m]))` < 1, `for: 5m` | **Alerting** |
+| `obs-smart-metrics-absent-eq12` | SMART attributes stopped arriving for eq12 (#202) | `count by (host) (last_over_time(smart_device_health_ok{host="eq12"}[10m]))` < 1, `for: 5m` | **Alerting** |
+| `obs-smart-metrics-absent-n5pro` | SMART attributes stopped arriving for n5pro (#202) | `count by (host) (last_over_time(smart_device_health_ok{host="n5pro"}[10m]))` < 1, `for: 5m` | **Alerting** |
+| `obs-sensors-metrics-absent-eq12` | Sensor temperatures stopped arriving for eq12 (#202) | `count by (host) (last_over_time({__name__=~"sensors_temp[0-9]+_input", host="eq12"}[10m]))` < 7, `for: 5m` | **Alerting** |
+| `obs-sensors-metrics-absent-n5pro` | Sensor temperatures stopped arriving for n5pro (#202) | `count by (host) (last_over_time({__name__=~"sensors_temp[0-9]+_input", host="n5pro"}[10m]))` < 9, `for: 5m` | **Alerting** |
+| `obs-fan-state-absent-eq12` | ACPI fan state stopped arriving for eq12 (#202) | `count by (host) (last_over_time(acpi_fan_state_state{host="eq12"}[10m]))` < 5, `for: 5m` | **Alerting** |
 | `obs-alert-delivery-heartbeat` | Alert delivery heartbeat (#152) | `vector(1)` > 0 — **always**, by design | **Alerting** |
 | `obs-alert-delivery-failing` | Alert notification delivery failing (#152) | `sum by (integration) (increase(grafana_alerting_notifications_failed_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-alert-delivery-telemetry-absent` | Alert delivery telemetry stopped (#152) | `min(lag(grafana_alerting_alertmanager_receivers[24h]))` > 600, `for: 5m` | **Alerting** |
@@ -210,8 +323,8 @@ healthy.
 | `truenas-pool-degraded` | TrueNAS pool is not healthy (#174) | `min by (pool) (truenas_pool_healthy{host="truenas"})` < 1, `for: 0s` | OK |
 | `truenas-scrub-overdue` | TrueNAS pool scrub is overdue (#174) | `max by (pool) (truenas_pool_scrub_age_seconds{host="truenas"})` > 3024000 (35d), `for: 1h` | OK |
 
-`execErrState: Alerting` on all twenty-two — a datasource that cannot be reached
-is not evidence of health. Counted, not assumed: 22 uids and 22
+`execErrState: Alerting` on all thirty-three — a datasource that cannot be reached
+is not evidence of health. Counted, not assumed: 33 uids and 33
 `execErrState: Alerting` lines across the seven files in `alerting/`, with no
 other value present.
 
