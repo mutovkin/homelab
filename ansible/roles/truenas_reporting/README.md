@@ -48,6 +48,25 @@ Both read off the live schema, both silent failures if accepted:
 An exporter configured either way deploys green, stays healthy, and simply costs
 storage forever — which is why these are asserts, not documentation.
 
+## What is deliberately NOT ingested
+
+Before adding a chart family to `matching_charts`, check the "Deliberately ABSENT" block
+beside it in [host_vars/truenas/vars.yml](../../inventory/host_vars/truenas/vars.yml) —
+some omissions are decisions, not gaps.
+
+The **UPS graphs** are the one that most often looks like an oversight. TrueNAS 26.0's
+`reporting.netdata_graphs` lists eight of them (`upscharge`, `upsload`, `upsvoltage`, …)
+and none is ingested: **NUT is the single source of truth for UPS telemetry (#177)**. The
+UPS is USB-attached to n5pro, not to the NAS, so the appliance could only ever be a
+second-hand NUT client of the same `upsd` — and #194 measured that this UPS reports only
+`battery.charge`, `battery.runtime` and `ups.status`, so five of the eight graphs are
+structurally empty here anyway. The exclusion needs no pattern and no `namedrop`: UPS chart
+IDs (`ups*`/`nut*`/`upsd*`) are matched by nothing in `matching_charts` — stock netdata
+naming, inferred rather than read off this appliance's stream; the *measured* check is the
+zero UPS series in the live TSDB, and a naming surprise would show up as an unexpected
+series rather than a silent one.
+Rationale and the open gap it leaves (#225): [docs/ups.md](../../../docs/ups.md#telemetry).
+
 ## Privilege
 
 The appliance-side account (`ansible-ctrl`) holds **`REPORTING_WRITE` only**.

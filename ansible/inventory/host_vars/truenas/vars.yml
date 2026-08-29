@@ -96,11 +96,65 @@ truenas_exporter_update_every: 60
 # longer the capture pattern. Nine families, and each one is here because it
 # actually appeared, not because a doc said it might.
 #
-# Deliberately ABSENT, both confirmed by their absence from the capture:
+# Deliberately ABSENT. The first two are confirmed by their absence from the
+# capture; the third is absent by DECISION, and capture-absence says nothing
+# about it either way — the capture ran under THIS pattern, which no UPS chart
+# could have passed:
 #   nfsd.*      TrueNAS 26.0 exports no NFS chart at all. ens19 throughput
 #               (the host-only NFS bridge) is the proxy; see #175.
 #   pool health TRUENAS_pool_usage carries used/total/available but no state
 #               or scrub. Those come from pool.query in #174.
+#   ups*        The 8 netdata UPS graphs. Excluded by decision, not by the
+#               appliance's doing — see the block below. #177.
+#
+# UPS — EXCLUDED BY DECISION (#177), and this line is where it is enforced.
+# reporting.netdata_graphs lists 8 UPS graphs (upscharge, upscurrent,
+# upsfrequency, upsload, upsruntime, upstemperature, upsvoltage, plus the
+# battery/input/output identifiers). Their netdata chart IDs are stock
+# collector families — ups*/nut*/upsd* — not truenas_-prefixed (the
+# appliance's own custom charts are arcstats, disk_temp, meminfo, pool_usage,
+# disk_stats, cpu_usage). No pattern below matches them, so nothing UPS ever
+# leaves the appliance. That is the whole mechanism and it is deliberate: DO
+# NOT add a ups*/nut* pattern here, and do not add a compensating namedrop on
+# the telegraf side either — gate #2's namepass passes anything gate #1 emits
+# by construction (the graphite template prefixes every measurement truenas_),
+# so this pattern is the only real control.
+#
+# MEASURED vs INFERRED, because the two halves of that mechanism are not the
+# same kind of claim. The chart-ID naming is INFERRED from upstream netdata's
+# collector naming — it was NOT read off this appliance's stream, and it cannot
+# be: the NAS has no UPS service configured, so those charts are not on the
+# wire to inspect. What IS measured is the outcome — a VictoriaMetrics __name__
+# query on 2026-08-29 returned zero UPS/NUT/battery series fleet-wide — and that
+# live check, not the naming argument, is the backstop. Re-run it rather than
+# trusting this comment.
+#
+# If the inference is ever wrong the failure mode is LOUD, not silent, which is
+# why no belt-and-braces namedrop is warranted: a hypothetical truenas_-prefixed
+# UPS chart would pass both gates and show up as an unexpected series — the same
+# rename-visibility philosophy as telegraf's catch-all templates ("a rename
+# should look wrong on a dashboard, not vanish").
+#
+# Why excluded: NUT is the single source of truth for UPS telemetry. The UPS
+# is USB-attached to n5pro, which runs upsd; TrueNAS is not attached to it and
+# could only ever be a second-hand NUT client of that same upsd — a second
+# view of one device, and no new fact.
+#
+# And most of those graphs cannot carry data on this hardware regardless. #194
+# measured the full `upsc goldenmate` variable set (Goldenmate 1500VA via the
+# iDowell HID 0.2 usbhid-ups subdriver): battery.charge, battery.charge.low,
+# battery.runtime, battery.type, ups.status, device.* — and nothing else. No
+# ups.load, no input/output voltage, no current, no frequency, no temperature.
+# Five of the eight graphs are structurally empty here, and #177's premise
+# ("charge, load, voltage, runtime, temperature") is corrected by that
+# measurement.
+#
+# The honest cost, stated so nobody mistakes this for coverage: NUT telemetry
+# is not in the TSDB AT ALL today — telegraf_agent has no NUT input, and a
+# VictoriaMetrics __name__ query on 2026-08-29 returned zero UPS/NUT/battery
+# series fleet-wide. Excluding these graphs costs nothing; it also closes
+# nothing. #225 closes it, at the host that owns the UPS. Background and the
+# full rationale: docs/ups.md ("Telemetry").
 # PATTERNS ARE PREFIXES WITHOUT A TRAILING DOT, and that is load-bearing.
 # `truenas_pool_usage.*` matched NOTHING: netdata requires the dot to be present
 # in the chart ID, and that chart's ID has no sub-part (its graphite path is

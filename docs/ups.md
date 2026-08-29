@@ -41,6 +41,92 @@ Power loss → UPS switches to battery
   → N5 Pro upsmon (master) waits for slaves to disconnect → executes SHUTDOWNCMD → shuts down
 ```
 
+## Telemetry
+
+**Decision (#177): NUT is the single source of truth for UPS telemetry. The TrueNAS
+netdata UPS graphs are deliberately EXCLUDED from metrics ingest.** This is a choice, not
+an oversight — if you are here because you noticed the NAS exports UPS graphs and we do not
+ingest them, that is the intent.
+
+### What this UPS actually reports
+
+#194 measured the complete `upsc goldenmate` variable set on the live hardware (Goldenmate
+1500VA, driven by `usbhid-ups` with the **`iDowell HID 0.2`** subdriver). It is small:
+
+```text
+battery.charge: 100        battery.charge.low: 30     battery.runtime: 60
+battery.type: Lion         ups.status: OL             device.model: Smart-Battery
+device.mfr: -BMS-          driver.name: usbhid-ups    driver.version.data: iDowell HID 0.2
+```
+
+TrueNAS 26.0's `reporting.netdata_graphs` lists eight UPS graphs, whose names promise far
+more than this UPS can supply:
+
+| netdata graph | NUT variable it would need | Exists on this hardware? |
+|---------------|----------------------------|--------------------------|
+| `upscharge`   | `battery.charge`           | **Yes** — 100 %          |
+| `upsruntime`  | `battery.runtime`          | **Yes** — seconds        |
+| (status)      | `ups.status`               | **Yes** — `OL`/`OB`/`LB` |
+| `upsload`     | `ups.load` / `ups.realpower` | No                     |
+| `upsvoltage`  | `input.voltage`, `output.voltage` | No                |
+| `upscurrent`  | `input.current`, `output.current` | No                |
+| `upsfrequency`| `input.frequency`          | No                       |
+| `upstemperature` | `ups.temperature`       | No                       |
+
+So **five of the eight graphs are structurally empty on this hardware**. #177 was filed
+assuming the UPS surfaces "charge, load, voltage, runtime, temperature"; three of those five
+do not exist here, and that premise is corrected by the #194 measurement above. Do not build
+a load/voltage/temperature panel — no configuration change can populate it.
+
+### Why the TrueNAS path adds nothing
+
+The UPS is **USB-attached to n5pro**, which runs the driver and `upsd`. The NAS (VM 200 on
+n5pro) has no UPS of its own; the only way it could report UPS data is as a *second-hand NUT
+client of the same `upsd`* — the identical three numbers, one hop further from the sensor,
+stamped with the appliance's identity. It is a second view of one device, not a second
+device. eq12 is in the same position (network slave, no local UPS).
+
+### Where the exclusion is enforced
+
+At the appliance-side chart allowlist — `truenas_exporter_matching_charts` in
+[`ansible/inventory/host_vars/truenas/vars.yml`](../ansible/inventory/host_vars/truenas/vars.yml),
+gate #1 of the two-gate TrueNAS ingest path (see
+[`ansible/roles/truenas_reporting/README.md`](../ansible/roles/truenas_reporting/README.md)).
+
+The exclusion is **by construction**: netdata's UPS chart IDs belong to its stock collector
+families (`ups*` / `nut*` / `upsd*`), and none of the allowlist's patterns
+(`system.* cpu.* disk.* disk_temp* net.* nvme* zfs* truenas*`) matches them — TrueNAS's own
+custom `truenas_`-prefixed charts are arcstats, disk_temp, meminfo, pool_usage, disk_stats
+and cpu_usage, and UPS is not among them. Nothing UPS-shaped ever leaves the appliance, so
+no extra machinery (a `namedrop`, an assert, a narrowed pattern) is warranted or wanted. The
+downstream telegraf `namepass` is a backstop only: it passes anything gate #1 emits by
+construction, because the graphite template prefixes every measurement `truenas_`.
+
+**Which half of that is measured.** The chart-ID naming above is **inferred** from upstream
+netdata's collector naming — it was not read off this appliance's stream, and it cannot be:
+the NAS has no UPS service configured, so those charts are not on the wire to inspect. The
+**measured** claim is the outcome, and it is the one to trust and to re-run: verified against
+the live TSDB on 2026-08-29, the `__name__` label on VictoriaMetrics contains **zero**
+UPS/NUT/battery series, and the 59 `truenas_*` families are arcstats, cpu, disk, meminfo,
+pool and poller — none UPS.
+
+That split is also why no belt-and-braces `namedrop` is warranted. If the naming inference
+were ever wrong — a future TrueNAS release shipping a `truenas_`-prefixed UPS chart — it
+would pass both gates and appear as an unexpected series on a dashboard. The failure mode is
+**loud, not silent**, which is the same rename-visibility philosophy as telegraf's catch-all
+graphite templates: a rename should look wrong on a dashboard, not vanish.
+
+### The gap this leaves — stated, not papered over
+
+**NUT telemetry is not exported to VictoriaMetrics at all today.** `roles/telegraf_agent`
+has no NUT input, so `battery.charge`, `battery.runtime` and `ups.status` exist only in
+`upsc` output on n5pro. Grafana therefore has no UPS panel and no alert for the UPS leaving
+`OL`. Excluding the netdata graphs costs nothing (they would carry the same three numbers,
+second-hand) — but it does not close this gap either.
+
+Tracked as **#225**: export the three real variables from n5pro, the host that owns the UPS,
+via the native telegraf agent that already runs there.
+
 ## Ansible Configuration
 
 The `nut` role in `ansible/roles/nut/` manages everything. Behavior is driven by `nut_role` in host variables.
