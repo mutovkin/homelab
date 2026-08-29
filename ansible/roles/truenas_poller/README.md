@@ -55,14 +55,27 @@ and `disk.smart_attributes` return "Method does not exist"). `truenas_alert_acti
 therefore reports the middleware's internal ~90-minute smartctl scan — its
 *verdict*, not the underlying attributes. Explicitly NOT provided: reallocated /
 pending / offline-uncorrectable / UDMA CRC counts, or any sector-level trend
-data. Klass→level pairs are pinned in `SMART_ALERT_KLASSES` (from middleware
+data — those stay the long-term goal and are tracked in #219 (with the re-probe
+recipe for each TrueNAS upgrade); root-exec workarounds on the appliance are
+settled-rejected, not merely unimplemented.
+Klass→level pairs are pinned in `SMART_ALERT_KLASSES` (from middleware
 `release/26.0.0-BETA.2`); extending coverage is a deliberate code change.
 Dismissing an alert in the TrueNAS UI zeroes the series — dismissal is the ack
-mechanism. The `truenas-smart-degradation` rule over this series is
-deliberately NOT in this change: deferred 2026-08-24 to the alerting-file work
-batched behind #187 (which rewrites `alerting/*.yaml` wholesale); #183 stays
-open until it lands, and the rule must inherit the dismissal semantics by
-firing on value > 0.
+mechanism.
+
+**The consuming rule exists.** `truenas-smart-degradation`, in
+`roles/services/observability/files/data/grafana/provisioning/alerting/truenas-health.yaml`,
+aggregates `max by (klass) (last_over_time(truenas_alert_active{host="truenas"}[10m]))`
+and fires on **any value > 0**, regardless of `level` — one alert instance per
+klass, so the notification names which class the middleware raised (the policy's
+`group_by` carries `klass` for that; the two are a matched pair enforced by the
+role's deploy-time group_by assert). It inherits the dismissal semantics
+directly: acking in the TrueNAS UI zeroes the series and the alert clears.
+`noDataState` is `OK` — **absence is owned by `truenas-poller-absent`**, the same
+delivery path, so no second liveness rule was added. Repointing that expr at a
+different path means re-deriving its liveness owner in the same change (#174's
+orphaned-guard trap). Watched fire and return to Normal on a synthetic series
+before being trusted (#183).
 
 **Five series: 4 pinned + 1 catch-all.** `SMARTUnrecognized` counts un-dismissed
 alerts whose klass starts with `SMART` but is not one of the four. The pinned map
