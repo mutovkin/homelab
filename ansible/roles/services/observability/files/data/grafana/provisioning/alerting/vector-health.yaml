@@ -84,10 +84,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Vector discarded events in the last 15 minutes — log data was lost.
+          summary: Vector on {{ $labels.host }} discarded events in the last 15 minutes — log data was lost.
           description: |-
-            {{ $labels.component_id }}, intentional={{ $labels.intentional }}.
-            true: the self-ingestion throttle is bounding a flood — find the flood, never raise the threshold. false: real pipeline loss — `docker logs vector` on eq12_docker.
+            {{ $labels.component_id }} on {{ $labels.host }}, intentional={{ $labels.intentional }}.
+            true: the self-ingestion throttle is bounding a flood — find the flood, never raise the threshold. false: real pipeline loss — read Vector's log on that host: `docker logs vector` on eq12_docker, `journalctl -u vector` on eq12/n5pro/n5pro_docker.
             If an ingest-stalled or metrics-absent alert fires alongside, this is a crash loop, not a flood.
         labels:
           severity: critical
@@ -103,11 +103,22 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              # `intentional` is IN the by-clause on purpose: the annotation tells the
-              # operator to read that tag to tell a throttle bound from real loss,
-              # and a label aggregated away renders EMPTY rather than failing.
+              # `host` and `intentional` are BOTH in the by-clause on purpose: the
+              # annotation renders each of them, and a label aggregated away renders
+              # EMPTY rather than failing — a notification that silently drops the
+              # tag separating a throttle bound from real loss, or the machine to go
+              # look at. `host` also stops the FOUR Vector instances collapsing into
+              # one series per component_id (#217). Be precise about what that fixed:
+              # `sum by (component_id)` still went over 0 whenever ANY host discarded,
+              # so the fleet-level signal was never lost — what was lost was WHICH
+              # instance, and two hosts discarding at once merged into a single
+              # notification naming neither. component_id is `victorialogs` on every
+              # instance and the remediation above is per-host (the log to read is not
+              # even in the same place on all four). Both labels are notification
+              # policy group_by keys, so two hosts discarding now produce TWO
+              # notifications.
               # Same reason error_type is kept on the rule below.
-              expr: "sum by (component_id, intentional) (increase(vector_component_discarded_events_total[15m]))"
+              expr: "sum by (host, component_id, intentional) (increase(vector_component_discarded_events_total[15m]))"
               instant: true
               range: false
               intervalMs: 60000
@@ -171,10 +182,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Vector component {{ $labels.component_id }} reported errors ({{ $labels.error_type }}).
+          summary: Vector component {{ $labels.component_id }} on {{ $labels.host }} reported errors ({{ $labels.error_type }}).
           description: |-
             This counter catches sink auth failures — the shape of the 30-day silent 401 — and VRL remap aborts, both of which drop data silently.
-            `docker logs vector` has the error text; then confirm lines are still landing in VictoriaLogs.
+            The error text is in Vector's log on {{ $labels.host }} — `docker logs vector` on eq12_docker, `journalctl -u vector` on eq12/n5pro/n5pro_docker; then confirm lines are still landing in VictoriaLogs.
           runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/vector-057-silent-log-pipeline-failure.md
         labels:
           severity: critical
@@ -190,11 +201,19 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              # error_type MUST be in the by-clause: the annotation renders
-              # {{ $labels.error_type }}, and a label aggregated away renders
-              # EMPTY rather than failing — a notification that silently drops
-              # the one field separating a sink auth failure from a remap abort.
-              expr: "sum by (component_id, error_type) (increase(vector_component_errors_total[15m]))"
+              # host and error_type MUST both be in the by-clause: the annotation
+              # renders {{ $labels.host }} and {{ $labels.error_type }}, and a label
+              # aggregated away renders EMPTY rather than failing — a notification
+              # that silently drops the one field separating a sink auth failure
+              # from a remap abort, or the machine it happened on. `host` also stops
+              # the FOUR Vector instances collapsing into one series per component
+              # (#217). Precisely: `sum by (component_id)` still exceeded 0 whenever
+              # ANY host errored, so the signal itself was never suppressed — what it
+              # hid was WHICH instance, sending the operator to the wrong box, and it
+              # merged two hosts erroring at once into one notification naming
+              # neither. Both labels are notification policy group_by keys, so two
+              # hosts erroring now produce TWO notifications.
+              expr: "sum by (host, component_id, error_type) (increase(vector_component_errors_total[15m]))"
               instant: true
               range: false
               intervalMs: 60000
@@ -341,8 +360,9 @@ groups:
       # THE FAILURE THIS AVOIDS IS NOT NoData, AND THAT IS THE WHOLE POINT. The
       # obvious reading — "the metric vanishes, the rule goes NoData, and
       # noDataState: OK silently swallows it" — is WRONG, and was measured wrong
-      # rather than reasoned wrong. This expression aggregates `by (component_id)`
-      # with NO host filter, and only the eq12_docker CONTAINER moved to 0.58.0: the
+      # rather than reasoned wrong. At the time this expression aggregated
+      # `by (component_id)` with NO host label (#217 has since added one — see
+      # below), and only the eq12_docker CONTAINER moved to 0.58.0: the
       # three native vector_agent shippers are pinned at 0.57.0
       # (roles/vector_agent/defaults/main.yml) and keep exporting the old name. So
       # on the old name, post-upgrade and past VM's 5m staleness window (measured
@@ -358,8 +378,30 @@ groups:
       # healthy-looking aggregate, not an absence anything owns. (Total death of an
       # instance IS still owned, per-host, by obs-vector-metrics-absent — it is this
       # metric-family-specific dropout that nothing covered.)
-      # Per-host attribution for this rule is tracked separately (#217); it is what
-      # would have made the dropout visible instead of merely survivable.
+      # PER-HOST GROUPING LANDED IN #217 — and be precise about what it buys,
+      # because the tempting reading is wrong. `by (host, component_id)` gives two
+      # things: PER-HOST EVALUATION (each instance's buffer is judged against the
+      # 128MiB threshold on its own, never averaged into or masked by its peers)
+      # and ATTRIBUTION (the alert names the machine; `host` is a
+      # notification-policy group_by key since #198, so two hosts filling produce
+      # TWO notifications rather than one [FIRING:2] naming neither — component_id
+      # is `victorialogs` on all four instances, so before #217 the summary told an
+      # operator only that a buffer SOMEWHERE was filling, while the runbook it
+      # links is a single-host procedure).
+      # What it does NOT buy is detection of the dropout described above. This rule
+      # is `noDataState: OK`, so a per-host series that stops arriving goes stale
+      # and RESOLVES TO NORMAL — silently, exactly as before. Grouping changes the
+      # loss from an invisible shift in an aggregate's composition into an
+      # observable stopped series, which is worth having for anyone who goes
+      # looking; it does not make anything go looking. If eq12_docker's buffer
+      # gauge disappears again, this rule quietly stops covering eq12_docker.
+      # The family-specific dropout itself remains UNOWNED — #222. Note that
+      # obs-vector-metrics-absent does not close it either: that rule watches
+      # vector_uptime_seconds, and #216's whole point is that an instance can keep
+      # exporting uptime while one metric family it publishes dies.
+      # The 128MiB threshold stays a PER-INSTANCE threshold and does not change:
+      # all four configure the same max_size 268435488 (observability's
+      # files/data/vector/vector.yaml and vector_agent's templates/vector.yaml.j2).
       #
       # The swap was verified as a drop-in on the live 0.57.0 fleet BEFORE the bump,
       # because "both read 0" would not have distinguished a shared gauge from two
@@ -386,10 +428,10 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: Vector buffer {{ $labels.component_id }} is over half full (128MB of 256MB).
+          summary: Vector buffer {{ $labels.component_id }} on {{ $labels.host }} is over half full (128MB of 256MB).
           description: |-
             The sink is rejecting or stalling; when the buffer fills, sources stop reading and events are lost at the source.
-            Fix the sink before that — check VictoriaLogs is up and authenticating; `docker logs vector` names the error.
+            Fix the sink before that — check VictoriaLogs is up and authenticating; Vector's log on {{ $labels.host }} names the error (`docker logs vector` on eq12_docker, `journalctl -u vector` on eq12/n5pro/n5pro_docker).
           runbook_url: https://github.com/mutovkin/homelab/blob/master/docs/solutions/integration-issues/vector-wedged-disk-buffer-reset.md
         labels:
           severity: warning
@@ -405,7 +447,7 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              expr: "max by (component_id) (vector_buffer_size_bytes)"
+              expr: "max by (host, component_id) (vector_buffer_size_bytes)"
               instant: true
               range: false
               intervalMs: 60000
