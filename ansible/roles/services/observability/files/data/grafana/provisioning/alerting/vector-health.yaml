@@ -18,8 +18,10 @@ apiVersion: 1
 # ALL FOUR NAMES VERIFIED against the live 0.57.0 binary, not taken from the
 # issue (#151 warns Vector has renamed internal metrics across releases, so a
 # version bump means re-checking them):
-#   vector_uptime_seconds, vector_buffer_byte_size — present in VictoriaMetrics
-#     immediately after the first apply.
+#   vector_uptime_seconds, vector_buffer_size_bytes — present in VictoriaMetrics
+#     immediately after the first apply. (This row read vector_buffer_byte_size
+#     until #216; see the note on obs-vector-buffer-filling for why it changed and
+#     why the warning above is not hypothetical.)
 #   vector_component_errors_total, vector_component_discarded_events_total —
 #     absent in health (see the NoData note below), so they were forced on a
 #     throwaway container instead: a throttle at threshold 5 emitted
@@ -332,6 +334,31 @@ groups:
       # files/data/vector/vector.yaml (max_size: 268435488). CHANGE BOTH TOGETHER
       # — this threshold is 50% of that number and nothing enforces the
       # relationship.
+      #
+      # THE METRIC IS vector_buffer_size_bytes, NOT vector_buffer_byte_size (#216).
+      # Vector 0.58.0 REMOVED the deprecated buffer_byte_size/buffer_events gauges
+      # ("Configurations using it now fail validation" applies to the removed sink;
+      # the gauges simply stop being exported). This rule is noDataState: OK — for
+      # the good reason documented at the top of this file — so querying the removed
+      # name does not fail loudly, it goes NoData -> OK and the disk-buffer guard
+      # stays green forever while watching nothing. A version bump, not a code
+      # change, would have silently disarmed it: the upgrade is the thing to fear.
+      #
+      # The swap was verified as a true drop-in on the live 0.57.0 fleet BEFORE the
+      # bump, because "both read 0" would not have distinguished a shared gauge from
+      # two unrelated ones (CLAUDE.md: an experiment that cannot discriminate is not
+      # evidence). What discriminates:
+      #   max_over_time(...[30d]) -> 328952 bytes for component_id=victorialogs on
+      #     BOTH names — the same non-zero peak, not a shared idle zero.
+      #   count(vector_buffer_byte_size != vector_buffer_size_bytes) -> empty, i.e.
+      #     zero samples anywhere in retention where the two disagree.
+      # And `count by (host)` returned 2 series on all FOUR Vector instances, which
+      # is the load-bearing one: the three native vector_agent shippers are pinned at
+      # 0.57.0 (roles/vector_agent/defaults/main.yml) and only the eq12_docker
+      # container moves to 0.58.0, so this expression has to be correct on both
+      # versions at once. It is — 0.57 emits the new name alongside the deprecated
+      # one for back-compat, per Vector's own docs/specs/buffer.md.
+      # When the agents are eventually bumped, nothing here needs to change.
       - uid: obs-vector-buffer-filling
         title: Vector disk buffer filling
         condition: C
@@ -362,7 +389,7 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              expr: "max by (component_id) (vector_buffer_byte_size)"
+              expr: "max by (component_id) (vector_buffer_size_bytes)"
               instant: true
               range: false
               intervalMs: 60000
