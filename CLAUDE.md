@@ -300,6 +300,22 @@ Hard-won lessons — check here before debugging from scratch.
   (`vector_component_errors_total`) can't carry `noDataState: Alerting` — absence IS its
   healthy state. Give those `noDataState: OK` and put liveness on a separate,
   continuously-exported series (`min(lag(vector_uptime_seconds[24h]))`).
+  Sharper corollary (#216), and it inverts the intuition above: **an upstream metric
+  REMOVAL on a version-skewed fleet does not produce NoData at all.** Vector 0.58.0
+  dropped the deprecated `buffer_byte_size` gauge, but only the eq12_docker CONTAINER
+  floats — the three native `vector_agent` shippers are pinned at 0.57.0 and kept
+  exporting it. `max by (component_id) (vector_buffer_byte_size)` therefore still
+  returned 2 series of plausible zeros (measured 21:52:24Z, past VM's 5m staleness
+  window): the rule evaluated normally, changed no state, logged no error, and was
+  simply blind to the one instance the threshold was about. `noDataState` never
+  engages, so it protects nothing. Any UNLABELLED aggregate over deliberately
+  version-skewed instances can lose a member in silence — grep the alert/dashboard
+  corpus for every removed name BEFORE deploying a bump, and prefer `by (host, …)`.
+  Two timing traps in the same measurement: an instant query inside VM's 5m staleness
+  lookback shows the last pre-upgrade sample and it looks live (use
+  `last_over_time(...[90s])`), and a local Grafana API call needs
+  `-H "Host: $GRAFANA_DOMAIN"` or it 301s to the public URL and returns HTML.
+  See [docs/solutions/integration-issues/removed-metric-did-not-go-nodata-mixed-version-fleet.md](docs/solutions/integration-issues/removed-metric-did-not-go-nodata-mixed-version-fleet.md).
 - **`--check` overstates `docker_compose_v2` churn: a predicted `Recreate` is not a real
   one.** Dry-runs of `services/*` roles routinely report `Pulling` + `Recreate` for
   containers a real run then leaves untouched (`ok`, same container ID, same `.Created`).
