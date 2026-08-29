@@ -18,8 +18,10 @@ apiVersion: 1
 # ALL FOUR NAMES VERIFIED against the live 0.57.0 binary, not taken from the
 # issue (#151 warns Vector has renamed internal metrics across releases, so a
 # version bump means re-checking them):
-#   vector_uptime_seconds, vector_buffer_byte_size — present in VictoriaMetrics
-#     immediately after the first apply.
+#   vector_uptime_seconds, vector_buffer_size_bytes — present in VictoriaMetrics
+#     immediately after the first apply. (This row read vector_buffer_byte_size
+#     until #216; see the note on obs-vector-buffer-filling for why it changed and
+#     why the warning above is not hypothetical.)
 #   vector_component_errors_total, vector_component_discarded_events_total —
 #     absent in health (see the NoData note below), so they were forced on a
 #     throwaway container instead: a throttle at threshold 5 emitted
@@ -332,6 +334,47 @@ groups:
       # files/data/vector/vector.yaml (max_size: 268435488). CHANGE BOTH TOGETHER
       # — this threshold is 50% of that number and nothing enforces the
       # relationship.
+      #
+      # THE METRIC IS vector_buffer_size_bytes, NOT vector_buffer_byte_size (#216).
+      # Vector 0.58.0 removed the deprecated buffer_byte_size/buffer_events gauges.
+      #
+      # THE FAILURE THIS AVOIDS IS NOT NoData, AND THAT IS THE WHOLE POINT. The
+      # obvious reading — "the metric vanishes, the rule goes NoData, and
+      # noDataState: OK silently swallows it" — is WRONG, and was measured wrong
+      # rather than reasoned wrong. This expression aggregates `by (component_id)`
+      # with NO host filter, and only the eq12_docker CONTAINER moved to 0.58.0: the
+      # three native vector_agent shippers are pinned at 0.57.0
+      # (roles/vector_agent/defaults/main.yml) and keep exporting the old name. So
+      # on the old name, post-upgrade and past VM's 5m staleness window (measured
+      # 2026-08-29T21:52:24Z, 6.8 min after the 0.58.0 start):
+      #   vector_buffer_byte_size{component_id="victorialogs"} -> hosts
+      #     ['eq12', 'n5pro', 'n5pro_docker']   — eq12_docker simply GONE
+      #   max by (component_id) (vector_buffer_byte_size) -> 2 series, both 0
+      #     — i.e. NOT NoData. The rule evaluates normally, returns plausible
+      #     healthy numbers, and never fires a single state change.
+      # The guard would have kept looking perfectly alive while being blind to the
+      # ONE instance that has the 256MB disk buffer this 128MiB threshold and the
+      # wedged-buffer runbook are actually about. Silent partial blindness inside a
+      # healthy-looking aggregate, not an absence anything owns. (Total death of an
+      # instance IS still owned, per-host, by obs-vector-metrics-absent — it is this
+      # metric-family-specific dropout that nothing covered.)
+      # Per-host attribution for this rule is tracked separately (#217); it is what
+      # would have made the dropout visible instead of merely survivable.
+      #
+      # The swap was verified as a drop-in on the live 0.57.0 fleet BEFORE the bump,
+      # because "both read 0" would not have distinguished a shared gauge from two
+      # unrelated ones (CLAUDE.md: an experiment that cannot discriminate is not
+      # evidence). What discriminates:
+      #   max_over_time(...[30d]) -> 328952 bytes for component_id=victorialogs on
+      #     BOTH names — the same non-zero peak, not a shared idle zero.
+      #   count(vector_buffer_byte_size != vector_buffer_size_bytes) -> empty, i.e.
+      #     zero samples anywhere in retention where the two disagree.
+      #   count by (host) -> 2 series on all FOUR instances, so the expression is
+      #     correct on 0.57.0 and 0.58.0 at once. That is measured here, on this
+      #     fleet; do NOT cite upstream's docs/specs/buffer.md for it, which
+      #     documents the emit-both-for-back-compat rule for buffer_max_* but says
+      #     no such thing about these two gauges.
+      # When the agents are eventually bumped to 0.58, nothing here needs to change.
       - uid: obs-vector-buffer-filling
         title: Vector disk buffer filling
         condition: C
@@ -362,7 +405,7 @@ groups:
               datasource:
                 type: victoriametrics-metrics-datasource
                 uid: P4169E866C3094E38
-              expr: "max by (component_id) (vector_buffer_byte_size)"
+              expr: "max by (component_id) (vector_buffer_size_bytes)"
               instant: true
               range: false
               intervalMs: 60000
