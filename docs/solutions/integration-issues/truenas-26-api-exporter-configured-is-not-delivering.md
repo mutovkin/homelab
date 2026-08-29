@@ -13,6 +13,7 @@ symptoms:
   - "module failure returns only {\"censored\": \"the output has been hidden...\"}"
   - "sudo: a password is required, on a playbook that touches no remote host"
   - "a query immediately after a successful push returns nothing, then the same query works a minute later"
+  - "a 'last sample' timestamp reads minutes NEWER than the last real write, on a series nothing is writing to"
   - "disk.query reports type=HDD for a virtual disk that has no SMART"
 root_cause: api_behavior
 resolution_type: config_change
@@ -184,3 +185,48 @@ Gating the *notifying* tasks is not enough: a handler that touches a systemd uni
 the templates have not yet written still fails in check mode with "Could not find
 the requested service". The `when: not ansible_check_mode` has to go on the
 **handler** as well.
+
+## 11. …and a query can claim data NEWER than anything ever written
+
+The mirror image of trap 9, met sweeping for leftover fixtures after #183's
+synthetic fire test. The question was the safety-critical one for any drill:
+**is anything still writing to this series?** Asked as
+
+```
+timestamp(last_over_time(truenas_alert_active{klass="SMARTSyntheticFireTest"}[24h]))
+```
+
+it answered **22:50:00Z**. The last synthetic sample had been pushed by hand at
+**22:44:12Z**, and the query ran at **22:54:41Z**. Read literally, something had
+written to a hand-made test series nearly six minutes after the operator stopped
+— a leaked fixture with a live writer behind it, which is precisely the failure a
+fixture sweep exists to catch.
+
+Nothing was writing. `timestamp()` applied to a **rollup** reports the timestamp
+of the rollup's *output point*, which lands on the query's own step grid, not the
+time of the raw sample the rollup summarised. `22:50:00Z` being an exact round
+minute is the tell — raw pushes do not land on round minutes.
+
+The definitive read is the raw samples, via `/api/v1/export`:
+
+```
+match[]=truenas_alert_active{klass="SMARTSyntheticFireTest"}&start=-2h
+→ 22:23:49 = 1,  22:25:25 = 0,  22:43:28 = 1,  22:44:12 = 0
+```
+
+Exactly four samples, all four accounted for by hand, none since. MetricsQL's
+`tlast_over_time(m[24h])` agrees — `22:44:12.376Z` — because it returns the raw
+last-sample time by construction. `timestamp(last_over_time(...))` does not, and
+never did.
+
+So: traps 9 and 11 are the same layer lying about time in opposite directions. A
+query can report data ABSENT that is already durably written (9), and it can
+report a series FRESHER than anything ever pushed to it (11). Both were mistaken
+for a real defect on first reading.
+
+**To answer "is anything still writing to this series?", export the raw samples or
+use `tlast_over_time` — never `timestamp(last_over_time(...))`.** The stakes are
+asymmetric and run both ways: a false "still being written" sends you hunting a
+writer that does not exist, and the same confusion trusted in the other direction
+would leave a real, pageable fixture running while the sweep reported clean
+(#201, #220).
