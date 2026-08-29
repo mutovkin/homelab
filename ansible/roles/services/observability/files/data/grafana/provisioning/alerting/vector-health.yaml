@@ -336,29 +336,45 @@ groups:
       # relationship.
       #
       # THE METRIC IS vector_buffer_size_bytes, NOT vector_buffer_byte_size (#216).
-      # Vector 0.58.0 REMOVED the deprecated buffer_byte_size/buffer_events gauges
-      # ("Configurations using it now fail validation" applies to the removed sink;
-      # the gauges simply stop being exported). This rule is noDataState: OK — for
-      # the good reason documented at the top of this file — so querying the removed
-      # name does not fail loudly, it goes NoData -> OK and the disk-buffer guard
-      # stays green forever while watching nothing. A version bump, not a code
-      # change, would have silently disarmed it: the upgrade is the thing to fear.
+      # Vector 0.58.0 removed the deprecated buffer_byte_size/buffer_events gauges.
       #
-      # The swap was verified as a true drop-in on the live 0.57.0 fleet BEFORE the
-      # bump, because "both read 0" would not have distinguished a shared gauge from
-      # two unrelated ones (CLAUDE.md: an experiment that cannot discriminate is not
+      # THE FAILURE THIS AVOIDS IS NOT NoData, AND THAT IS THE WHOLE POINT. The
+      # obvious reading — "the metric vanishes, the rule goes NoData, and
+      # noDataState: OK silently swallows it" — is WRONG, and was measured wrong
+      # rather than reasoned wrong. This expression aggregates `by (component_id)`
+      # with NO host filter, and only the eq12_docker CONTAINER moved to 0.58.0: the
+      # three native vector_agent shippers are pinned at 0.57.0
+      # (roles/vector_agent/defaults/main.yml) and keep exporting the old name. So
+      # on the old name, post-upgrade and past VM's 5m staleness window (measured
+      # 2026-08-29T21:52:24Z, 6.8 min after the 0.58.0 start):
+      #   vector_buffer_byte_size{component_id="victorialogs"} -> hosts
+      #     ['eq12', 'n5pro', 'n5pro_docker']   — eq12_docker simply GONE
+      #   max by (component_id) (vector_buffer_byte_size) -> 2 series, both 0
+      #     — i.e. NOT NoData. The rule evaluates normally, returns plausible
+      #     healthy numbers, and never fires a single state change.
+      # The guard would have kept looking perfectly alive while being blind to the
+      # ONE instance that has the 256MB disk buffer this 128MiB threshold and the
+      # wedged-buffer runbook are actually about. Silent partial blindness inside a
+      # healthy-looking aggregate, not an absence anything owns. (Total death of an
+      # instance IS still owned, per-host, by obs-vector-metrics-absent — it is this
+      # metric-family-specific dropout that nothing covered.)
+      # Per-host attribution for this rule is tracked separately (#217); it is what
+      # would have made the dropout visible instead of merely survivable.
+      #
+      # The swap was verified as a drop-in on the live 0.57.0 fleet BEFORE the bump,
+      # because "both read 0" would not have distinguished a shared gauge from two
+      # unrelated ones (CLAUDE.md: an experiment that cannot discriminate is not
       # evidence). What discriminates:
       #   max_over_time(...[30d]) -> 328952 bytes for component_id=victorialogs on
       #     BOTH names — the same non-zero peak, not a shared idle zero.
       #   count(vector_buffer_byte_size != vector_buffer_size_bytes) -> empty, i.e.
       #     zero samples anywhere in retention where the two disagree.
-      # And `count by (host)` returned 2 series on all FOUR Vector instances, which
-      # is the load-bearing one: the three native vector_agent shippers are pinned at
-      # 0.57.0 (roles/vector_agent/defaults/main.yml) and only the eq12_docker
-      # container moves to 0.58.0, so this expression has to be correct on both
-      # versions at once. It is — 0.57 emits the new name alongside the deprecated
-      # one for back-compat, per Vector's own docs/specs/buffer.md.
-      # When the agents are eventually bumped, nothing here needs to change.
+      #   count by (host) -> 2 series on all FOUR instances, so the expression is
+      #     correct on 0.57.0 and 0.58.0 at once. That is measured here, on this
+      #     fleet; do NOT cite upstream's docs/specs/buffer.md for it, which
+      #     documents the emit-both-for-back-compat rule for buffer_max_* but says
+      #     no such thing about these two gauges.
+      # When the agents are eventually bumped to 0.58, nothing here needs to change.
       - uid: obs-vector-buffer-filling
         title: Vector disk buffer filling
         condition: C
