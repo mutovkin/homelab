@@ -84,6 +84,13 @@ policies:
       # `pool` for the same reason (#188): truenas-pool-degraded and
       # truenas-scrub-overdue carry one instance per pool.
       - pool
+      # `klass` (#183): truenas-smart-degradation carries one instance per
+      # middleware alert klass, and $labels.klass IS its summary line — the
+      # notification exists to say which drive-health class the appliance
+      # raised. Without this key, an uncorrected-error alert and a failed
+      # self-test firing together merge into one FIRING:2 naming neither, which
+      # is precisely the two failures you most need told apart.
+      - klass
       # ---- #198: the same defect class, everywhere ELSE in the fleet --------
       # #188 fixed only the TrueNAS half and scoped its guard to that one file.
       # The survey it left behind named four more labels that rules aggregate on

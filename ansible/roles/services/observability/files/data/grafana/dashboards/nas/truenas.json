@@ -1,7 +1,7 @@
 {
   "uid": "nas-truenas",
   "title": "NAS \u2014 TrueNAS",
-  "description": "TrueNAS (VM 200) storage and system health. Disk temperatures, pool health, capacity and scrub state come from the JSON-RPC API poller (#174); ARC, CPU, memory and disk I/O from the netdata Graphite stream (#173). SMART attribute counters are not yet collected.",
+  "description": "TrueNAS (VM 200) storage and system health. Disk temperatures, pool health, capacity and scrub state come from the JSON-RPC API poller (#174); ARC, CPU, memory and disk I/O from the netdata Graphite stream (#173). Raw SMART attribute counters are NOT collected and cannot be: TrueNAS 26.0 removed every SMART API (measured, #183). The \u201cMiddleware drive-health alerts\u201d panel carries the appliance's own ~90-minute smartctl verdicts instead \u2014 conclusions, not counters.",
   "tags": [
     "nas",
     "truenas",
@@ -10,7 +10,7 @@
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "1m",
   "time": {
     "from": "now-6h",
@@ -164,13 +164,75 @@
       }
     },
     {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Middleware drive-health alerts",
+      "description": "Count of un-dismissed TrueNAS middleware drive-health alerts per class, from the appliance's own ~90-minute smartctl scan via alert.list (#183). This is the middleware's VERDICT \u2014 26.0 removed every SMART attribute API, so reallocated / pending / offline-uncorrectable / UDMA CRC counts are not collected and this panel must not be read as if they were. Five flat lines at 0 is the healthy state and is meaningful: the poller emits explicit zeros on every successful cycle, so a gap here means the poller stopped (truenas-poller-absent owns that), not that the array is fine. SMARTSpareBlockCount and SMARTEraseCycleCount are raised only for enterprise-licensed Micron_5210/QSP models and are structurally 0 on this hardware; SMARTUncorrectedErrors and SMARTFailedSelfTest are the live ones. SMARTUnrecognized is the catch-all that makes an upstream klass rename fire instead of muting. Deep-link target for the truenas-smart-degradation alert; dismissing an alert in the TrueNAS UI is the ack and returns its line to 0.",
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "P4169E866C3094E38"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "P4169E866C3094E38"
+          },
+          "editorMode": "code",
+          "expr": "truenas_alert_active{host=\"truenas\"}",
+          "legendFormat": "{{klass}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": 600000
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 4,
       "type": "row",
       "title": "Pool",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 7,
+        "y": 13,
         "w": 24,
         "h": 1
       },
@@ -186,7 +248,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 14,
         "w": 5,
         "h": 5
       },
@@ -243,7 +305,7 @@
       },
       "gridPos": {
         "x": 5,
-        "y": 8,
+        "y": 14,
         "w": 5,
         "h": 5
       },
@@ -307,7 +369,7 @@
       },
       "gridPos": {
         "x": 10,
-        "y": 8,
+        "y": 14,
         "w": 5,
         "h": 5
       },
@@ -372,7 +434,7 @@
       },
       "gridPos": {
         "x": 15,
-        "y": 8,
+        "y": 14,
         "w": 9,
         "h": 5
       },
@@ -439,7 +501,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 19,
         "w": 24,
         "h": 1
       },
@@ -456,7 +518,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 20,
         "w": 12,
         "h": 7
       },
@@ -516,7 +578,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 20,
         "w": 12,
         "h": 7
       },
@@ -572,7 +634,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 21,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -589,7 +651,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 28,
         "w": 12,
         "h": 7
       },
@@ -673,7 +735,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 22,
+        "y": 28,
         "w": 12,
         "h": 7
       },
@@ -755,7 +817,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 29,
+        "y": 35,
         "w": 24,
         "h": 1
       },
@@ -772,7 +834,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 36,
         "w": 12,
         "h": 7
       },
@@ -881,7 +943,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 30,
+        "y": 36,
         "w": 12,
         "h": 7
       },

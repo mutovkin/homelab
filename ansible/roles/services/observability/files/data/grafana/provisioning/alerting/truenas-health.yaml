@@ -581,3 +581,156 @@ groups:
                     type: gt
                     params:
                       - 3024000
+      # ---------------------------------------------------------------------
+      # THE MIDDLEWARE'S DRIVE-HEALTH VERDICT (#183, re-scoped). NOT SMART
+      # COUNTERS — and the difference is the whole reason this rule reads the
+      # way it does.
+      #
+      # #183 originally asked for the four raw attributes (reallocated, pending,
+      # offline-uncorrectable, UDMA CRC). Measured 2026-08-23 against the live
+      # appliance: TrueNAS 26.0 has NO SMART API at all — smart.test.results and
+      # disk.smart_attributes both answer "Method does not exist", SMART left the
+      # middleware in 25.10, and the appliance's netdata runs only the truenas_*
+      # collectors, so the Graphite path is closed too. Both delivery paths are
+      # shut at the source; every remaining route needs root-exec on the
+      # appliance, which the operator declined. The counters remain the right
+      # long-term goal if upstream restores a drive-health API — tracked in #219,
+      # which carries the re-probe recipe and the upstream signals to watch.
+      #
+      # What IS lawfully readable is alert.list (ALERT_LIST_READ): the
+      # middleware's own ~90-minute in-process smartctl scan, surfaced by
+      # roles/truenas_poller as truenas_alert_active{host,klass,level} — explicit
+      # ZEROS every successful cycle, so a healthy array is five flat lines at 0
+      # rather than an absent series. This rule therefore alerts on a CONCLUSION
+      # the appliance reached, at ~90-minute granularity. It is not sector-level
+      # trend data and no dashboard or notification may be read as if it were.
+      #
+      # THREE CAVEATS THAT BOUND WHAT A GREEN READING MEANS (#183 handoff):
+      # 1. SMARTSpareBlockCount and SMARTEraseCycleCount come only from
+      #    micron_phison_check(), which returns early unless the system is
+      #    enterprise-licensed AND the model starts with Micron_5210 or QSP.
+      #    This appliance runs Seagate Exos HDDs and WD_BLACK NVMe, so those two
+      #    series are pinned to 0 forever by the model gate alone. Their zeros
+      #    are not evidence of drive health, and this rule must not be read as
+      #    covering what they nominally name. The two live ones here are
+      #    SMARTUncorrectedErrors and SMARTFailedSelfTest, which check_sync()
+      #    raises unconditionally per disk.
+      # 2. A class-wide alert policy of NEVER (System -> Alert Settings) removes
+      #    the class from alert.list ENTIRELY — should_show_alert() drops it — so
+      #    every series including the SMARTUnrecognized catch-all reads a healthy
+      #    0 forever while the middleware still detects the failure. A suppressed
+      #    class cannot even surface as unrecognized. NEVER set policy=NEVER on a
+      #    SMART class while these metrics are trusted.
+      # 3. `level` is PINNED in the poller (so a healthy zero and a firing series
+      #    carry identical label sets) and can therefore misstate severity if a
+      #    klass is re-leveled upstream or by an operator override. This rule
+      #    consequently fires on ANY nonzero regardless of level, and does not
+      #    branch on it.
+      #
+      # Per-klass instances via `by (klass)` so a notification names WHICH klass
+      # — the notification policy's group_by carries `klass` for exactly that
+      # reason, and the two files are a MATCHED PAIR enforced by the group_by
+      # assert in the role's tasks/main.yml (#188/#198). Fix drift in the POLICY,
+      # never by rewriting this expr: `by (level)` or a bare aggregate would
+      # empty the $labels.klass interpolation in the summary.
+      #
+      # ABSENCE IS truenas-poller-absent's, NOT THIS RULE'S — recorded here AND
+      # in the description, per #174's orphaned-guard lesson. This series comes
+      # from the SAME delivery path as the thermal and pool rules (the API
+      # poller), so it needs no new liveness rule: a failed cycle pushes NOTHING
+      # at all, so a revoked ALERT_LIST_READ reads as poller absence and can
+      # never be dressed up as a healthy zero. If this expr is ever repointed at
+      # a different delivery path, its liveness owner must be re-derived in the
+      # same change — that is precisely the pairing #174 broke silently.
+      #
+      # for: 0s because the middleware already waited ~90 minutes to reach this
+      # verdict; adding a Grafana `for` would only delay a conclusion that is
+      # already stale by design. [10m] because the poller is DENSE (60s), the
+      # same rationale as the thermal rules' window — this series is NOT the
+      # sparse Graphite one.
+      - uid: truenas-smart-degradation
+        title: TrueNAS middleware reports a drive-health (SMART) alert
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: >-
+            TrueNAS middleware has {{ $values.B }} active {{ $labels.klass }}
+            drive-health alert(s).
+          description: |-
+            The appliance's own ~90-minute smartctl scan raised a drive-health alert — this is its verdict, not a SMART counter; 26.0 exposes no attribute API.
+            Look at System → Alerts on the NAS for the disk and the wording, and at the "Middleware drive-health alerts" panel for when it started.
+            Dismissing the alert in the TrueNAS UI is the ack: the series drops back to 0 within a minute and this clears.
+          __dashboardUid__: nas-truenas
+          # Grafana REJECTS __dashboardUid__ without __panelId__ and crash-loops,
+          # withdrawing every provisioned rule in the org. 18 = "Middleware
+          # drive-health alerts", the panel that plots this exact series.
+          __panelId__: "18"
+        labels:
+          severity: warning
+          # nas-thermal is a DELIBERATE reuse, not a copy-paste: that component
+          # plus severity=warning is the route that reaches BOTH channels
+          # immediately, and truenas-poller-absent and truenas-pool-degraded
+          # already carry it for non-thermal NAS health. Keeping severity at
+          # warning preserves what critical means here — redundancy or data at
+          # risk NOW — while still being told immediately, which is the whole
+          # point of that route existing.
+          component: nas-thermal
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: >-
+                max by (klass) (last_over_time(truenas_alert_active{host="truenas"}[10m]))
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN: a null must never become 0 and read as a
+          # healthy klass. With no numeric value the rule falls through to
+          # noDataState, which is OK here deliberately (absence is the poller
+          # liveness rule's alarm, above).
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # gt 0, not gt 1 or an eq: the poller emits explicit zeros for the
+          # healthy state, so ANY nonzero count of un-dismissed alerts of a klass
+          # is actionable — caveat 3 above is why level is not consulted.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0
