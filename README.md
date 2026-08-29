@@ -129,8 +129,8 @@ query VictoriaLogs and VictoriaMetrics respectively.
 
 The two physical hosts had **no** machine-level metrics at all before #186 — only
 Vector's own internal telemetry. Thermal, SMART and utilisation telemetry now
-flows from both, plus iGPU power on N5 Pro; CPU-package RAPL power is deferred to
-#194. Neither agent opens a listening port; both write outward to eq12_docker. `telegraf_agent` runs the shipped `User=telegraf` with
+flows from both, plus iGPU power on N5 Pro; CPU-package RAPL power landed in #194
+(watts converted at the source, with the raw counter exported beside it since #206). Neither agent opens a listening port; both write outward to eq12_docker. `telegraf_agent` runs the shipped `User=telegraf` with
 `AmbientCapabilities=CAP_DAC_OVERRIDE CAP_SYS_ADMIN` (needed by the SMART input,
 measured) plus `NoNewPrivileges=yes` and systemd hardening — not root, and not
 sudo, which is not installed on either hypervisor.

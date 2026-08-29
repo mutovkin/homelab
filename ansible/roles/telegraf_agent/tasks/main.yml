@@ -1754,9 +1754,25 @@
          + ([{'name': 'rapl',
               'selector': 'rapl_power_watts{host="' ~ inventory_hostname ~ '"}',
               'expected': telegraf_agent_rapl_expected_domains | length,
+              'exact': true},
+             {'name': 'rapl_energy',
+              'selector': 'rapl_energy_uj{host="' ~ inventory_hostname ~ '"}',
+              'expected': telegraf_agent_rapl_expected_domains | length,
               'exact': true}]
             if telegraf_agent_rapl_power | bool else []) }}
 
+# TWO RAPL ENTRIES, INSIDE ONE CONDITIONAL (#206). rapl_power_watts and
+# rapl_energy_uj are two metric NAMES from one printf in files/rapl_power.sh, so
+# they appear and disappear together and belong in the same `if` — splitting them
+# into two conditionals would let a future edit enable one without the other. Two
+# entries rather than one because the anchor asks a question the coupling cannot
+# answer: the coupling is about PRODUCTION (a zone emits both fields or neither),
+# while everything between the printf and VictoriaMetrics — the influx parse, a
+# fieldpass/fielddrop on the exec input — can drop one NAME and keep the other,
+# and only a query for that name notices. The count arithmetic below therefore
+# adds 2 for RAPL, not 3 unconditionally: a host with telegraf_agent_rapl_power
+# false has neither.
+#
 # `exact: false` on SMART alone, and it is the documented single-device limit
 # rather than an oversight: both hosts have exactly one SMART device and there is
 # no host_vars declaration of disks to pin a count against, so the claim here is
@@ -1780,8 +1796,8 @@
 # below satisfiable by a family that delivered nothing).
 #
 # WHAT THIS DOES NOT CATCH, stated because an earlier version of this comment
-# claimed otherwise: the `2 +` is a LITERAL, not a count of the arrival proofs
-# above, so adding a FIFTH family with an arrival proof and no entry here leaves
+# claimed otherwise: the `2 +` and the per-flag terms are LITERALS, not a count of
+# the arrival proofs above, so adding a family with an arrival proof and no entry here leaves
 # the list, this arithmetic and the loop all mutually consistent and green. This
 # guard catches a builder typo, a wrongly-scoped selector and an undeclared
 # count — NOT a family someone forgot entirely. Adding a family means editing the
@@ -1793,9 +1809,17 @@
 - name: Assert the freshness anchor list covers every proven family
   ansible.builtin.assert:
     that:
+      # `2 if rapl`, NOT a flat `3 +`, and this is not a simplification anyone
+      # should undo: RAPL contributes TWO families (rapl_power_watts and
+      # rapl_energy_uj, #206) and BOTH are conditional on the same flag, because
+      # one printf in files/rapl_power.sh produces both. A host with
+      # telegraf_agent_rapl_power false therefore has NEITHER, and a hardcoded 3
+      # would fail on it — on a host that is behaving perfectly. Neither term is
+      # a count of anything computed; both are literals that must be edited when
+      # the list is (see WHAT THIS DOES NOT CATCH above).
       - telegraf_agent_freshness_families | length ==
         (2 + (1 if telegraf_agent_acpi_fan_state | bool else 0)
-           + (1 if telegraf_agent_rapl_power | bool else 0))
+           + (2 if telegraf_agent_rapl_power | bool else 0))
       - telegraf_agent_freshness_families
         | selectattr('selector', 'search', 'host="' ~ inventory_hostname ~ '"')
         | list | length == telegraf_agent_freshness_families | length
@@ -1809,7 +1833,8 @@
       {{ telegraf_agent_freshness_families | map(attribute='expected') | list }}),
       which does not match the families this role proves on this host: sensors and
       smart always, plus acpi_fan_state when telegraf_agent_acpi_fan_state
-      ({{ telegraf_agent_acpi_fan_state }}) and rapl when
+      ({{ telegraf_agent_acpi_fan_state }}) and BOTH rapl families — the watts and
+      the raw energy counter, two metric names from one printf — when
       telegraf_agent_rapl_power ({{ telegraf_agent_rapl_power }}) — or one of the
       selectors is not scoped to host="{{ inventory_hostname }}", or one expected
       count is not positive. A short list makes the freshness loop below report ok

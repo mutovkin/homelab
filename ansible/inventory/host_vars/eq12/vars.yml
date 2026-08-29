@@ -209,6 +209,12 @@ telegraf_agent_expected_test_output:
   # RAPL (#194). Influx line protocol sorts tag keys, so `domain` precedes the
   # agent's `environment`/`host`/`location` — the substring is the line's head.
   # Verified against the script's real output on this host, 2026-08-25.
+  # THESE ANCHOR THE LINE HEAD ONLY, and deliberately stop before the field set:
+  # they prove the measurement and the domain label, and they can see NOTHING
+  # about the fields after it. In particular a comma->space regression on
+  # #206's energy_uj field still matches all three of these while silently
+  # emitting one field stamped in 1970. The guard for that is the role's
+  # VictoriaMetrics arrival assert on rapl_energy_uj, not this list.
   - "rapl,domain=package-0"
   - "rapl,domain=core"
   - "rapl,domain=uncore"
@@ -303,8 +309,12 @@ proxmox_host_hwmon_modules:
 # uncore is the iGPU. Its counter DOES advance — measured 2026-08-25, 122 uJ over
 # 10 s and 488 uJ over 60 s (~10 uW), and a 24 h max of 0.000243 W in
 # VictoriaMetrics — so it is live rather than frozen or unsupported. At the
-# script's ~1 s sample window that is well under the counter's quantum, so most
-# samples read exactly 0.000000: a real reading of a headless idle iGPU.
+# script's ~1 s sample window the counter often does not tick at all (its quantum
+# is 61.035 uJ), so a large minority of samples read exactly 0.000000 — 268 of
+# 1440 in a 24 h census, 2026-08-29 (18.6%), NOT "most": a real reading of a
+# headless idle iGPU. Census recorded because #206 needed it: it is why that
+# frozen-counter alert covers package-0 only, and why this domain is checked with
+# changes(rapl_energy_uj{domain="uncore"}[30m]) rather than a wattage threshold.
 # NOT ESTABLISHED: whether it TRACKS a real render load. That needs the same
 # load-placement discipline applied to /dev/dri (a VAAPI/render job on this box),
 # which was not run — no GPU workload tool is installed and installing one is a

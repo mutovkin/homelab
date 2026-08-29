@@ -137,7 +137,7 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-**Thirty-four** provisioned rules (27 `obs-*` + 7 `truenas-*`), all in the
+**Thirty-six** provisioned rules (29 `obs-*` + 7 `truenas-*`), all in the
 **Observability** folder — count the uids in
 `files/data/grafana/provisioning/alerting/` before trusting that number. It has
 drifted twice already, each time in the same way: a rule was added and the
@@ -158,7 +158,7 @@ perfectly labelled — the state that existed for the whole life of the
 deployment). Every other telegraf-fed rule here aggregates the `host` dimension
 away, so nothing else can see telegraf alive but stamping the wrong host.
 
-The table below itemises **all thirty-four**. It is what someone consults to
+The table below itemises **all thirty-six**. It is what someone consults to
 answer "does this signal already have an absence owner?", which is exactly the
 question #178 got wrong once — so a rule missing from it is worse than a wrong
 total. Routing is no longer "all by email" — see
@@ -265,9 +265,13 @@ ride the same grading (#206) — are email-only, and the three agent-liveness ru
 are `critical`. That split is **derived**, not a default:
 
 - No rule in this folder reads `docker_*`, `ping_*`, `smart_device_*`,
-  `sensors_temp*`, `acpi_fan_state_*` or `rapl_power_watts` — they feed
-  dashboards. Nothing safety-relevant goes blind while one of them fires. That is
-  the same condition #193 used to demote `truenas-metrics-absent`.
+  `sensors_temp*`, `acpi_fan_state_*`, `rapl_power_watts` or `rapl_energy_uj`
+  **as data about the machine** — they feed dashboards. The `-absent` and
+  `-frozen` rules do query them, and that is not an exception to this claim: they
+  read the family only as evidence about the PIPELINE, at the same severity as
+  the family's own absence owner (see the health-owner paragraph below). Nothing
+  safety-relevant goes blind while one of them fires. That is the same condition
+  #193 used to demote `truenas-metrics-absent`.
 - The case that *is* worth waking someone — the agent or the whole machine gone —
   is already owned at `critical` by `obs-telegraf-metrics-absent*`.
 
@@ -281,7 +285,7 @@ name the families throughout their prose.
 evaluate true is not a guard, but a drill rule that reaches `Alerting` delivers a
 fake alert to the operator's real email — the root policy routes everything, and
 no label sends an alert nowhere. So a drill must be un-pageable **by
-construction**, and there are three tools, in increasing order of preference:
+construction**, and there are three tools, best first:
 
 1. `POST /api/v1/eval` with the rule's own `data`/`condition` — Grafana's
    condition evaluator, nothing scheduled, nothing notifiable. It returns the
@@ -362,8 +366,8 @@ them — the #188 defect.
 | `truenas-scrub-overdue` | TrueNAS pool scrub is overdue (#174) | `max by (pool) (truenas_pool_scrub_age_seconds{host="truenas"})` > 3024000 (35d), `for: 1h` | OK |
 | `truenas-smart-degradation` | TrueNAS middleware reports a drive-health (SMART) alert (#183) | `max by (klass) (last_over_time(truenas_alert_active{host="truenas"}[10m]))` > 0, `for: 0s` | OK |
 
-`execErrState: Alerting` on all thirty-four — a datasource that cannot be reached
-is not evidence of health. Counted, not assumed: 34 uids and 34
+`execErrState: Alerting` on all thirty-six — a datasource that cannot be reached
+is not evidence of health. Counted, not assumed: 36 uids and 36
 `execErrState: Alerting` lines across the seven files in `alerting/`, with no
 other value present.
 
