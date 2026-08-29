@@ -2,10 +2,47 @@
 # roles/telegraf_agent (#194) — RAPL package power, in WATTS, for both physical
 # Proxmox hosts. Emits influx line protocol on stdout:
 #
-#   rapl,domain=package-0 power_watts=2.671234
+#   rapl,domain=package-0 power_watts=2.671234,energy_uj=81017680655
 #
-# -> prometheusremotewrite names it `rapl_power_watts`, tag `domain`; the agent
-# stamps `host` (telegraf.conf's `hostname = "<inventory_hostname>"`).
+# -> prometheusremotewrite names those `rapl_power_watts` and `rapl_energy_uj`,
+# tag `domain`; the agent stamps `host` (telegraf.conf's
+# `hostname = "<inventory_hostname>"`).
+#
+# THE TWO FIELDS ARE SEPARATED BY A COMMA, NOT A SPACE, and that is not a style
+# choice: in influx line protocol the first SPACE after the field set begins the
+# optional TIMESTAMP. `power_watts=2.6 energy_uj=81017680655` therefore does not
+# emit two fields — it emits one field with an 81-second-past-the-epoch
+# timestamp, which parses cleanly and lands the sample in 1970. Keep the comma.
+#
+# WHY THE RAW COUNTER IS EXPORTED BESIDE THE DERIVED RATE (#206). The wattage
+# DESTROYS the freshness information: a counter the firmware has stopped updating
+# is still readable, so this script computes a delta of zero and prints a
+# faithful, confident `power_watts=0.000000` forever. That is indistinguishable
+# from a genuinely idle domain in the value domain — eq12 `uncore` prints exactly
+# that for 268 of every 1440 samples (measured over 24 h, 2026-08-29) — so no
+# threshold on watts can tell frozen from idle for such a domain. The raw
+# monotonic counter can: over 60 s at idle eq12 `uncore` advanced 488 uJ while
+# its 1 s wattage rounded to zero (measured 2026-08-29, with `package-0`
+# advancing 355753179 uJ in the same pair of reads as the positive control).
+# `changes(rapl_energy_uj{domain="uncore"}[30m])` is therefore a real freshness
+# question anyone can ask of ANY domain, without an ssh session.
+#
+# It is the RAW SECOND-PASS read, not a delta, and it WRAPS at this zone's
+# `max_energy_range_uj` (sawtooth). It is a freshness observable, never a rate
+# source — `rate()`/`increase()` over it is exactly the negative-spike trap this
+# script exists to avoid, which is why the watts field stays the value anything
+# numeric reads.
+#
+# `%.0f` AND NEVER `%d`: mawk 1.3.4 truncates %d at INT_MAX (2147483647) and
+# these counters run to 2.6e11 — eq12 `core` read 255107786802 on 2026-08-29, two
+# orders of magnitude past the cliff, so %d would print a silently wrong number
+# rather than fail. Doubles are exact to 2^53, so %.0f is lossless here.
+#
+# The two fields ride ONE printf, so a zone emits BOTH or NEITHER. That coupling
+# is load-bearing: it keeps the domain SET identical across the two families, so
+# the existing `obs-rapl-power-absent-*` rules and the deploy-time domain-set
+# proof own `rapl_energy_uj`'s delivery too, rather than the new family needing
+# its own absence owner (#189 ownership stated once, not duplicated).
 #
 # WHY A SCRIPT AND NOT [[inputs.intel_powerstat]] — both halves MEASURED
 # 2026-08-25 with `telegraf --test` under the real unit user and capabilities:
@@ -207,7 +244,12 @@ td=$(date +%s%N)
         print msg > "/dev/stderr"
         continue
       }
-      printf "rapl,domain=%s power_watts=%.6f\n", name[z], watts
+      # b[z] is the RAW second-pass counter, exported so freshness is observable
+      # independently of the derived rate (#206 -- see the header). COMMA between
+      # the fields: a space would begin the influx TIMESTAMP field instead.
+      # %.0f, never %d -- mawk truncates %d at INT_MAX and these counters reach
+      # 2.6e11. One printf, so a zone emits both fields or neither.
+      printf "rapl,domain=%s power_watts=%.6f,energy_uj=%.0f\n", name[z], watts, b[z]
       emitted += 1
     }
     if (emitted == 0) {

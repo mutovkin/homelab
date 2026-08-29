@@ -724,6 +724,249 @@ groups:
                       - 1
 
       # ---------------------------------------------------------------------
+      # THE FROZEN-COUNTER DETECTORS (#206), one per physical Proxmox host.
+      #
+      # A THIRD SHAPE, because the two rules above CANNOT SEE THIS FAULT. They
+      # count DOMAINS, and a domain whose firmware counter has stopped advancing
+      # is still delivered every 60 s: files/rapl_power.sh reads it, computes a
+      # delta of zero, and prints a faithful, confident `power_watts=0.000000`
+      # forever. Nothing is missing, so the count stays at 3 (or 1), the
+      # deploy-time domain-set proof stays green, and the dashboards render a
+      # legitimate-looking zero. Absence is owned; a LIE is not.
+      #
+      # WHY package-0 ONLY, and this is the whole design decision. "Near-zero
+      # watts" cannot discriminate frozen from idle for every domain — for eq12
+      # `uncore` both hypotheses predict 0.000000, and that is measured, not
+      # assumed: 268 of 1440 samples in 24 h were exactly zero, and TWO all-zero
+      # 1-hour windows occurred in four days (2026-08-29). Pointed at `uncore`
+      # this rule does not merely RISK a false alarm, it fires PERMANENTLY: that
+      # domain is the idle iGPU, its 6 h maxima measured 0.000121-0.000305 W
+      # across the same four days, i.e. entirely BELOW the 1 mW threshold below.
+      # Live at 2026-08-29 22:44Z, side by side: uncore 0.000304 (would alert),
+      # eq12 package-0 13.499178, n5pro package-0 9.314859 (both Normal, and the
+      # deployed rules were `inactive` at that evaluation).
+      # `package-0` is different in KIND, not in degree: a running machine always
+      # draws package power. Measured over the family's whole retained history
+      # (2026-08-25 22:00Z to 2026-08-29 22:00Z, 193 six-hour windows per host),
+      # the lowest single sample was 1.492526 W on eq12 and 5.382494 W on n5pro,
+      # and no window on either host contained a zero at all. The scoping is a
+      # physical claim with 1490x of margin, not a threshold tuned to fit a
+      # graph — and it is pinned by the static reconciler in
+      # roles/services/observability/tasks/main.yml precisely because widening
+      # the selector by one label is a one-word edit with a permanent alarm on
+      # the other side of it.
+      #
+      # FOR EVERY OTHER DOMAIN, ASK THE RAW COUNTER INSTEAD. #206 also exports
+      # `rapl_energy_uj` — the raw monotonic sysfs reading, beside the derived
+      # watts — precisely because the wattage destroys the freshness information
+      # that answers this question for a domain that is legitimately near zero:
+      #   changes(rapl_energy_uj{host="eq12", domain="uncore"}[30m])
+      # is > 0 for a live-but-idle domain (eq12 `uncore` advanced 488 uJ across
+      # 60 s at idle, measured 2026-08-29, while its 1 s wattage rounded to 0)
+      # and exactly 0 for a frozen one. That is deliberately an OBSERVABLE and
+      # not a rule: we have no history yet to bound how long a healthy idle
+      # counter may legitimately sit static, and picking a window now would be
+      # the confounded guess #194 forbids. See roles/telegraf_agent/README.md;
+      # the all-domain freshness rule is deferred to #202.
+      #
+      # `lt 0.001`, NOT `== 0`, and neither is arbitrary. Grafana thresholds have
+      # no equality evaluator, and `lt 0` could never fire — the max of a
+      # non-negative gauge is never negative, i.e. a guard that cannot fail, the
+      # exact shape CLAUDE.md forbids. So the freeze test is an epsilon, and the
+      # epsilon comes from physics plus the measurement above: 1 mW is 1490x
+      # below the lowest package sample either machine has ever produced, and no
+      # running package draws it. `lt` also keeps the polarity identical to every
+      # sibling rule here, which is what the static reconciler asserts.
+      #
+      # noDataState: OK — THE ONE PLACE THESE DIFFER FROM THEIR SIBLINGS. Total
+      # absence of this family is already owned, by the two rules directly above,
+      # at the same severity and with the same runbook. A second owner would
+      # double-report one fault (#151: a series whose absence is someone else in
+      # this file), and the pair above is strictly the better detector for it —
+      # it catches PARTIAL loss too. execErrState stays Alerting (#108): a
+      # datasource that cannot be reached is not evidence of health.
+      #
+      # DETECTION LATENCY IS ~6 h, deliberately, and it has three terms like the
+      # rules above: `max_over_time(...[6h])` must first age out the last live
+      # sample (up to 6 h), then the group's 5 m `interval` ticks, then `for: 5m`
+      # holds. Worst case ~6 h 10 m. A frozen counter is a FOREVER-shaped fault,
+      # not an incident — a narrower window would only buy the chance to
+      # false-fire on a domain that idles low. severity warning, email-only under
+      # the root policy, same #193 posture and same grading argument as the pair
+      # above: nothing else in this folder reads rapl_power_watts as data.
+      #
+      # NO DEEP LINKS, same as every rule in this file: a dashboard-only
+      # __dashboardUid__ is unrepresentable and its rejection is boot-fatal for
+      # ALL provisioned rules.
+      #
+      # WHEN EITHER FIRES, on the host itself:
+      #   ssh root@<host> '/usr/local/lib/telegraf/rapl_power.sh'   # ~1s
+      #       a frozen zone prints power_watts=0.000000 with a STATIC energy_uj
+      #   ssh root@<host> 'cat /sys/class/powercap/intel-rapl:0/energy_uj'  # x2,
+      #       60 s apart: a live counter advances, a frozen one does not
+      #   then in Grafana: changes(rapl_energy_uj{host="<host>"}[1h]) per domain
+      # A genuinely stuck counter is a firmware/driver fault (a microcode or BIOS
+      # update, a kexec, a powercap driver regression); a reboot is the usual
+      # repair, and the counter is read-only to us either way.
+      - uid: obs-rapl-power-frozen-eq12
+        title: RAPL package power frozen at zero for eq12
+        condition: C
+        for: 5m
+        # OK, not Alerting — absence is owned by obs-rapl-power-absent-eq12
+        # (#151). This rule exists only for the case where the series IS
+        # arriving and is lying.
+        noDataState: OK
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: RAPL package-0 power for host=eq12 has read zero for 6h — the counter is frozen, not the machine.
+          description: |-
+            A readable but non-advancing energy_uj reads as a confident 0.000000 W, which the domain-count absence rule cannot see: the series is still arriving. eq12's package has never sampled below 1.492526 W (measured over the family's full history, 2026-08-29), so a 6h maximum under 1 mW is a stopped counter or a powercap driver fault, not an idle box.
+            On the host: run /usr/local/lib/telegraf/rapl_power.sh — a frozen zone prints power_watts=0.000000 with a STATIC energy_uj — and read /sys/class/powercap/intel-rapl:0/energy_uj twice 60s apart. Per domain, changes(rapl_energy_uj{host="eq12"}[1h]) answers the same question from Grafana.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              # >= the [6h] lookbehind below — house rule; a shorter window here
+              # would hand the expression less data than the query asks for.
+              from: 21600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # max_over_time, not min or avg: a freeze makes EVERY sample zero
+              # once the last live one ages out, so a 6h maximum of zero is the
+              # unambiguous statement "no sample in six hours showed any power".
+              # min would fire on a single dropped-to-zero sample and avg would
+              # be draggable by one; both would trade this rule's whole margin
+              # for latency it does not need. The selector pins ONE host and ONE
+              # domain, so no `by (...)` is needed to keep hosts from masking
+              # each other (#160) — there is one series in the result.
+              expr: 'max_over_time(rapl_power_watts{host="eq12",domain="package-0"}[6h])'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN, not replaceNN — the same reasoning as the absence rules
+          # above, inverted and therefore even sharper here: replacing a null
+          # with 0 would manufacture exactly the value this rule fires on, so a
+          # gap in the data would present as a frozen counter. With no numeric
+          # value the rule falls through to noDataState, which is OK on purpose.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+
+      # n5pro, same shape and the SAME threshold — deliberately not scaled to
+      # this board. The epsilon is not "a fraction of idle draw" (which would be
+      # ~5.4 W here and ~1.5 W on eq12, i.e. two numbers to keep true); it is a
+      # level no running package can reach on either machine. This host only
+      # exports package-0 in the first place: its `core` is excluded at the
+      # source as a single-core counter, so package-0 is its whole RAPL surface
+      # and this rule covers all of it.
+      - uid: obs-rapl-power-frozen-n5pro
+        title: RAPL package power frozen at zero for n5pro
+        condition: C
+        for: 5m
+        # OK, not Alerting — absence is owned by obs-rapl-power-absent-n5pro.
+        noDataState: OK
+        # A datasource that cannot be reached is not evidence of health (#108).
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: RAPL package-0 power for host=n5pro has read zero for 6h — the counter is frozen, not the machine.
+          description: |-
+            A readable but non-advancing energy_uj reads as a confident 0.000000 W, which the domain-count absence rule cannot see: the series is still arriving. n5pro's package has never sampled below 5.382494 W (measured over the family's full history, 2026-08-29), so a 6h maximum under 1 mW is a stopped counter or a powercap driver fault, not an idle box.
+            On the host: run /usr/local/lib/telegraf/rapl_power.sh — a frozen zone prints power_watts=0.000000 with a STATIC energy_uj — and read /sys/class/powercap/intel-rapl:0/energy_uj twice 60s apart. Per domain, changes(rapl_energy_uj{host="n5pro"}[1h]) answers the same question from Grafana.
+        labels:
+          severity: warning
+          component: metrics-pipeline
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              # Same shape as the eq12 rule above; see its comments.
+              expr: 'max_over_time(rapl_power_watts{host="n5pro",domain="package-0"}[6h])'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # dropNN — same reasoning as the eq12 rule above.
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 0.001
+
+      # ---------------------------------------------------------------------
       # THE NATIVE AGENTS' REMAINING PER-INPUT ABSENCE OWNERS (#202): SMART,
       # sensors and ACPI fan state. Same reasoning as the RAPL pair above and the
       # container-agent pair below — the agent-liveness rules watch

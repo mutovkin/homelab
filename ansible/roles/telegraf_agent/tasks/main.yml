@@ -1577,6 +1577,90 @@
     - not ansible_check_mode
     - telegraf_agent_rapl_power | bool
 
+# #206: THE RAW COUNTER IS A SECOND METRIC NAME ON THE SAME LINE, AND THAT IS
+# EXACTLY WHY IT NEEDS ITS OWN ARRIVAL PROOF RATHER THAN ITS OWN ABSENCE RULE.
+#
+# files/rapl_power.sh emits both fields from ONE printf, so a zone produces both
+# or neither and the DOMAIN SET of the two families is identical by construction.
+# That coupling is what lets obs-rapl-power-absent-* own this family's absence
+# too (#189: ownership stated once, not duplicated) — a production failure that
+# loses rapl_energy_uj loses rapl_power_watts in the same instant, and that rule
+# is already watching.
+#
+# What the coupling does NOT cover is everything downstream of the printf, and
+# that is a real and separate path: influx line protocol separates FIELDS with a
+# comma and begins the TIMESTAMP at the first space, so a one-character edit
+# turns `energy_uj` into a 1970 timestamp on a single-field point — parsed
+# cleanly, exit 0, agent healthy, no stderr, and the family simply never exists.
+# A `fieldpass`/`fielddrop` added to the exec input later does the same thing
+# more quietly still. Neither is visible to the domain-set proof above, which
+# only ever asks about rapl_power_watts. So this asks the same question of the
+# second name, and gets its answer from VictoriaMetrics rather than from the
+# script running correctly on the host.
+#
+# Same shape, same retry budget and the same failed_when/assert pairing as the
+# proof above — see its header for why that pairing is safe here (the assert
+# reads `status` and the JSON, never `.failed`).
+- name: Wait for this host's RAPL energy counters to reach VictoriaMetrics
+  ansible.builtin.uri:
+    url: "{{ victoriametrics_query_endpoint }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      query: 'count by (domain) (last_over_time(rapl_energy_uj{host="{{ inventory_hostname }}"}[2m]))'
+    url_username: "{{ vault_vm_auth_username }}"
+    url_password: "{{ vault_vm_auth_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: telegraf_agent_rapl_energy_arrival
+  until: >-
+    telegraf_agent_rapl_energy_arrival.status | default(0) == 200
+    and (telegraf_agent_rapl_energy_arrival.json.data.result | default([])
+         | map(attribute='metric.domain', default='<untagged>') | sort | list)
+        == (telegraf_agent_rapl_expected_domains | sort | list)
+  retries: 18
+  delay: 10
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_rapl_power | bool
+
+- name: Assert the RAPL energy counters cover exactly the same domains as the watts
+  vars:
+    _telegraf_agent_rapl_energy_domains: >-
+      {{ telegraf_agent_rapl_energy_arrival.json.data.result | default([])
+         | map(attribute='metric.domain', default='<untagged>') | sort | list }}
+  ansible.builtin.assert:
+    that:
+      - telegraf_agent_rapl_energy_arrival.status | default(0) == 200
+      - _telegraf_agent_rapl_energy_domains == telegraf_agent_rapl_expected_domains | sort | list
+    fail_msg: >-
+      rapl_energy_uj{host="{{ inventory_hostname }}"} delivered domains
+      {{ _telegraf_agent_rapl_energy_domains }}, not the declared
+      {{ telegraf_agent_rapl_expected_domains | sort | list }} — while
+      rapl_power_watts (asserted just above) is fine. The two fields ride ONE
+      printf in files/rapl_power.sh, so this cannot be a production failure; it
+      is the parse or the output path. FIRST SUSPECT, because it is silent and
+      one character wide: influx line protocol separates fields with a COMMA and
+      starts the optional TIMESTAMP at the first SPACE, so
+      `power_watts=2.6 energy_uj=81017680655` is not two fields — it is one field
+      stamped 81 seconds after the epoch, and telegraf accepts it without a
+      murmur. Run /usr/local/lib/telegraf/rapl_power.sh on the host and read the
+      line: the two fields must be separated by a comma. Then check the
+      [[inputs.exec]] block in /etc/telegraf/telegraf.conf for a fieldpass or
+      fielddrop that would strip the counter. The counter exists so that a FROZEN
+      domain — readable, delivered, never advancing, and therefore a confident
+      0.000000 W — can be identified with
+      changes(rapl_energy_uj{host="{{ inventory_hostname }}"}[30m]); without it
+      the only detector left is the package-only frozen alert rule (#206).
+      HTTP status was
+      {{ telegraf_agent_rapl_energy_arrival.status | default('none') }}.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - telegraf_agent_rapl_power | bool
+
 # --- #207: A FRESHNESS ANCHOR FOR EVERY FAMILY, NOT JUST system_uptime --------
 #
 # THE HOLE THIS CLOSES. Every family proof above is a windowed PRESENCE or COUNT

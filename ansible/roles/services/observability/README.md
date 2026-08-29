@@ -178,6 +178,7 @@ to record what is **not** individually owned, or it overstates its own coverage.
 | `docker_*` | `obs-docker-metrics-absent` (#189) |
 | `ping_*` | `obs-ping-metrics-absent` (#189) — anchored on `ping_percent_packet_loss`, see below |
 | `rapl_power_watts` | `obs-rapl-power-absent-{eq12,n5pro}` (#194) |
+| `rapl_energy_uj` | `obs-rapl-power-absent-{eq12,n5pro}` (#206) — the raw counter rides the SAME printf line as the watts, so a zone emits both fields or neither and the two domain sets cannot diverge; the telegraf role proves both from VictoriaMetrics at deploy time, because the parse and the output path are not covered by that coupling |
 | `smart_device_*` | `obs-smart-metrics-absent-{eq12,n5pro}` (#202) — anchored on `smart_device_health_ok`, see below |
 | `sensors_temp*` | `obs-sensors-metrics-absent-{eq12,n5pro}` (#202) |
 | `acpi_fan_state_*` | `obs-fan-state-absent-eq12` (#202) |
@@ -259,8 +260,9 @@ via the agent rule.
 
 ### Why every per-family absence rule is `severity: warning` (#189, #194, #202)
 
-The nine per-input absence owners are email-only, and the three agent-liveness
-rules are `critical`. That split is **derived**, not a default:
+The nine per-input absence owners — and the two frozen-counter detectors that
+ride the same grading (#206) — are email-only, and the three agent-liveness rules
+are `critical`. That split is **derived**, not a default:
 
 - No rule in this folder reads `docker_*`, `ping_*`, `smart_device_*`,
   `sensors_temp*`, `acpi_fan_state_*` or `rapl_power_watts` — they feed
@@ -274,6 +276,40 @@ fails the deploy if any rule outside the declared owners reads one of those
 families, because at that moment the grading becomes false and the owner has to
 be re-graded. It parses the rule YAML rather than grepping, since these files
 name the families throughout their prose.
+
+**Proving a rule fires WITHOUT paging a human (#206).** A rule nobody has watched
+evaluate true is not a guard, but a drill rule that reaches `Alerting` delivers a
+fake alert to the operator's real email — the root policy routes everything, and
+no label sends an alert nowhere. So a drill must be un-pageable **by
+construction**, and there are three tools, in increasing order of preference:
+
+1. `POST /api/v1/eval` with the rule's own `data`/`condition` — Grafana's
+   condition evaluator, nothing scheduled, nothing notifiable. It returns the
+   reduced value and the condition result (`C: 1` = would fire). This is how
+   #206's detector was shown to fire on a frozen counter *and* stay quiet on both
+   live hosts, in one table, with zero delivery risk.
+2. A scheduled drill rule created `isPaused: true`, or with a `for:` longer than
+   the drill's own life (`for: 1h` for a 3-minute observation) — the condition
+   still evaluates and the state still moves to `pending`, which never notifies.
+3. Never: unpausing a drill rule with a real `for` and watching it fire.
+
+Feed drill data under a **synthetic host label** (`rapl-freeze-drill-206`), never
+a real host's, and delete both the series
+(`POST /api/v1/admin/tsdb/delete_series`) and the rule afterwards. **Deleting the
+rule must be an explicit API `DELETE`** — Grafana's file provisioner never
+removes a rule its file stops declaring (#220), so a drill rule left behind is
+served forever.
+
+**Why `obs-rapl-power-frozen-*` counts as an owner and not a consumer (#206).**
+It reads `rapl_power_watts`, so the guard would flag it — and the grading it
+protects is not violated: a frozen-counter rule is a second *health* owner of the
+same family, at the same severity, and its whole blind spot (the family gone) is
+the sibling `-absent` rule's *firing* condition, which is why it carries
+`noDataState: OK`. It never reads the value as data about the machine, only as a
+statement about the pipeline. The guard's owner derivation therefore admits
+`-frozen` beside `-absent`; a rule that consumes one of these families to decide
+something about the *hardware* — an `obs-sensors-temp-high` — still lands in the
+consumer half, where it belongs.
 
 **The accepted cost, as arithmetic.** When a whole agent dies its liveness rule
 *and* every family rule for that host fire together — for eq12 that is one page
@@ -308,6 +344,8 @@ them — the #188 defect.
 | `obs-telegraf-metrics-absent-n5pro` | Telegraf metrics stopped arriving for n5pro (#186) | `min by (host) (lag(system_uptime{host="n5pro"}[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-rapl-power-absent-eq12` | RAPL power domains stopped arriving for eq12 (#194) | `count by (host) (last_over_time(rapl_power_watts{host="eq12"}[10m]))` < 3, `for: 5m` | **Alerting** |
 | `obs-rapl-power-absent-n5pro` | RAPL power domains stopped arriving for n5pro (#194) | `count by (host) (last_over_time(rapl_power_watts{host="n5pro"}[10m]))` < 1, `for: 5m` | **Alerting** |
+| `obs-rapl-power-frozen-eq12` | RAPL package power frozen at zero for eq12 (#206) | `max_over_time(rapl_power_watts{host="eq12",domain="package-0"}[6h])` < 0.001, `for: 5m` | OK |
+| `obs-rapl-power-frozen-n5pro` | RAPL package power frozen at zero for n5pro (#206) | `max_over_time(rapl_power_watts{host="n5pro",domain="package-0"}[6h])` < 0.001, `for: 5m` | OK |
 | `obs-smart-metrics-absent-eq12` | SMART attributes stopped arriving for eq12 (#202) | `count by (host) (last_over_time(smart_device_health_ok{host="eq12"}[10m]))` < 1, `for: 5m` | **Alerting** |
 | `obs-smart-metrics-absent-n5pro` | SMART attributes stopped arriving for n5pro (#202) | `count by (host) (last_over_time(smart_device_health_ok{host="n5pro"}[10m]))` < 1, `for: 5m` | **Alerting** |
 | `obs-sensors-metrics-absent-eq12` | Sensor temperatures stopped arriving for eq12 (#202) | `count by (host) (last_over_time({__name__=~"sensors_temp[0-9]+_input", host="eq12"}[10m]))` < 7, `for: 5m` | **Alerting** |
