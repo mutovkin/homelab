@@ -1809,6 +1809,14 @@
 - name: Assert the freshness anchor list covers every proven family
   ansible.builtin.assert:
     that:
+      # `2 if rapl`, NOT a flat `3 +`, and this is not a simplification anyone
+      # should undo: RAPL contributes TWO families (rapl_power_watts and
+      # rapl_energy_uj, #206) and BOTH are conditional on the same flag, because
+      # one printf in files/rapl_power.sh produces both. A host with
+      # telegraf_agent_rapl_power false therefore has NEITHER, and a hardcoded 3
+      # would fail on it — on a host that is behaving perfectly. Neither term is
+      # a count of anything computed; both are literals that must be edited when
+      # the list is (see WHAT THIS DOES NOT CATCH above).
       - telegraf_agent_freshness_families | length ==
         (2 + (1 if telegraf_agent_acpi_fan_state | bool else 0)
            + (2 if telegraf_agent_rapl_power | bool else 0))
