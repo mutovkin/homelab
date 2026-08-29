@@ -137,9 +137,13 @@
 # with a statement of the gap rather than leaving it standing — a comment pointing
 # at a guard that does not exist is the same defect class as a guard that cannot
 # fail, and worse in one respect: it stops the next reader from noticing. #212
-# then BUILT the checks, and both halves were witnessed failing against live
-# Grafana (a NoData rule; an API-created stray rule) before this sentence was
-# allowed back. If those tasks are ever removed, this paragraph goes with them.
+# then BUILT the checks, and no half was allowed into this sentence until it had
+# been SEEN to fail against live Grafana. The set half fired on its own first live
+# run, on genuine drift nobody planted: three rules a sibling branch had applied to
+# the shared host and that this repo does not declare (the mechanism behind that is
+# now tracked as #220). The evaluation half is exercised by provisioning a scratch
+# rule whose expr names a metric that does not exist and watching this deploy fail.
+# If those tasks are ever removed, this paragraph goes with them.
 #
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
@@ -1637,15 +1641,25 @@
 # provisioned rule is missing AND one stray exists, and a count that fails cannot
 # name the culprit. The symmetric difference is printed by uid, in both directions.
 #
-# WHY the evaluation half is expressed as a COUNT OF PASSING RULES rather than "no
-# rule is unhealthy". `<extracted list> | rejectattr(...) | length == 0` over an
-# ACCIDENTALLY EMPTY extraction — an API shape change, a parse that silently
-# yielded nothing — is literally `assert: true`. Comparing a count of rules that
-# PASSED a per-rule predicate against a count derived from the repo makes every one
-# of those failures LOWER the count and fire the guard; no vacuous pass is
-# representable. Same reason the timestamp predicate is a `match` against an
-# RFC3339 regex BEFORE `to_datetime`: an unparseable timestamp drops the rule out
-# of the passing set instead of raising or being waved through.
+# WHY the evaluation half asks "is every EXPECTED uid in the set of rules that
+# PASSED" rather than "no rule is unhealthy". `<extracted list> | rejectattr(...)
+# | length == 0` over an ACCIDENTALLY EMPTY extraction — an API shape change, a
+# parse that silently yielded nothing — is literally `assert: true`. Building a set
+# of uids that each PASSED a per-rule predicate, and requiring the repo's expected
+# set to be contained in it, makes every one of those failures shrink the passing
+# set and fire the guard; no vacuous pass is representable, because `expected`
+# comes from the files and `passing` comes from the extraction.
+#
+# It is a SUBSET test and not a count for a reason that took a control to see:
+# counts are satisfied by WRONG-RULE SUBSTITUTION. One stray healthy rule paired
+# with one broken expected rule leaves `33 == 33` true, and the guard passes over
+# precisely the defect it exists to catch. Measured on the same fixture that
+# justifies the shape: expected [r1,r2,r3] vs passing [r1,r2,stray] gives equal
+# counts and a difference of [r3]. The `length > 0` clause is the other half — an
+# empty expected set (every rule paused) would make any subset test vacuously
+# true. Same reason the timestamp predicate is a `match` against an RFC3339 regex
+# BEFORE `to_datetime`: an unparseable timestamp drops the rule out of the passing
+# set instead of raising or being waved through.
 #
 # WHY the Host header, and no redirect follow. GF_SERVER_DOMAIN/ROOT_URL make
 # Grafana 301 any request whose Host does not match, and a followed redirect leaves
@@ -1663,18 +1677,32 @@
 # failure family this entire role exists to catch. They are `when: not
 # ansible_check_mode` because their input is a live Grafana that only exists after
 # a real apply — so, per CLAUDE.md, their first execution is their first test and
-# they were verified against the live defect (a NoData rule and an API-created
-# stray) rather than against a dry run.
+# each half is verified against a LIVE defect rather than a dry run. The set half
+# needed no fixture at all: it failed on its first real run against three rules a
+# sibling branch had applied and this repo does not declare (see #220). The
+# evaluation half is driven with a scratch rule pointing at a metric that does not
+# exist, `noDataState: OK` so the fixture itself cannot page while the `health`
+# field goes `nodata` — which is the whole argument for reading health and not
+# state, run as an experiment instead of asserted. Re-run that fixture before
+# trusting any future edit to these tasks; a guard nobody has seen fail is not a
+# guard.
 - name: Verify Grafana serves and evaluates exactly the provisioned alert rules
   vars:
     _obs_rule_dir: "{{ role_path }}/files/data/grafana/provisioning/alerting"
     # Varargs, not a list: `query('file', <list>)` does not flatten its terms on
     # ansible-core 2.19+. Same idiom, same reason, as the group_by check above.
+    # `default=[]` on BOTH hops, and it is not defensive padding: the set check's
+    # own fail_msg tells operators to retire a rule with a `deleteRules:` block,
+    # which is a TOP-LEVEL key. A file that carries only tombstones has no
+    # `groups:` at all, and a bare `map(attribute='groups')` raises on the missing
+    # attribute — so following this role's own advice would fail every deploy with
+    # a raw Jinja error. Same precedent as `map(attribute='expr', default='')` in
+    # the grading check above.
     _obs_repo_groups: >-
       {{ query('file', *query('fileglob', _obs_rule_dir ~ '/*.yaml'))
-         | map('from_yaml') | map(attribute='groups') | flatten | list }}
+         | map('from_yaml') | map(attribute='groups', default=[]) | flatten | list }}
     _obs_repo_rules: >-
-      {{ _obs_repo_groups | map(attribute='rules') | flatten | list }}
+      {{ _obs_repo_groups | map(attribute='rules', default=[]) | flatten | list }}
     _obs_repo_rule_uids: "{{ _obs_repo_rules | map(attribute='uid') | sort | list }}"
     # A PAUSED rule is still SERVED but is not expected to evaluate, so the two
     # halves need different expectations. `rejectattr('isPaused', 'equalto', true)`
@@ -1688,6 +1716,15 @@
          | map(attribute='interval') | list }}
     _obs_bad_intervals: >-
       {{ _obs_group_intervals | reject('match', '^[0-9]+[smh]$') | list }}
+    # A uid duplicated across two files satisfies BOTH difference checks below
+    # (difference is set-based), so half A would not notice until its retry budget
+    # expired, and its message would then read `none` in both direction buckets —
+    # a misdiagnosis by construction. Caught here instead, statically, by name.
+    _obs_duplicate_rule_uids: >-
+      {{ dict((_obs_repo_rules | groupby('uid') | map(attribute='grouper') | list)
+              | zip(_obs_repo_rules | groupby('uid') | map(attribute='list')
+                    | map('length') | list))
+         | dict2items | selectattr('value', 'gt', 1) | map(attribute='key') | sort | list }}
     # The recency threshold is 2x the WIDEST group interval in the repo, so it
     # tracks the files instead of being a second number to keep in sync. Each unit
     # is handled explicitly and `+ [0]` keeps `max` from raising on an empty
@@ -1769,10 +1806,17 @@
           - _obs_group_intervals | length == _obs_repo_groups | length
           - _obs_bad_intervals | length == 0
           - _obs_rule_max_interval_s | int > 0
+          - _obs_duplicate_rule_uids | length == 0
         fail_msg: >-
-          The alert-rule evaluation check derives its recency threshold from the
-          group intervals in files/data/grafana/provisioning/alerting/*.yaml, and
-          that derivation just failed. Read
+          The alert-rule checks could not derive a trustworthy expectation from
+          files/data/grafana/provisioning/alerting/*.yaml.
+          DUPLICATE uids across the rule files:
+          {{ _obs_duplicate_rule_uids | join(', ') | default('none', true) }} — a
+          uid declared twice is caught HERE, statically, because the served-set
+          check below is set-based and a duplicate satisfies both of its direction
+          checks; it would fail 60s later on retry exhaustion with `none` in both
+          buckets, which is a misdiagnosis by construction.
+          The recency threshold is derived from the group intervals. Read
           {{ _obs_repo_groups | length }} group(s),
           {{ _obs_group_intervals | length }} of which declare an `interval:`;
           {{ _obs_bad_intervals | length }} are in a unit this guard does not
@@ -1860,14 +1904,20 @@
         headers:
           Host: "{{ vault_grafana_domain }}"
       register: grafana_rule_eval
-      # The aggregate IS the condition, deliberately: anything that breaks the
-      # extraction (empty response, renamed field, unparseable timestamp) lowers
-      # the passing count and keeps retrying, then fails. There is no shape of
-      # response that makes this pass without every expected rule really having
-      # reported health=ok and a lastEvaluation inside the window.
+      # SUBSET, not count equality, and the difference is not pedantic: counts are
+      # satisfied by WRONG-RULE SUBSTITUTION. One stray healthy rule plus one
+      # broken expected rule keeps `33 == 33` true and the guard passes over
+      # exactly the defect it exists to catch. Demonstrated before shipping:
+      # expected [r1,r2,r3] against passing [r1,r2,stray] scores equal counts and
+      # a difference of [r3]. Half A usually catches the stray first, but these two
+      # fetches are separate requests and the eval guard has to stand on its own.
+      # Still fails CLOSED — an empty or broken extraction makes the difference the
+      # ENTIRE expected set — and the `> 0` clause closes the all-paused case,
+      # where an empty expected set would make the subset vacuously satisfied.
       until: >-
         grafana_rule_eval.status | default(0) == 200
-        and _obs_eval_passing_uids | length == _obs_expected_active_uids | length
+        and _obs_expected_active_uids | length > 0
+        and _obs_expected_active_uids | difference(_obs_eval_passing_uids) | length == 0
       # ~7 minutes: a rule in a 5m-interval group can legitimately not have
       # evaluated yet on the first attempt after the provisioning restart above.
       retries: 40
@@ -1881,7 +1931,8 @@
         that:
           - grafana_rule_eval is not failed
           - grafana_rule_eval.status | default(0) == 200
-          - _obs_eval_passing_uids | length == _obs_expected_active_uids | length
+          - _obs_expected_active_uids | length > 0
+          - _obs_expected_active_uids | difference(_obs_eval_passing_uids) | length == 0
         fail_msg: >-
           Grafana is serving the alert rules but they are not all EVALUATING.
           {{ _obs_eval_passing_uids | length }} of
@@ -1889,6 +1940,9 @@
           reported health=ok with a lastEvaluation newer than
           {{ _obs_eval_cutoff }} (2x the widest group interval,
           {{ _obs_rule_max_interval_s }}s).
+          NOT PROVEN EVALUATING:
+          {{ _obs_expected_active_uids | difference(_obs_eval_passing_uids) | join(', ') | default('none', true) }}.
+          Those are the rules to fix; the buckets below say WHY each one failed.
           UNHEALTHY: {{ _obs_eval_unhealthy | default({}, true) }}.
           NO health FIELD: {{ _obs_eval_no_health | join(', ') | default('none', true) }}.
           UNPARSEABLE lastEvaluation:
