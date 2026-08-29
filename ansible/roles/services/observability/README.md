@@ -432,11 +432,19 @@ shipping produces **no row at all**, so its alert instance vanishes, Grafana mar
 it stale and *resolves* the alert. It would fire for one evaluation and then
 declare the dead host healthy.
 
-The working form keeps a 24 h outer window and counts recency inside it:
+The working form keeps a 24 h outer window and counts recency inside it. **The
+deployed expression is:**
 
 ```
-_time:24h source:host | stats by (hostname) count() if (_time:20m) as recent
+_time:24h source:host "homelab-heartbeat" | stats by (hostname) count() if (_time:20m) as recent
 ```
+
+Two independent things are load-bearing there, and the sections below cover them in
+turn: the **24 h outer window** (why the naive query cannot work) and the
+**`"homelab-heartbeat"` filter** (what is actually counted). Dropping either one
+breaks the rule in a different way.
+
+#### The outer window
 
 A dead shipper is still in the 24 h window, so it returns a row with `recent = 0` —
 which a `< 1` threshold can fire on. Measured 2026-08-19 against the live
@@ -457,6 +465,49 @@ _time:15m source:host | stats by (hostname) count() as rows
 
 Q1 emits the zero-count group; Q3 drops the series entirely. That difference is the
 whole reason the 24 h outer window is load-bearing.
+
+**These two queries predate the heartbeat filter and are reproduced as they were
+run** — they were measured to settle the outer-window question, and they settle it
+regardless of what the inner filter counts. Adding `"homelab-heartbeat"` narrows
+which records are counted; it does not change the fact that Q3's shape drops a dead
+host's series entirely.
+
+#### What it counts: the heartbeat, not incidental traffic
+
+The `"homelab-heartbeat"` filter is the difference between this rule working and
+this rule paging all night, and it is **not** an optimisation that can be dropped
+for brevity.
+
+An earlier draft counted ANY `source:host` record in a 15-minute window. Measured
+2026-08-20, host logs here arrive in **bursts** with long silences between them —
+one 10 m bucket held 1288 records, another held 1 — so "no records" is the *normal*
+state of a healthy host, not a stall:
+
+| host | empty 10 m windows | empty 15 m | max gap |
+| ---- | ------------------ | ---------- | ------- |
+| `eq12_docker` | 66.2% | 57.5% | 3600.0 s |
+| `eq12` | 39.7% | 33.8% | 3600.0 s |
+| `n5pro` | 0.0% | 0.0% | 448 s |
+| `n5pro_docker` | 0.0% | 0.0% | 396 s |
+
+A 15 m clause maps to 33.8% empty on `eq12` — a third of its life firing on a
+healthy hypervisor. Two things that look like fixes and are not: **widening the
+window** (the max gap is *exactly* 3600.0 s, which is one incidental hourly event
+holding it open, not headroom) and **per-host tuning** (burstiness does not track
+volume — the busiest host is the worst offender).
+
+So the rule does not ask "did anything arrive". It asks "did the beat arrive":
+`roles/rsyslog_structured` emits `homelab-heartbeat <inventory_hostname>` every
+5 minutes on every host, through the same `*.*` selector and the same
+`structured.log` that every real host log line travels. 20 m is four consecutive
+missed beats. Absence becomes a **fact** rather than an ambiguity, and it needs no
+per-host tuning because the signal is identical on a busy container host and an
+idle hypervisor.
+
+> **One contract in two files.** The marker string in the rule and
+> `vector_heartbeat_marker` in `roles/rsyslog_structured/defaults/main.yml` must
+> match. If they drift apart, every host reads as dead — and nothing but the role's
+> own end-to-end probe would notice.
 
 The `victoriametrics-logs-datasource` plugin returns this as a **multi-series**
 frame — one frame per hostname, carrying `hostname` as a field label — so Grafana

@@ -801,16 +801,6 @@
       {{ (_obs_policy_template.split('group_by:')[1].split('group_wait:')[0])
          | regex_replace('(?m)^\s*#.*$', '')
          | regex_findall('-\s*(\w+)') }}
-    _obs_truenas_by_labels: >-
-      {{ (((lookup('file', _obs_alerting_dir ~ '/truenas-health.yaml') | from_yaml).groups
-           | map(attribute='rules') | flatten
-           | map(attribute='data') | flatten
-           | map(attribute='model')
-           | selectattr('expr', 'defined')
-           | map(attribute='expr')
-           | map('regex_findall', 'by \(([^)]+)\)')
-           | flatten | join(',')).split(','))
-         | map('trim') | reject('equalto', '') | unique | list }}
     # The glob is unpacked as VARARGS on purpose: `query('file', <list>)` does
     # not flatten its terms (ansible-core 2.19+ hands the file lookup the list
     # itself and it dies with "'_AnsibleLazyTemplateList' object has no
@@ -828,26 +818,35 @@
            | flatten | join(',')).split(','))
          | map('trim') | reject('equalto', '') | unique | list }}
   block:
-    # Truenas-scoped ON PURPOSE, and scoped to the FILE truenas-health.yaml:
-    # the other rule files aggregate on `host`, `check_type`, `error_type` and
-    # `intentional`, none of which are in group_by, so generalizing this
-    # coverage assert fleet-wide would be a real routing change (it would
-    # demand those keys be added), not a lint fix. The same scoping means a
-    # TrueNAS rule added in a NEW sibling file gets no coverage from A — B
-    # still catches the inert direction, but not that one. Tracked in #198.
-    - name: Assert every label the TrueNAS rules aggregate on is in the policy's group_by
+    # FLEET-WIDE since #198. It was TrueNAS-scoped when #188 added it, because
+    # generalizing it then would have been a real routing change rather than a
+    # lint fix: the other rule files aggregate on `host`, `check_type`,
+    # `error_type` and `intentional`, and none were in group_by. #198 made that
+    # routing change — all four are now group_by keys, with the reasoning per
+    # key in the policy template — so the assert can finally read every rule
+    # file, and a TrueNAS rule added in a NEW sibling file is covered too.
+    #
+    # This direction (A) and the inert-key check (B) are now both total: A says
+    # every label the rules aggregate on is grouped on, B says every key grouped
+    # on is aggregated on by some rule. Together they pin the two sides to each
+    # other, in both directions, across all seven files.
+    - name: Assert every label ANY alert rule aggregates on is in the policy's group_by
       ansible.builtin.assert:
         that:
           - _obs_policy_template | regex_findall('group_by:') | length == 1
           - _obs_policy_template | regex_findall('group_wait:') | length == 1
           - _obs_policy_group_by | length >= 2
-          - _obs_truenas_by_labels | length >= 2
-          - _obs_truenas_by_labels | difference(_obs_policy_group_by) | length == 0
+          # Fleet-wide floor (#198). The union across all seven rule files was
+          # TEN labels when this was written; >= 2 was the TrueNAS-scoped floor
+          # and would no longer detect a collapsed parse here.
+          - _obs_all_by_labels | length >= 6
+          - _obs_all_by_labels | difference(_obs_policy_group_by) | length == 0
         fail_msg: >-
-          The TrueNAS alert rules aggregate on
-          {{ _obs_truenas_by_labels }} but the notification policy's group_by is
+          The provisioned alert rules aggregate on
+          {{ _obs_all_by_labels }} but the notification policy's group_by is
           {{ _obs_policy_group_by }} — missing:
-          {{ _obs_truenas_by_labels | difference(_obs_policy_group_by) }} (#188).
+          {{ _obs_all_by_labels | difference(_obs_policy_group_by) }}
+          (#188 for TrueNAS, #198 fleet-wide).
           A label absent from group_by is not grouped on, so every instance of
           such a rule merges into ONE notification whose subject names none of
           them: two drives crossing 47C together, or two degraded pools, arrive
@@ -858,9 +857,10 @@
           $labels.devname interpolation in the summaries, which then render as
           EMPTY strings — "TrueNAS disk  is at 48C", the drive name simply gone.
           A short list on either side means this guard can no longer PARSE its
-          inputs (group_by carries 8 keys, truenas-health.yaml aggregates on 2)
-          — an empty parse would make the comparison trivially true, i.e. a
-          silent-green guard. Teach it the new shape; do not delete it.
+          inputs (group_by carries 12 keys; the seven rule files aggregate on 10
+          distinct labels) — an empty parse would make the comparison trivially
+          true, i.e. a silent-green guard. Teach it the new shape; do not delete
+          it.
           A duplicated `group_by:` or `group_wait:` anchor fails the same way
           and for the same reason: the policy list is sliced out of the raw
           template between those two literals (a .j2 cannot be parsed as YAML),

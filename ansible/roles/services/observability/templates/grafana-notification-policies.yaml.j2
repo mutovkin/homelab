@@ -84,6 +84,36 @@ policies:
       # `pool` for the same reason (#188): truenas-pool-degraded and
       # truenas-scrub-overdue carry one instance per pool.
       - pool
+      # ---- #198: the same defect class, everywhere ELSE in the fleet --------
+      # #188 fixed only the TrueNAS half and scoped its guard to that one file.
+      # The survey it left behind named four more labels that rules aggregate on
+      # and this policy did not group by. Each is added below with the instance
+      # it exists to keep apart. Measured 2026-08-26: with these four added, the
+      # union of every `by (...)` label across all seven rule files is a SUBSET
+      # of this list, and this list has no inert key — both directions clean.
+      #
+      # `host` — the one with a live victim. Most telegraf rules bake the host
+      # into the rule uid, so `alertname` already splits them; but
+      # obs-vector-metrics-absent is a SINGLE rule covering every host via
+      # `by (host)` with $labels.host in its summary, so vector dying on eq12
+      # and n5pro together merged into one [FIRING:2] naming neither.
+      - host
+      # `error_type` — obs-vector-component-errors interpolates
+      # $labels.error_type directly into its summary. Two error types on one
+      # component merged would produce a subject naming only whichever won.
+      - error_type
+      # `intentional` — obs-vector-discarding-events aggregates
+      # `by (component_id, intentional)`. An intentional discard and a real data
+      # loss on the same component are different incidents and must not share a
+      # notification, even though the summary does not interpolate the label.
+      - intentional
+      # `check_type` — PROPHYLACTIC, and honest about it: measured 2026-08-26,
+      # every http_response series carries check_type=http_health, so this key
+      # splits nothing TODAY and is a no-op. It is here because the probe rules
+      # already aggregate `by (server, check_type)`, so the day a second check
+      # type is added (an icmp probe, a cert-expiry check) the split is already
+      # correct rather than silently merging on first use.
+      - check_type
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s
