@@ -157,4 +157,6 @@ to its public URL and the response is not JSON.
   previous Vector upgrade that broke this pipeline, and why the container is `monitor-only`.
 - [experiment-must-discriminate-between-hypotheses.md](../conventions/experiment-must-discriminate-between-hypotheses.md)
   — the idle-zero trap avoided here.
-- #217 — per-host attribution for this rule.
+- #217 — per-host attribution for this rule and its two siblings, landed: all four
+  vector-health rules now group `by (host, ...)`, so the dropout above would be a
+  series that stops rather than a member quietly leaving a healthy-looking aggregate.
