@@ -137,13 +137,14 @@
 # with a statement of the gap rather than leaving it standing — a comment pointing
 # at a guard that does not exist is the same defect class as a guard that cannot
 # fail, and worse in one respect: it stops the next reader from noticing. #212
-# then BUILT the checks, and no half was allowed into this sentence until it had
-# been SEEN to fail against live Grafana. The set half fired on its own first live
-# run, on genuine drift nobody planted: three rules a sibling branch had applied to
-# the shared host and that this repo does not declare (the mechanism behind that is
-# now tracked as #220). The evaluation half is exercised by provisioning a scratch
-# rule whose expr names a metric that does not exist and watching this deploy fail.
-# If those tasks are ever removed, this paragraph goes with them.
+# then BUILT the checks. The SET half has been seen to fail against live Grafana,
+# on genuine drift nobody planted: three rules a sibling branch had applied to the
+# shared host and that this repo does not declare (the mechanism behind that is now
+# tracked as #220). Read the first sentence of this paragraph with that scope in
+# mind — "evaluated" currently means "every rule reported a recent lastEvaluation
+# and no datasource/exec error", which is NOT the same as "no rule's selector is
+# dead"; the NoData case is documented at the checks themselves. If those tasks are
+# ever removed, this paragraph goes with them.
 #
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
@@ -1623,13 +1624,61 @@
 # These two checks close both directions. They are the checks the comment at the
 # top of this file used to CLAIM existed while they did not (#212).
 #
-# WHY `health`, NEVER `state`. `state` is firing/pending/inactive and is not a
+# WHAT THE SECOND HALF DOES AND DOES NOT CATCH. Read this before trusting it, and
+# before extending it: it is an EVALUATION FRESHNESS guard, not a rule-correctness
+# guard. It proves every unpaused rule is still being RUN — it catches a stalled
+# scheduler, a wedged group, a rule that silently stopped evaluating. IT DOES NOT
+# CATCH A TYPO'D SELECTOR, which is the failure #212 was filed about. That limit is
+# measured, not suspected, and the measurement is worth keeping:
+#
+#   A scratch rule was provisioned whose expr named a metric that does not exist.
+#   The query really returned nothing — checked three ways straight at
+#   VictoriaMetrics (`sum(increase(selftest_212_no_such_metric[15m]))`, the bare
+#   metric, and the `increase()` form) — resultLen=0 for all three. The rule
+#   nonetheless reported health=ok, state=inactive, totals={normal: 1} and a fresh
+#   lastEvaluation, and THIS DEPLOY PASSED IT.
+#
+# The mechanism: `noDataState` maps the NoData result to a state BEFORE `health` is
+# derived, so `health` describes the MAPPED state, not the raw evaluation.
+#
+# BOTH cohorts were then measured directly, the Alerting one under a scoped Grafana
+# silence so it could not page (matcher selftest_212="true", verified state=active
+# BEFORE the rule existed; instance labels are inherited by NoData-born instances,
+# so the matcher really covered it):
+#
+#   noDataState  rule.health  rule.state  alerts[].state     delivered?
+#   OK           ok           inactive    Normal (NoData)    no
+#   Alerting     ok           pending     Pending (NoData)   no (v2/alerts: 0)
+#
+# `health` is `ok` for BOTH. This is not an inference from "0 of 37 rules use
+# noDataState: NoData" — it is what the API returned for each mapping in turn. The
+# `health == 'ok'` clause below therefore cannot see absence-of-data for ANY rule in
+# this repo, in either cohort.
+#
+# The honest signal does exist at this endpoint and is mapping-INDEPENDENT: the
+# per-instance `alerts[].state` carries a `(NoData)` suffix in both rows above.
+# Detection is deliberately NOT built on it here — that is a design change with its
+# own edge cases (paused rules, rules legitimately without instances) and it is
+# specced in its own issue rather than bolted onto a freshness guard.
+#
+# Two more facts from that run, both worth keeping. `for: 1h` IS honoured on a
+# NoData->Alerting transition — the instance stopped at Pending — so `for` is real
+# belt, though the silence was the control and the belt was not what we relied on.
+# And UNMEASURED, stated as suspicion and not as fact: `execErrState` plausibly
+# hides `health: error` by the same mapping. Nobody has tested it. Do not write it
+# down as known until someone does.
+#
+# The health clause STAYS regardless — it costs one comparison and it fires if
+# Grafana ever does report a non-ok health — but the load-bearing signal here is
+# `lastEvaluation` recency. Detecting a dead selector needs a different mechanism
+# and is tracked separately.
+#
+# WHY NOT `state`, in any case. `state` is firing/pending/inactive and is not a
 # fault signal here: obs-alert-delivery-heartbeat is INTENTIONALLY always firing
-# (it is the end-to-end proof that the notification path works), 21 rules carry
-# `noDataState: Alerting` and 12 carry `OK` by deliberate design, and `inactive` is
-# also what a rule that has NEVER RUN reports — so `state` cannot tell "evaluated,
-# healthy" from "never evaluated". `health` (ok/error/nodata/unknown) plus a RECENT
-# `lastEvaluation` are the honest fields, and they are what these assert.
+# (it is the end-to-end proof that the notification path works), the noDataState
+# split above is deliberate per-rule design, and `inactive` is also what a rule that
+# has NEVER RUN reports — so `state` cannot tell "evaluated, healthy" from "never
+# evaluated".
 #
 # WHY the expectation is DERIVED, never a number written here. A hardcoded 33 is a
 # matched pair that drifts the moment a rule is added — the exact defect class #194
@@ -1680,12 +1729,17 @@
 # each half is verified against a LIVE defect rather than a dry run. The set half
 # needed no fixture at all: it failed on its first real run against three rules a
 # sibling branch had applied and this repo does not declare (see #220). The
-# evaluation half is driven with a scratch rule pointing at a metric that does not
-# exist, `noDataState: OK` so the fixture itself cannot page while the `health`
-# field goes `nodata` — which is the whole argument for reading health and not
-# state, run as an experiment instead of asserted. Re-run that fixture before
-# trusting any future edit to these tasks; a guard nobody has seen fail is not a
-# guard.
+# evaluation half has NOT yet been seen to fail, and the attempt is worth recording
+# because it falsified the assumption this guard was built on. A scratch rule whose
+# expr named a metric that does not exist (`noDataState: OK` so the fixture could
+# not page) was provisioned, loaded and evaluated — and this deploy passed it.
+# Measured on the live rule: health=ok, state=inactive, totals={normal: 1}, a
+# recent lastEvaluation, while the same query against VictoriaMetrics returned
+# resultLen=0. `noDataState` maps the NoData result to a state BEFORE `health` is
+# derived, so the fault never reaches the field asserted on here. See the WHY
+# `health` note above for what that does and does not leave covered. Until the
+# predicate is corrected and a fixture is actually WATCHED to fail it, treat this
+# half as unwitnessed: a guard nobody has seen fail is not a guard.
 - name: Verify Grafana serves and evaluates exactly the provisioned alert rules
   vars:
     _obs_rule_dir: "{{ role_path }}/files/data/grafana/provisioning/alerting"
@@ -1885,17 +1939,24 @@
           file DECLARES, never the ones it stopped declaring. So a rename or a
           removal leaves an orphan that keeps evaluating, keeps paging, and is
           invisible in git.
-          Fix (2) IN VERSION CONTROL with a `deleteRules:` block in the rule file
-          (`deleteRules: [{orgId: 1, uid: <uid>}]`) so the removal is reviewable
-          and replays on a rebuilt host; `DELETE /api/v1/provisioning/alert-rules/<uid>`
-          only fixes the machine in front of you. If the rule is wanted, write it
-          into this role's alerting folder instead.
+          Fix (2) with a `deleteRules:` block in a rule file
+          (`deleteRules: [{orgId: 1, uid: <uid>}]`). For a FILE-PROVISIONED rule
+          that is not the tidier option, it is the ONLY one: the provisioning API
+          refuses the delete with HTTP 409 `cannot delete with provided provenance
+          '', needs 'classic-file-provisioning'` — and `X-Disable-Provenance: true`
+          does not help, it is what sets the provenance to '' and CAUSES the
+          mismatch (measured). `DELETE /api/v1/provisioning/alert-rules/<uid>`
+          works only on an API-CREATED stray, which is cause (1). Note also that
+          `deleteRules:` is a TOP-LEVEL key, so a tombstone-only file has no
+          `groups:` and trips the per-file "contributed rules" assert further up —
+          put the block in a file that also ships rules. If the rule is wanted,
+          write it into this role's alerting folder instead.
           HTTP status was {{ grafana_served_rules.status | default('none') }}.
         quiet: true
       when: not ansible_check_mode
 
     # ---- Half B: is every one of them actually EVALUATING? ----------------------
-    - name: Fetch the evaluation state of every alert rule Grafana serves
+    - name: Fetch the evaluation freshness of every alert rule Grafana serves
       ansible.builtin.uri:
         url: "http://127.0.0.1:3000/api/prometheus/grafana/api/v1/rules"
         user: "{{ vault_grafana_user }}"
@@ -1918,15 +1979,21 @@
         grafana_rule_eval.status | default(0) == 200
         and _obs_expected_active_uids | length > 0
         and _obs_expected_active_uids | difference(_obs_eval_passing_uids) | length == 0
-      # ~7 minutes: a rule in a 5m-interval group can legitimately not have
-      # evaluated yet on the first attempt after the provisioning restart above.
+      # ~7 minutes, and MEASURED to be load-bearing rather than defensive. On the
+      # apply that retired #212's own scratch fixture, this task retried 27 times
+      # (~4.5 min) before passing: after the provisioning restart above, rules in
+      # the 5m-interval groups genuinely had not evaluated yet. That run is also
+      # the live demonstration that this comparison can be FALSE and then become
+      # TRUE — 27 consecutive false evaluations followed by a real pass — which is
+      # the freshness predicate discriminating in production, not just in a
+      # control. Shrink this budget and a cold scheduler fails the deploy.
       retries: 40
       delay: 10
       changed_when: false
       ignore_errors: true
       when: not ansible_check_mode
 
-    - name: Assert every provisioned alert rule is evaluating healthily and recently
+    - name: Assert every unpaused alert rule is still being evaluated
       ansible.builtin.assert:
         that:
           - grafana_rule_eval is not failed
