@@ -108,11 +108,15 @@ groups:
               # EMPTY rather than failing — a notification that silently drops the
               # tag separating a throttle bound from real loss, or the machine to go
               # look at. `host` also stops the FOUR Vector instances collapsing into
-              # one series per component_id (#217): component_id is `victorialogs` on
-              # every one of them, and the remediation above is per-host — the log to
-              # read is not even in the same place on all four. Both are notification
-              # policy group_by keys, so two hosts discarding produce TWO
-              # notifications rather than one [FIRING:2] naming neither.
+              # one series per component_id (#217). Be precise about what that fixed:
+              # `sum by (component_id)` still went over 0 whenever ANY host discarded,
+              # so the fleet-level signal was never lost — what was lost was WHICH
+              # instance, and two hosts discarding at once merged into a single
+              # notification naming neither. component_id is `victorialogs` on every
+              # instance and the remediation above is per-host (the log to read is not
+              # even in the same place on all four). Both labels are notification
+              # policy group_by keys, so two hosts discarding now produce TWO
+              # notifications.
               # Same reason error_type is kept on the rule below.
               expr: "sum by (host, component_id, intentional) (increase(vector_component_discarded_events_total[15m]))"
               instant: true
@@ -203,9 +207,12 @@ groups:
               # that silently drops the one field separating a sink auth failure
               # from a remap abort, or the machine it happened on. `host` also stops
               # the FOUR Vector instances collapsing into one series per component
-              # (#217), which would both hide a per-instance error and send the
-              # operator to the wrong box. Both are notification policy group_by
-              # keys, so two hosts erroring produce TWO notifications.
+              # (#217). Precisely: `sum by (component_id)` still exceeded 0 whenever
+              # ANY host errored, so the signal itself was never suppressed — what it
+              # hid was WHICH instance, sending the operator to the wrong box, and it
+              # merged two hosts erroring at once into one notification naming
+              # neither. Both labels are notification policy group_by keys, so two
+              # hosts erroring now produce TWO notifications.
               expr: "sum by (host, component_id, error_type) (increase(vector_component_errors_total[15m]))"
               instant: true
               range: false
@@ -371,20 +378,27 @@ groups:
       # healthy-looking aggregate, not an absence anything owns. (Total death of an
       # instance IS still owned, per-host, by obs-vector-metrics-absent — it is this
       # metric-family-specific dropout that nothing covered.)
-      # PER-HOST ATTRIBUTION LANDED IN #217: the expression below now groups
-      # `by (host, component_id)`, and that is what turns the dropout above from
-      # survivable into VISIBLE. With `host` in the by-clause each instance is its
-      # own series, so an instance that stops exporting is a series that stops —
-      # not one contributor quietly leaving an aggregate whose remaining members
-      # still read healthy. (`count by (host)` is exactly the query that had to be
-      # run BY HAND to find the #216 dropout; putting host in the rule means the
-      # rule can see what only that manual query could.)
-      # It is also the only way the alert can NAME a machine: component_id is
-      # `victorialogs` on all four instances, so the pre-#217 summary told an
-      # operator that a buffer somewhere on the fleet was filling and left them to
-      # find which — while the runbook it links is a single-host procedure. `host`
-      # is a notification-policy group_by key (#198), so two hosts filling produce
-      # TWO notifications instead of one [FIRING:2] naming neither.
+      # PER-HOST GROUPING LANDED IN #217 — and be precise about what it buys,
+      # because the tempting reading is wrong. `by (host, component_id)` gives two
+      # things: PER-HOST EVALUATION (each instance's buffer is judged against the
+      # 128MiB threshold on its own, never averaged into or masked by its peers)
+      # and ATTRIBUTION (the alert names the machine; `host` is a
+      # notification-policy group_by key since #198, so two hosts filling produce
+      # TWO notifications rather than one [FIRING:2] naming neither — component_id
+      # is `victorialogs` on all four instances, so before #217 the summary told an
+      # operator only that a buffer SOMEWHERE was filling, while the runbook it
+      # links is a single-host procedure).
+      # What it does NOT buy is detection of the dropout described above. This rule
+      # is `noDataState: OK`, so a per-host series that stops arriving goes stale
+      # and RESOLVES TO NORMAL — silently, exactly as before. Grouping changes the
+      # loss from an invisible shift in an aggregate's composition into an
+      # observable stopped series, which is worth having for anyone who goes
+      # looking; it does not make anything go looking. If eq12_docker's buffer
+      # gauge disappears again, this rule quietly stops covering eq12_docker.
+      # The family-specific dropout itself remains UNOWNED — #222. Note that
+      # obs-vector-metrics-absent does not close it either: that rule watches
+      # vector_uptime_seconds, and #216's whole point is that an instance can keep
+      # exporting uptime while one metric family it publishes dies.
       # The 128MiB threshold stays a PER-INSTANCE threshold and does not change:
       # all four configure the same max_size 268435488 (observability's
       # files/data/vector/vector.yaml and vector_agent's templates/vector.yaml.j2).

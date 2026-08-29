@@ -375,7 +375,9 @@ sinks:
   # aggregate by (host, ...) — so these join them automatically AND as their own
   # per-instance series, which is what lets an alert from this agent name this
   # host. Before #217 they merged into a fleet aggregate that could lose a member
-  # in silence (#216).
+  # in silence (#216). Per-host series make such a loss OBSERVABLE; they do not
+  # make it page — the rules are noDataState: OK, so absence here is still owned by
+  # nothing (#222).
   vector_metrics_out:
     type: prometheus_remote_write
     inputs:

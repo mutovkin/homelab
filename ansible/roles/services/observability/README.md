@@ -374,9 +374,12 @@ source and sink on `eq12`, `n5pro` and `n5pro_docker`, which write to `:8428` ov
 the LAN — so all four hosts are covered. #160 needed no rule change beyond the `by (host)`
 above, because the other three aggregated `by (component_id)` with no host
 selector and the extra instances simply joined the existing series — which is
-exactly the blindness #216 measured and **#217 has since fixed**: all four rules
-now group `by (host, ...)`, so each instance is its own series and each alert
-names its machine. Two things travel with it: `vault_vm_auth_*` moved to
+exactly the blindness #216 measured. **#217 regrouped all four rules
+`by (host, ...)`**, so each instance is evaluated on its own and each alert names
+its machine — but note what that does and does not fix: it buys per-host
+evaluation and attribution, not detection. These rules are `noDataState: OK`, so a
+host whose series stops still resolves to Normal silently; per-host absence for
+`vector_buffer_size_bytes` is unowned and tracked in #222. Two things travel with it: `vault_vm_auth_*` moved to
 `group_vars/all/vault.yml` (host_vars are invisible to other hosts) and the three
 agent IPs were added to the `:8428` nftables allowlist — without that grant the
 writes are dropped at the firewall with no application-level error. The sink sets
