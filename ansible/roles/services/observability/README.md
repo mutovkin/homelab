@@ -296,10 +296,10 @@ them — the #188 defect.
 | `obs-http-probe-failing` | HTTP probe failing | `max by (server, check_type) (http_response_result_code)` > 0, `for: 5m` | OK |
 | `obs-http-probe-bad-status` | HTTP probe returning a bad status | `max by (server, check_type) (http_response_http_response_code)` outside 200-399, `for: 5m` | OK |
 | `obs-http-probe-absent` | HTTP probe stopped reporting | `min by (server, check_type) (lag(http_response_result_code[24h]))` > 600, `for: 5m` | **Alerting** |
-| `obs-vector-discarding-events` | Vector is discarding events (#151) | `sum by (component_id) (increase(vector_component_discarded_events_total[15m]))` > 0, `for: 0s` | OK |
-| `obs-vector-component-errors` | Vector component errors (#151) | `sum by (component_id) (increase(vector_component_errors_total[15m]))` > 0, `for: 0s` | OK |
+| `obs-vector-discarding-events` | Vector is discarding events (#151, #217) | `sum by (host, component_id, intentional) (increase(vector_component_discarded_events_total[15m]))` > 0, `for: 0s` | OK |
+| `obs-vector-component-errors` | Vector component errors (#151, #217) | `sum by (host, component_id, error_type) (increase(vector_component_errors_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-vector-metrics-absent` | Vector metrics export stopped (#151, #160) | `min by (host) (lag(vector_uptime_seconds[24h]))` > 600, `for: 5m` | **Alerting** |
-| `obs-vector-buffer-filling` | Vector disk buffer filling (#151, #216) | `max by (component_id) (vector_buffer_size_bytes)` > 128MiB, `for: 15m` | OK |
+| `obs-vector-buffer-filling` | Vector disk buffer filling (#151, #216, #217) | `max by (host, component_id) (vector_buffer_size_bytes)` > 128MiB, `for: 15m` | OK |
 | `obs-telegraf-metrics-absent` | Telegraf metrics stopped arriving for eq12_docker (#178) | `min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-docker-metrics-unlabelled` | Docker metrics have lost their host label (#178) | `count({__name__=~"docker_.+", host=""})` > 0, `for: 5m` | OK |
 | `obs-docker-metrics-absent` | Docker metrics stopped arriving for eq12_docker (#189) | `count by (host) (last_over_time(docker_n_containers{host="eq12_docker"}[10m]))` < 1, `for: 5m` | **Alerting** |
@@ -371,9 +371,15 @@ already writes to.
 **Fleet-wide since #160.** #151 scoped this to the container, so these four rules
 covered `eq12_docker` and nothing else. `roles/vector_agent` now renders the same
 source and sink on `eq12`, `n5pro` and `n5pro_docker`, which write to `:8428` over
-the LAN — so all four hosts are covered and the rules needed no change beyond the
-`by (host)` above (they already aggregate `by (component_id)` with no host
-selector). Two things travel with it: `vault_vm_auth_*` moved to
+the LAN — so all four hosts are covered. #160 needed no rule change beyond the `by (host)`
+above, because the other three aggregated `by (component_id)` with no host
+selector and the extra instances simply joined the existing series — which is
+exactly the blindness #216 measured. **#217 regrouped all four rules
+`by (host, ...)`**, so each instance is evaluated on its own and each alert names
+its machine — but note what that does and does not fix: it buys per-host
+evaluation and attribution, not detection. These rules are `noDataState: OK`, so a
+host whose series stops still resolves to Normal silently; per-host absence for
+`vector_buffer_size_bytes` is unowned and tracked in #222. Two things travel with it: `vault_vm_auth_*` moved to
 `group_vars/all/vault.yml` (host_vars are invisible to other hosts) and the three
 agent IPs were added to the `:8428` nftables allowlist — without that grant the
 writes are dropped at the firewall with no application-level error. The sink sets

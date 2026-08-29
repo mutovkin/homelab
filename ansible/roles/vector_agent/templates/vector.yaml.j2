@@ -369,9 +369,15 @@ sinks:
   # Ship Vector's own telemetry to VictoriaMetrics (#160). Same protocol and auth
   # shape the container agent and telegraf already use, so the write path is proven
   # rather than new. Vector's default namespace for this sink is "vector", so series
-  # arrive as vector_component_errors_total etc. — the four vector-health alert
-  # rules aggregate by (component_id) with no host selector, so these join them
-  # automatically.
+  # arrive as vector_component_errors_total etc. Vector stamps its own `host` on
+  # them (measured: all four instances export vector_buffer_size_bytes with a
+  # correct host label), and since #217 the four vector-health alert rules all
+  # aggregate by (host, ...) — so these join them automatically AND as their own
+  # per-instance series, which is what lets an alert from this agent name this
+  # host. Before #217 they merged into a fleet aggregate that could lose a member
+  # in silence (#216). Per-host series make such a loss OBSERVABLE; they do not
+  # make it page — the rules are noDataState: OK, so absence here is still owned by
+  # nothing (#222).
   vector_metrics_out:
     type: prometheus_remote_write
     inputs:
