@@ -67,7 +67,7 @@ roles/services/observability/
                 ├── probe-health.yaml           three http_response rules (#139)
                 ├── vector-health.yaml          four Vector internal-metric rules (#151)
                 ├── delivery-health.yaml        heartbeat + delivery-failure (#152)
-                └── truenas-health.yaml         NAS disk thermals + stream liveness (#176)
+                └── truenas-health.yaml         NAS thermals, pool/scrub, drive-health, liveness (#174/#176/#183)
                     (contact-points.yaml AND notification-policies.yaml are
                      TEMPLATED, not files here — see templates/*.j2. Both are
                      --exclude'd from the provisioning rsync; see Alerting.)
@@ -137,7 +137,7 @@ Queued events and the file-source checkpoints are lost; that is the price.
 
 ## Alerting
 
-**Twenty-two** provisioned rules (16 `obs-*` + 6 `truenas-*`), all in the
+**Thirty-four** provisioned rules (27 `obs-*` + 7 `truenas-*`), all in the
 **Observability** folder — count the uids in
 `files/data/grafana/provisioning/alerting/` before trusting that number. It has
 drifted twice already, each time in the same way: a rule was added and the
@@ -158,7 +158,7 @@ perfectly labelled — the state that existed for the whole life of the
 deployment). Every other telegraf-fed rule here aggregates the `host` dimension
 away, so nothing else can see telegraf alive but stamping the wrong host.
 
-The table below itemises **all thirty-three**. It is what someone consults to
+The table below itemises **all thirty-four**. It is what someone consults to
 answer "does this signal already have an absence owner?", which is exactly the
 question #178 got wrong once — so a rule missing from it is worse than a wrong
 total. Routing is no longer "all by email" — see
@@ -360,9 +360,10 @@ them — the #188 defect.
 | `truenas-poller-absent` | TrueNAS API poller has stopped (#174) | `count(last_over_time(truenas_poller_up{host="truenas"}[10m]))` < 1, `for: 10m` | **Alerting** |
 | `truenas-pool-degraded` | TrueNAS pool is not healthy (#174) | `min by (pool) (truenas_pool_healthy{host="truenas"})` < 1, `for: 0s` | OK |
 | `truenas-scrub-overdue` | TrueNAS pool scrub is overdue (#174) | `max by (pool) (truenas_pool_scrub_age_seconds{host="truenas"})` > 3024000 (35d), `for: 1h` | OK |
+| `truenas-smart-degradation` | TrueNAS middleware reports a drive-health (SMART) alert (#183) | `max by (klass) (last_over_time(truenas_alert_active{host="truenas"}[10m]))` > 0, `for: 0s` | OK |
 
-`execErrState: Alerting` on all thirty-three — a datasource that cannot be reached
-is not evidence of health. Counted, not assumed: 33 uids and 33
+`execErrState: Alerting` on all thirty-four — a datasource that cannot be reached
+is not evidence of health. Counted, not assumed: 34 uids and 34
 `execErrState: Alerting` lines across the seven files in `alerting/`, with no
 other value present.
 
