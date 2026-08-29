@@ -299,7 +299,7 @@ them — the #188 defect.
 | `obs-vector-discarding-events` | Vector is discarding events (#151) | `sum by (component_id) (increase(vector_component_discarded_events_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-vector-component-errors` | Vector component errors (#151) | `sum by (component_id) (increase(vector_component_errors_total[15m]))` > 0, `for: 0s` | OK |
 | `obs-vector-metrics-absent` | Vector metrics export stopped (#151, #160) | `min by (host) (lag(vector_uptime_seconds[24h]))` > 600, `for: 5m` | **Alerting** |
-| `obs-vector-buffer-filling` | Vector disk buffer filling (#151) | `max by (component_id) (vector_buffer_byte_size)` > 128MiB, `for: 15m` | OK |
+| `obs-vector-buffer-filling` | Vector disk buffer filling (#151, #216) | `max by (component_id) (vector_buffer_size_bytes)` > 128MiB, `for: 15m` | OK |
 | `obs-telegraf-metrics-absent` | Telegraf metrics stopped arriving for eq12_docker (#178) | `min by (host) (lag(system_uptime{host="eq12_docker"}[24h]))` > 600, `for: 5m` | **Alerting** |
 | `obs-docker-metrics-unlabelled` | Docker metrics have lost their host label (#178) | `count({__name__=~"docker_.+", host=""})` > 0, `for: 5m` | OK |
 | `obs-docker-metrics-absent` | Docker metrics stopped arriving for eq12_docker (#189) | `count by (host) (last_over_time(docker_n_containers{host="eq12_docker"}[10m]))` < 1, `for: 5m` | **Alerting** |
