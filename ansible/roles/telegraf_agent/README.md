@@ -142,10 +142,11 @@ one.
 
 ## RAPL package power (#194)
 
-Both hosts export `rapl_power_watts`, tagged `domain`, every 60 s —
-`package-0` + `core` + `uncore` on eq12, `package-0` alone on n5pro. It comes
-from `files/rapl_power.sh`, an exec input, and every choice below is a
-measurement rather than a preference.
+Both hosts export `rapl_power_watts` — and, since #206, `rapl_energy_uj` beside
+it on the same line — tagged `domain`, every 60 s: `package-0` + `core` +
+`uncore` on eq12, `package-0` alone on n5pro. Both come from
+`files/rapl_power.sh`, an exec input, and every choice below is a measurement
+rather than a preference.
 
 **It is `[[inputs.exec]]`, not `[[inputs.intel_powerstat]]`, and both halves of
 that were measured 2026-08-25 with `telegraf --test` under the real unit user and
@@ -239,23 +240,73 @@ metric name as `package-0` invites a sum that is always wrong. This is not a
 fabricated zero — it is a real reading of the wrong thing, which is worse,
 because it looks measured.
 
-**KNOWN GAP — a FROZEN counter reads as a confident `0.000000 W`, and nothing
-alerts on it.** The script's contract is that a zone it cannot read completely
-emits nothing. That covers *unreadable*; it does not cover *readable but never
+**A FROZEN counter reads as a confident `0.000000 W`, and two things now catch
+it (#206).** The script's contract is that a zone it cannot read completely emits
+nothing. That covers *unreadable*; it does not cover *readable but never
 advancing* — a domain the driver still exposes while the firmware has stopped
 updating it. Measured: with `energy_uj` static across both passes the script
 emits `power_watts=0.000000`, which is a faithful reading of the counter (energy
 consumed in the window really was below 1 uJ) and is therefore NOT suppressed at
-the source — eq12's `uncore` legitimately reads exactly that at idle (24 h max
-0.000182 W measured 2026-08-25, 0.000243 W on a re-read the same day — the figure
-drifts, the point does not: the counter advances, so the domain is live). But the two absence rules count DOMAINS, and a frozen
-domain is still present, so neither fires. `package-0` can never legitimately be
-0 W on a running host, so the detector would be a rule of the shape
-`max_over_time(rapl_power_watts{domain="package-0"}[6h]) == 0` with
-`noDataState: OK` (absence is already owned). Deliberately not added here: the
-per-family absence design is deferred to #202 and weighed against the
-alert-fatigue posture #193 landed. Recorded so it is a known limitation rather
-than a discovery.
+the source — eq12's `uncore` legitimately reads exactly that at idle. Both
+absence rules count DOMAINS, and a frozen domain is still present, so neither
+fires and the dashboards render a legitimate-looking zero.
+
+*The detector:* `obs-rapl-power-frozen-eq12` / `-n5pro` in
+`roles/services/observability/files/data/grafana/provisioning/alerting/telegraf-health.yaml`,
+`max_over_time(rapl_power_watts{host="…",domain="package-0"}[6h])` under a
+threshold of 1 mW, `noDataState: OK` (absence is the sibling rule's job — #151),
+`severity: warning`. Detection latency is ~6 h 10 m worst case: the window has to
+age out the last live sample, then the group's 5 m interval ticks, then `for: 5m`
+holds. A frozen counter is a forever-shaped fault, so that is a deliberate trade
+against ever false-firing.
+
+*The observable:* the script now emits the raw second-pass counter as a second
+field on the same line — `rapl,domain=package-0 power_watts=…,energy_uj=…` →
+`rapl_energy_uj` — because the derived wattage DESTROYS the freshness
+information. `changes(rapl_energy_uj{host="eq12",domain="uncore"}[30m])` asks
+"is this domain still advancing?" of ANY domain, without an ssh session. It
+wraps at `max_energy_range_uj` (sawtooth): it is a freshness observable, never a
+rate source. Two implementation notes that are one character wide each — the
+fields are separated by a COMMA (a space begins the influx TIMESTAMP field, and
+`energy_uj=81017680655` then parses cleanly as a 1970 timestamp on a
+single-field point), and the format is `%.0f`, never `%d`, because mawk 1.3.4
+truncates `%d` at INT_MAX while these counters reach 2.6e11. Both fields ride
+ONE printf, so a zone emits both or neither and the domain sets cannot diverge;
+the deploy asserts that from VictoriaMetrics anyway, because the parse and the
+output path are not covered by that coupling.
+
+*Why the alert is scoped to `package-0` and nothing else.* "Near-zero watts"
+cannot discriminate frozen from idle for a domain that legitimately idles at
+zero, and that is measured rather than assumed (2026-08-29, eq12 `uncore`): 268
+of 1440 samples in 24 h were exactly `0.000000`, and 2 of 193 sampled one-hour
+windows were entirely zero. Pointed at `uncore` this rule would not merely risk a
+false alarm — it would fire **permanently**: that domain's 6 h maxima measured
+**0.000121–0.000305 W** over those four days, entirely below the 1 mW threshold.
+Measured side by side at 22:44Z with the rules deployed and `inactive`: `uncore`
+6 h max `0.000304` (would alert), eq12 `package-0` `13.499178`, n5pro
+`package-0` `9.314859`. `package-0` is different in kind: a running machine
+always draws package power. Over the family's full retained history (2026-08-25
+22:00Z → 2026-08-29 22:00Z, 193 six-hour windows per host) the lowest single
+sample was **1.492526 W on eq12** and **5.382494 W on n5pro**, and zero windows
+on either host contained a zero at all. The 1 mW threshold sits ~1490x below the
+weaker machine's floor, and the domain pin is enforced by the static reconciler
+in `roles/services/observability/tasks/main.yml` — widening the selector by one
+label is a one-word edit with a permanent alarm on the other side of it.
+
+*The honest limit.* For a domain that idles at zero, only ADVANCEMENT is
+provable — a domain whose firmware has genuinely gated it to zero draw is
+indistinguishable from a frozen one at ANY window in the value domain, which is
+why the answer for those domains is the raw counter and not a threshold. An
+all-domain freshness rule (`changes(rapl_energy_uj[…]) == 0`) is deliberately
+NOT added here: nothing yet bounds how long a healthy idle counter may
+legitimately sit static, and choosing that window from today's four days of
+history would be the confounded guess #194 exists to prevent. Threshold it from
+accumulated `rapl_energy_uj` history, alongside the per-family absence design in
+#202. Measured input for whoever does: eq12 `uncore` advanced 488 uJ across 60 s
+at idle (8 counter quanta of 61.035 uJ), with `package-0` advancing 355 753 179
+uJ over the same 60 s as the positive control — so at the 60 s collection
+interval consecutive samples of a live-but-idle counter do differ, and
+`changes()` over minutes is a real discriminator rather than a hopeful one.
 
 **The delivered domain set is asserted for EQUALITY, not presence.** The script
 emits nothing for a zone it cannot read completely (gauges skip on unknown), so
