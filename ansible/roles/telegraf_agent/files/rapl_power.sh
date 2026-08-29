@@ -19,7 +19,7 @@
 # is still readable, so this script computes a delta of zero and prints a
 # faithful, confident `power_watts=0.000000` forever. That is indistinguishable
 # from a genuinely idle domain in the value domain — eq12 `uncore` prints exactly
-# that for 268 of every 1440 samples (measured over 24 h, 2026-08-29) — so no
+# that for 268 of 1440 samples in a 24 h census (2026-08-29) — so no
 # threshold on watts can tell frozen from idle for such a domain. The raw
 # monotonic counter can: over 60 s at idle eq12 `uncore` advanced 488 uJ while
 # its 1 s wattage rounded to zero (measured 2026-08-29, with `package-0`

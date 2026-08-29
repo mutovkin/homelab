@@ -767,7 +767,8 @@ groups:
       # not a rule: we have no history yet to bound how long a healthy idle
       # counter may legitimately sit static, and picking a window now would be
       # the confounded guess #194 forbids. See roles/telegraf_agent/README.md;
-      # the all-domain freshness rule is deferred to #202.
+      # the all-domain freshness rule is deferred to #228, which carries the
+      # measured inputs and the acceptance bar for choosing that window.
       #
       # `lt 0.001`, NOT `== 0`, and neither is arbitrary. Grafana thresholds have
       # no equality evaluator, and `lt 0` could never fire — the max of a
@@ -785,6 +786,27 @@ groups:
       # this file), and the pair above is strictly the better detector for it —
       # it catches PARTIAL loss too. execErrState stays Alerting (#108): a
       # datasource that cannot be reached is not evidence of health.
+      #
+      # ONE CORNER THAT OWNERSHIP DOES NOT COVER, stated rather than implied: the
+      # absence rules count DOMAINS, not names. If package-0 itself vanished and
+      # a new domain appeared in the same window — `psys` after a BIOS update is
+      # the realistic version — the count stays at 3 (or 1) and stays green,
+      # while THIS rule goes NoData and, by the line above, silently OK. What
+      # catches that is the telegraf role's deploy-time domain-set EQUALITY
+      # assert, which is deploy-time only. So a substitution between deploys is a
+      # known blind spot of the pair, not something the OK setting is hiding.
+      #
+      # A SECOND KNOWN RESIDUAL, on the other side of the scoping: eq12 `core`
+      # idles at 1.62-1.78 W (load-placement table, 2026-08-25), so ITS zero is
+      # as physically impossible as package-0s — and a frozen `core` alone would
+      # keep the domain count at 3 and page nobody, exactly like the fault this
+      # rule exists for. It is left uncovered deliberately rather than
+      # overlooked: the freeze mechanisms we know of (a powercap driver fault, a
+      # firmware event, a kexec) act on the MSR interface as a whole and would
+      # take package-0 with it, which this rule catches. A per-domain rule for
+      # every domain whose idle floor is provably non-zero is the generalisation,
+      # and it belongs with the freshness work in #228, thresholded from
+      # rapl_energy_uj history rather than from this argument.
       #
       # DETECTION LATENCY IS ~6 h, deliberately, and it has three terms like the
       # rules above: `max_over_time(...[6h])` must first age out the last live

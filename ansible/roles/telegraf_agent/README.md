@@ -293,6 +293,20 @@ weaker machine's floor, and the domain pin is enforced by the static reconciler
 in `roles/services/observability/tasks/main.yml` — widening the selector by one
 label is a one-word edit with a permanent alarm on the other side of it.
 
+*Two known residuals, stated rather than implied.* (1) eq12's `core` idles at
+1.62–1.78 W, so its zero is as physically impossible as `package-0`'s — and a
+frozen `core` alone keeps the domain count at 3 and pages nobody, the same shape
+this rule exists for. It is uncovered deliberately: every freeze mechanism we
+know of (powercap driver fault, firmware event, kexec) acts on the MSR interface
+as a whole and would take `package-0` with it, which the rule does catch. The
+generalisation — a rule per domain whose idle floor is provably non-zero — belongs
+with #228, thresholded from history rather than from that argument. (2) The
+absence rules count DOMAINS, not names, so a `package-0` that vanished and was
+replaced in the same window (`psys` appearing across a BIOS update) keeps the
+count green while the frozen rule sits at NoData → OK. The check that catches a
+substitution is the deploy-time domain-set EQUALITY assert, which only runs on a
+deploy.
+
 *The honest limit.* For a domain that idles at zero, only ADVANCEMENT is
 provable — a domain whose firmware has genuinely gated it to zero draw is
 indistinguishable from a frozen one at ANY window in the value domain, which is
@@ -301,8 +315,8 @@ all-domain freshness rule (`changes(rapl_energy_uj[…]) == 0`) is deliberately
 NOT added here: nothing yet bounds how long a healthy idle counter may
 legitimately sit static, and choosing that window from today's four days of
 history would be the confounded guess #194 exists to prevent. Threshold it from
-accumulated `rapl_energy_uj` history, alongside the per-family absence design in
-#202. Measured input for whoever does: eq12 `uncore` advanced 488 uJ across 60 s
+accumulated `rapl_energy_uj` history — that is **#228**, which carries the
+acceptance bar and every number below. Measured input for whoever does: eq12 `uncore` advanced 488 uJ across 60 s
 at idle (8 counter quanta of 61.035 uJ), with `package-0` advancing 355 753 179
 uJ over the same 60 s as the positive control — so at the 60 s collection
 interval consecutive samples of a live-but-idle counter do differ, and
