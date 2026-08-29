@@ -125,18 +125,21 @@
 # widened to hours, satisfies it exactly as a working rule does. Coverage of the
 # host SET is this guard's whole claim.
 #
-# THIS PARAGRAPH USED TO END "...is proven separately, by this deploy's Grafana
-# rule-count and rule-evaluation checks further down". THERE ARE NO SUCH CHECKS —
-# this role never calls Grafana's alerting API at all. Corrected in #189/#202
-# rather than left standing, because a comment that points at a guard which does
-# not exist is the same defect class as a guard that cannot fail, and it is worse
-# in one respect: it stops the next reader from noticing the gap. What this
-# deploy DOES prove about Grafana is that the PROCESS came back
-# (`/api/health`) — which, since file provisioning is startup-blocking, means a
-# rejected rule document would have been caught. It does not prove the expected
-# NUMBER of rules is served, nor that any of them evaluates to Normal rather than
-# sitting in NoData on a typo'd selector. Building that check is tracked
-# separately; do not re-assert it here until it exists.
+# That those rules are actually SERVED and EVALUATED is proven separately, at the
+# end of this file, by "Verify Grafana serves and evaluates exactly the
+# provisioned alert rules" (#212) — a served-uid set equality against these same
+# files, and a per-rule health/lastEvaluation check.
+#
+# READ THE HISTORY BEFORE TRUSTING THAT SENTENCE AGAIN, because it was a lie for
+# the whole life of this comment. It used to end "...is proven separately, by this
+# deploy's Grafana rule-count and rule-evaluation checks further down" while this
+# role never called Grafana's alerting API at all. #189/#202 replaced the claim
+# with a statement of the gap rather than leaving it standing — a comment pointing
+# at a guard that does not exist is the same defect class as a guard that cannot
+# fail, and worse in one respect: it stops the next reader from noticing. #212
+# then BUILT the checks, and both halves were witnessed failing against live
+# Grafana (a NoData rule; an API-created stray rule) before this sentence was
+# allowed back. If those tasks are ever removed, this paragraph goes with them.
 #
 # findall, NOT search, and the count is asserted FIRST — that ordering is the
 # whole point. regex_search validates only the FIRST match, so if someone later
@@ -1589,6 +1592,322 @@
   loop_control:
     label: "{{ item.item.name }}"
   when: not ansible_check_mode
+
+# ============ #212: PROOF THAT GRAFANA SERVES AND EVALUATES THESE RULES ============
+#
+# Everything above this point proves Grafana is a healthy PROCESS with reachable
+# datasources. Neither fact says anything about the alert RULES, and the gap has a
+# specific, expensive shape: a rule whose `expr` names a metric that does not exist
+# provisions perfectly, passes every static guard in this role, and then sits in
+# NoData forever — which, with `noDataState: Alerting` (correct for every absence
+# owner here), is a PERMANENT FALSE PAGE that no deploy could see. The mirror-image
+# failure is a rule that exists in Grafana but NOT in this repo (created in the UI,
+# or by an API client with X-Disable-Provenance): it survives every restart, and
+# version control looks complete while the fleet alerts on something nobody can
+# review.
+#
+# THAT SECOND FAILURE ALSO HAPPENS WITHOUT ANYONE TOUCHING THE UI, and it is the
+# thing this guard found on its own first live run. Grafana's file provisioner
+# reconciles the rules a file DECLARES; it does not remove the ones the file
+# stopped declaring. Measured: the rsync above (delete:true) shipped a rule file
+# with three rules removed, Grafana restarted cleanly, and all three were still
+# served afterwards. So deleting or renaming a rule in this repo leaves an orphan
+# that keeps evaluating and keeps paging while git says it is gone. The
+# version-controlled way to retire a rule is a `deleteRules:` block in the rule
+# file; this check is what makes forgetting it impossible.
+#
+# These two checks close both directions. They are the checks the comment at the
+# top of this file used to CLAIM existed while they did not (#212).
+#
+# WHY `health`, NEVER `state`. `state` is firing/pending/inactive and is not a
+# fault signal here: obs-alert-delivery-heartbeat is INTENTIONALLY always firing
+# (it is the end-to-end proof that the notification path works), 21 rules carry
+# `noDataState: Alerting` and 12 carry `OK` by deliberate design, and `inactive` is
+# also what a rule that has NEVER RUN reports — so `state` cannot tell "evaluated,
+# healthy" from "never evaluated". `health` (ok/error/nodata/unknown) plus a RECENT
+# `lastEvaluation` are the honest fields, and they are what these assert.
+#
+# WHY the expectation is DERIVED, never a number written here. A hardcoded 33 is a
+# matched pair that drifts the moment a rule is added — the exact defect class #194
+# and #202 added reconcilers for. Both halves read the SAME files the rsync above
+# ships, so a new rule file automatically extends the guard: the same principle as
+# the datasource check reading its uids out of the provisioning file.
+#
+# WHY the served half compares SETS, not counts. Count-33 is satisfied when one
+# provisioned rule is missing AND one stray exists, and a count that fails cannot
+# name the culprit. The symmetric difference is printed by uid, in both directions.
+#
+# WHY the evaluation half is expressed as a COUNT OF PASSING RULES rather than "no
+# rule is unhealthy". `<extracted list> | rejectattr(...) | length == 0` over an
+# ACCIDENTALLY EMPTY extraction — an API shape change, a parse that silently
+# yielded nothing — is literally `assert: true`. Comparing a count of rules that
+# PASSED a per-rule predicate against a count derived from the repo makes every one
+# of those failures LOWER the count and fire the guard; no vacuous pass is
+# representable. Same reason the timestamp predicate is a `match` against an
+# RFC3339 regex BEFORE `to_datetime`: an unparseable timestamp drops the rule out
+# of the passing set instead of raising or being waved through.
+#
+# WHY the Host header, and no redirect follow. GF_SERVER_DOMAIN/ROOT_URL make
+# Grafana 301 any request whose Host does not match, and a followed redirect leaves
+# this container and tests NPM's public path instead — the same idiom, and the same
+# reason, as the datasource-health check above.
+#
+# WHY the eval retry budget is minutes, not seconds. The provisioning API answers
+# as soon as /api/health does, but EVALUATION does not: after a restart, a rule in
+# a 5m-interval group may not evaluate for a full interval. ~7 minutes covers a
+# cold scheduler at the widest group interval this repo ships. `until` exits on the
+# first success, so a converged run costs one request.
+#
+# Both halves run on EVERY real run, not only when Grafana restarted this run: a
+# converged run reporting green over rules that quietly stopped evaluating is the
+# failure family this entire role exists to catch. They are `when: not
+# ansible_check_mode` because their input is a live Grafana that only exists after
+# a real apply — so, per CLAUDE.md, their first execution is their first test and
+# they were verified against the live defect (a NoData rule and an API-created
+# stray) rather than against a dry run.
+- name: Verify Grafana serves and evaluates exactly the provisioned alert rules
+  vars:
+    _obs_rule_dir: "{{ role_path }}/files/data/grafana/provisioning/alerting"
+    # Varargs, not a list: `query('file', <list>)` does not flatten its terms on
+    # ansible-core 2.19+. Same idiom, same reason, as the group_by check above.
+    _obs_repo_groups: >-
+      {{ query('file', *query('fileglob', _obs_rule_dir ~ '/*.yaml'))
+         | map('from_yaml') | map(attribute='groups') | flatten | list }}
+    _obs_repo_rules: >-
+      {{ _obs_repo_groups | map(attribute='rules') | flatten | list }}
+    _obs_repo_rule_uids: "{{ _obs_repo_rules | map(attribute='uid') | sort | list }}"
+    # A PAUSED rule is still SERVED but is not expected to evaluate, so the two
+    # halves need different expectations. `rejectattr('isPaused', 'equalto', true)`
+    # keeps rules with no isPaused key (Grafana's default is false), which is the
+    # right reading of an omitted field.
+    _obs_expected_active_uids: >-
+      {{ _obs_repo_rules | rejectattr('isPaused', 'equalto', true)
+         | map(attribute='uid') | sort | list }}
+    _obs_group_intervals: >-
+      {{ _obs_repo_groups | selectattr('interval', 'defined')
+         | map(attribute='interval') | list }}
+    _obs_bad_intervals: >-
+      {{ _obs_group_intervals | reject('match', '^[0-9]+[smh]$') | list }}
+    # The recency threshold is 2x the WIDEST group interval in the repo, so it
+    # tracks the files instead of being a second number to keep in sync. Each unit
+    # is handled explicitly and `+ [0]` keeps `max` from raising on an empty
+    # branch; a unit this does not understand is caught by the assert below rather
+    # than silently dropping out of the max (which would TIGHTEN the threshold and
+    # make the guard flap).
+    _obs_rule_max_interval_s: >-
+      {{ [ ((_obs_group_intervals | select('match', '^[0-9]+s$')
+             | map('regex_replace', 's$', '') | map('int') | list) + [0]) | max,
+           (((_obs_group_intervals | select('match', '^[0-9]+m$')
+              | map('regex_replace', 'm$', '') | map('int') | list) + [0]) | max) * 60,
+           (((_obs_group_intervals | select('match', '^[0-9]+h$')
+              | map('regex_replace', 'h$', '') | map('int') | list) + [0]) | max) * 3600 ] | max }}
+    # Rendered fresh on every retry (it is a lazily-templated var), so the window
+    # slides with the retries instead of being pinned to the first attempt. `date
+    # +%s` rather than `ansible_date_time` because facts are gathered at the start
+    # of the play and this runs at the end — minutes of drift into a 10-minute
+    # threshold. POSIX `date`, so it is identical on both operator platforms.
+    _obs_eval_cutoff: >-
+      {{ '%Y-%m-%dT%H:%M:%S+00:00'
+         | strftime((lookup('pipe', 'date +%s') | int)
+                    - (2 * (_obs_rule_max_interval_s | int)), utc=true) }}
+    # Grafana emits Go RFC3339 in the SERVER's offset (measured:
+    # 2026-08-29T15:11:10-07:00), and RFC3339Nano may append a fractional part.
+    # Both sides of the comparison are offset-AWARE, so the arithmetic is on
+    # absolute instants and the server's timezone never enters it.
+    _obs_rfc3339_re: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$'
+    _obs_served_uids: >-
+      {{ grafana_served_rules.json | default([]) | map(attribute='uid') | sort | list }}
+    _obs_eval_rules: >-
+      {{ grafana_rule_eval.json.data.groups | default([])
+         | map(attribute='rules') | flatten | list }}
+    _obs_eval_no_health: >-
+      {{ _obs_eval_rules | rejectattr('health', 'defined') | map(attribute='uid') | list }}
+    _obs_eval_health_ok: >-
+      {{ _obs_eval_rules | selectattr('health', 'defined')
+         | selectattr('health', 'equalto', 'ok') | list }}
+    _obs_eval_unhealthy: >-
+      {{ dict((_obs_eval_rules | selectattr('health', 'defined')
+               | rejectattr('health', 'equalto', 'ok') | map(attribute='uid') | list)
+              | zip(_obs_eval_rules | selectattr('health', 'defined')
+                    | rejectattr('health', 'equalto', 'ok') | map(attribute='health') | list)) }}
+    _obs_eval_bad_timestamp: >-
+      {{ (_obs_eval_health_ok | rejectattr('lastEvaluation', 'defined')
+          | map(attribute='uid') | list)
+         + (_obs_eval_health_ok | selectattr('lastEvaluation', 'defined')
+            | rejectattr('lastEvaluation', 'match', _obs_rfc3339_re)
+            | map(attribute='uid') | list) }}
+    _obs_eval_shape_ok: >-
+      {{ _obs_eval_health_ok | selectattr('lastEvaluation', 'defined')
+         | selectattr('lastEvaluation', 'match', _obs_rfc3339_re) | list }}
+    # uid -> parsed lastEvaluation, so the stale ones can be NAMED rather than
+    # merely counted. A duplicate uid collapses here and lowers the passing count,
+    # which fires the guard — the safe direction.
+    _obs_eval_seen_at: >-
+      {{ dict((_obs_eval_shape_ok | map(attribute='uid') | list)
+              | zip(_obs_eval_shape_ok | map(attribute='lastEvaluation')
+                    | map('regex_replace', '[.][0-9]+', '')
+                    | map('to_datetime', '%Y-%m-%dT%H:%M:%S%z') | list)) }}
+    _obs_eval_passing_uids: >-
+      {{ _obs_eval_seen_at | dict2items
+         | selectattr('value', 'gt', _obs_eval_cutoff | to_datetime('%Y-%m-%dT%H:%M:%S%z'))
+         | map(attribute='key') | sort | list }}
+    _obs_eval_stale_uids: >-
+      {{ _obs_eval_seen_at | dict2items
+         | rejectattr('value', 'gt', _obs_eval_cutoff | to_datetime('%Y-%m-%dT%H:%M:%S%z'))
+         | map(attribute='key') | sort | list }}
+  block:
+    # Static (control-machine lookup only), so it runs under --check and fails
+    # before anything touches state. Two preconditions for the derivation above:
+    # every group must declare an interval, and every interval must be in a unit
+    # the threshold arithmetic understands. Without this, a `1h30m` or a missing
+    # `interval:` would quietly shrink the recency threshold and the eval check
+    # would start flapping for reasons nobody could see from its message.
+    - name: Assert every provisioned rule group declares a parseable interval
+      ansible.builtin.assert:
+        that:
+          - _obs_repo_groups | length > 0
+          - _obs_group_intervals | length == _obs_repo_groups | length
+          - _obs_bad_intervals | length == 0
+          - _obs_rule_max_interval_s | int > 0
+        fail_msg: >-
+          The alert-rule evaluation check derives its recency threshold from the
+          group intervals in files/data/grafana/provisioning/alerting/*.yaml, and
+          that derivation just failed. Read
+          {{ _obs_repo_groups | length }} group(s),
+          {{ _obs_group_intervals | length }} of which declare an `interval:`;
+          {{ _obs_bad_intervals | length }} are in a unit this guard does not
+          understand ({{ _obs_bad_intervals | join(', ') | default('none', true) }}) —
+          only plain `<N>s`, `<N>m` and `<N>h` are handled. Either fix the
+          interval, or teach this derivation the new unit; do NOT delete the
+          assert, because an unparsed interval silently TIGHTENS the threshold
+          rather than loosening it, and the eval check below would start failing
+          deploys for a reason its own message could not explain.
+        quiet: true
+
+    # ---- Half A: does Grafana serve exactly the rules this repo ships? ----------
+    # Ordered FIRST: the provisioning API answers as soon as /api/health does, and
+    # a set mismatch is the more precise diagnosis — the eval half's count would
+    # also move, but it could not say which rule.
+    - name: Fetch the alert rules Grafana is serving
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3000/api/v1/provisioning/alert-rules"
+        user: "{{ vault_grafana_user }}"
+        password: "{{ vault_grafana_password }}"
+        force_basic_auth: true
+        headers:
+          Host: "{{ vault_grafana_domain }}"
+      register: grafana_served_rules
+      until: >-
+        grafana_served_rules.status | default(0) == 200
+        and _obs_served_uids == _obs_repo_rule_uids
+      retries: 12
+      delay: 5
+      changed_when: false
+      # ignore_errors, NOT failed_when: false — the assert below must be able to
+      # read `failed`, and `failed_when: false` ASSIGNS failed=False, which makes
+      # the assert vacuously true. See "a guard you have not seen fail is not a
+      # guard" in CLAUDE.md. No no_log anywhere on this pair either: it would
+      # censor the one diagnostic these tasks exist to print (#88).
+      ignore_errors: true
+      when: not ansible_check_mode
+
+    - name: Assert Grafana serves exactly the alert rules in version control
+      ansible.builtin.assert:
+        that:
+          - grafana_served_rules is not failed
+          - grafana_served_rules.status | default(0) == 200
+          - _obs_repo_rule_uids | difference(_obs_served_uids) | length == 0
+          - _obs_served_uids | difference(_obs_repo_rule_uids) | length == 0
+        fail_msg: >-
+          Grafana is NOT serving the alert rules in version control.
+          Provisioned in files/data/grafana/provisioning/alerting/:
+          {{ _obs_repo_rule_uids | length }}; served by Grafana:
+          {{ _obs_served_uids | length }}.
+          MISSING FROM GRAFANA (in the repo, not served):
+          {{ _obs_repo_rule_uids | difference(_obs_served_uids) | join(', ') | default('none', true) }}.
+          NOT IN THE REPO (served by Grafana, not in version control):
+          {{ _obs_served_uids | difference(_obs_repo_rule_uids) | join(', ') | default('none', true) }}.
+          A missing uid usually means the rsync above did not ship the file; check
+          `docker logs grafana` for provisioning errors.
+          A uid that is NOT IN THE REPO has two causes, and the second one is the
+          non-obvious half of this check. (1) A rule created outside version
+          control — in the UI, or via the API with X-Disable-Provenance — which no
+          review, no dashboard and no future deploy of this role will ever see.
+          (2) A rule this repo USED TO ship and no longer does. MEASURED on the
+          first live run of this guard (#212): deleting a rule from these files
+          does NOT delete it from Grafana. The rsync above runs with delete:true
+          and Grafana was restarted, and three rules dropped from the files were
+          still served afterwards — the file provisioner reconciles the rules a
+          file DECLARES, never the ones it stopped declaring. So a rename or a
+          removal leaves an orphan that keeps evaluating, keeps paging, and is
+          invisible in git.
+          Fix (2) IN VERSION CONTROL with a `deleteRules:` block in the rule file
+          (`deleteRules: [{orgId: 1, uid: <uid>}]`) so the removal is reviewable
+          and replays on a rebuilt host; `DELETE /api/v1/provisioning/alert-rules/<uid>`
+          only fixes the machine in front of you. If the rule is wanted, write it
+          into this role's alerting folder instead.
+          HTTP status was {{ grafana_served_rules.status | default('none') }}.
+        quiet: true
+      when: not ansible_check_mode
+
+    # ---- Half B: is every one of them actually EVALUATING? ----------------------
+    - name: Fetch the evaluation state of every alert rule Grafana serves
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3000/api/prometheus/grafana/api/v1/rules"
+        user: "{{ vault_grafana_user }}"
+        password: "{{ vault_grafana_password }}"
+        force_basic_auth: true
+        headers:
+          Host: "{{ vault_grafana_domain }}"
+      register: grafana_rule_eval
+      # The aggregate IS the condition, deliberately: anything that breaks the
+      # extraction (empty response, renamed field, unparseable timestamp) lowers
+      # the passing count and keeps retrying, then fails. There is no shape of
+      # response that makes this pass without every expected rule really having
+      # reported health=ok and a lastEvaluation inside the window.
+      until: >-
+        grafana_rule_eval.status | default(0) == 200
+        and _obs_eval_passing_uids | length == _obs_expected_active_uids | length
+      # ~7 minutes: a rule in a 5m-interval group can legitimately not have
+      # evaluated yet on the first attempt after the provisioning restart above.
+      retries: 40
+      delay: 10
+      changed_when: false
+      ignore_errors: true
+      when: not ansible_check_mode
+
+    - name: Assert every provisioned alert rule is evaluating healthily and recently
+      ansible.builtin.assert:
+        that:
+          - grafana_rule_eval is not failed
+          - grafana_rule_eval.status | default(0) == 200
+          - _obs_eval_passing_uids | length == _obs_expected_active_uids | length
+        fail_msg: >-
+          Grafana is serving the alert rules but they are not all EVALUATING.
+          {{ _obs_eval_passing_uids | length }} of
+          {{ _obs_expected_active_uids | length }} expected (unpaused) rules
+          reported health=ok with a lastEvaluation newer than
+          {{ _obs_eval_cutoff }} (2x the widest group interval,
+          {{ _obs_rule_max_interval_s }}s).
+          UNHEALTHY: {{ _obs_eval_unhealthy | default({}, true) }}.
+          NO health FIELD: {{ _obs_eval_no_health | join(', ') | default('none', true) }}.
+          UNPARSEABLE lastEvaluation:
+          {{ _obs_eval_bad_timestamp | join(', ') | default('none', true) }}.
+          STALE (healthy but not evaluated inside the window):
+          {{ _obs_eval_stale_uids | join(', ') | default('none', true) }}.
+          `health: nodata` on a rule means its query returned nothing — almost
+          always a typo'd or renamed metric/label in its `expr`, which provisions
+          perfectly and then sits in NoData forever; with `noDataState: Alerting`
+          that is a permanent false page, which is exactly why this fails the
+          deploy instead. Run the rule's expr by hand against its datasource.
+          `health: error` is a datasource or query error — check the datasource
+          asserts above first. STALE with everything else healthy means the
+          scheduler is not running the group at all. Note that `state` is NOT read
+          here on purpose: obs-alert-delivery-heartbeat fires by design, and
+          `inactive` is also what a rule that never ran reports.
+          HTTP status was {{ grafana_rule_eval.status | default('none') }}.
+        quiet: true
+      when: not ansible_check_mode
 
 # --- Opt-in recovery path: wipe a wedged Vector disk buffer (#108) --------------
 # `never` keeps these tasks out of every ordinary run; they execute ONLY when the
