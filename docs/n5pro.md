@@ -354,7 +354,12 @@ the two double-counts it.
 the box, and there is no wall meter here. Grafana:
 `Homelab / hosts / Host — n5pro (Minisforum N5 Pro, HX 370)` (uid
 `host-n5pro`), Power row; liveness is
-`obs-rapl-power-absent-n5pro`, on the domain count.
+`obs-rapl-power-absent-n5pro`, on the domain count — plus
+`obs-rapl-power-frozen-n5pro` (#206), which catches the case the count cannot:
+`package-0` still delivered every 60 s while its firmware counter has stopped
+advancing, i.e. a faithful and permanent 0 W. The script also exports the raw
+counter as `rapl_energy_uj`, so `changes(rapl_energy_uj{host="n5pro"}[30m])`
+answers "is this domain still advancing?" directly.
 
 ### Measured sensor surface
 

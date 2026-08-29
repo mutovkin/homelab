@@ -301,6 +301,122 @@
       loop_control:
         label: "{{ item.uid }}"
 
+# #206: THE FROZEN-COUNTER RULES ARE A MATCHED PAIR WITH THE ABSENCE RULES ABOVE,
+# and nothing else pins the two together.
+#
+# A frozen RAPL counter — readable, still delivered every 60s, never advancing —
+# reads as a confident `power_watts=0.000000`, so the absence rules above cannot
+# see it: the domain count is still right. The `obs-rapl-power-frozen-*` rules
+# are the detector for that, and they are per-host and pinned exactly like their
+# siblings, so they drift exactly like their siblings would: add a third
+# RAPL-collecting host and it gets an absence owner (the assert above says so)
+# while its frozen detector is silently missing. Same fault class as #188/#194 —
+# two per-host rule families that must be added in one change.
+#
+# THE SHAPE IS CHECKED, NOT JUST THE HOST SET, and every clause below is a way
+# this rule can be made permanently inert while still reading as a rule:
+#   * a missing `domain="package-0"` pin widens it to every domain, and eq12's
+#     `uncore` is legitimately 0.000000 for 18.6% of its samples with 6h maxima
+#     of 0.000121-0.000305 W — BELOW the threshold (measured 2026-08-29), so the
+#     widened rule does not merely risk a false alarm, it fires permanently on a
+#     healthy iGPU;
+#   * a wrong host pin evaluates a HEALTHY PEER, which is #160 one family over;
+#   * `lt` is the polarity: gt fires whenever the machine is drawing power, i.e.
+#     always, which is the inverted-rule hole found in the RAPL reconciler during
+#     #194;
+#   * a threshold of 0 can never fire — the max of a non-negative gauge is never
+#     negative — so a well-meaning "make it exactly zero" edit turns the whole
+#     detector into `assert: true` wearing an alert rule. A threshold ABOVE 0.01
+#     fails too: package power idles at 1.49 W (eq12) and 5.38 W (n5pro), so an
+#     epsilon anywhere near those fires forever;
+#   * noDataState must stay OK. Absence is the sibling rule's job, at the same
+#     severity and with the same runbook; Alerting here would double-report one
+#     fault every time a host reboots (#151).
+# Static (control-machine lookups only), so it runs under --check before anything
+# deploys.
+- name: Verify the RAPL frozen-counter rules match the RAPL absence rules
+  vars:
+    _rapl_all_rules: >-
+      {{ (lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/telegraf-health.yaml')
+          | from_yaml).groups | map(attribute='rules') | flatten | list }}
+    _rapl_frozen_rules: >-
+      {{ _rapl_all_rules | selectattr('uid', 'match', '^obs-rapl-power-frozen-') | list }}
+    _rapl_frozen_hosts: >-
+      {{ _rapl_frozen_rules | map(attribute='uid')
+         | map('regex_replace', '^obs-rapl-power-frozen-', '') | sort | list }}
+    # Re-derived from the file rather than reusing the block above: those vars are
+    # scoped to that block, and a second copy of the host list here would be one
+    # more pair of facts able to drift.
+    _rapl_absent_hosts: >-
+      {{ _rapl_all_rules | map(attribute='uid')
+         | select('match', '^obs-rapl-power-absent-')
+         | map('regex_replace', '^obs-rapl-power-absent-', '') | sort | list }}
+  block:
+    - name: Assert every RAPL absence owner also has a frozen-counter detector
+      ansible.builtin.assert:
+        that:
+          - _rapl_frozen_hosts == _rapl_absent_hosts
+          # Non-empty, or the equality above is satisfiable by two empty lists —
+          # a guard that cannot fail. The absence-rule assert further up already
+          # ties this list to inventory, so pinning it to that list is enough.
+          - _rapl_frozen_hosts | length > 0
+        fail_msg: >-
+          The RAPL frozen-counter rules in
+          files/data/grafana/provisioning/alerting/telegraf-health.yaml cover
+          {{ _rapl_frozen_hosts }}, but the RAPL absence rules cover
+          {{ _rapl_absent_hosts }} — and those two sets are one fact (#206).
+          A host with an absence owner and no frozen detector is covered for a
+          domain DISAPPEARING and blind to the same domain reading a confident,
+          faithful 0.000000 W forever, which is the fault the frozen rule exists
+          for and the one the count shape provably cannot see. An EXTRA frozen
+          rule is pinned to a host that no longer collects RAPL. Add or remove
+          the pair together; the assert above ties the absence set to inventory,
+          and this one ties the frozen set to the absence set.
+        quiet: true
+
+    - name: Assert each frozen-counter rule is scoped and pointed the way it claims
+      vars:
+        _fz_host: "{{ item.uid | regex_replace('^obs-rapl-power-frozen-', '') }}"
+        _fz_expr: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'A') | first).model.expr }}
+        _fz_threshold: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.params[0] }}
+        _fz_evaluator: >-
+          {{ (item.data | selectattr('refId', 'equalto', 'C') | first)
+             .model.conditions[0].evaluator.type }}
+      ansible.builtin.assert:
+        that:
+          - '''host="'' ~ _fz_host ~ ''"'' in _fz_expr'
+          - '''domain="package-0"'' in _fz_expr'
+          - _fz_evaluator == 'lt'
+          - _fz_threshold | float > 0
+          - _fz_threshold | float <= 0.01
+          - item.noDataState == 'OK'
+        fail_msg: >-
+          Alert rule {{ item.uid }} does not have the shape a frozen-counter
+          detector needs (#206). Its query is `{{ _fz_expr }}` and it fires
+          `{{ _fz_evaluator }} {{ _fz_threshold }}` with noDataState
+          `{{ item.noDataState }}`. It must select host="{{ _fz_host }}" (its own
+          host — another name evaluates a healthy peer and reports on it, #160)
+          AND domain="package-0" (the ONLY domain whose zero is impossible: eq12
+          `uncore` reads exactly 0.000000 for 18.6% of its samples and its 6h
+          maxima measured 0.000121-0.000305 W — BELOW this threshold — so a
+          widened selector does not merely risk a false alarm, it fires
+          PERMANENTLY on a healthy iGPU. For those domains ask the raw counter
+          instead, via changes(rapl_energy_uj{...}[30m])). It must compare `lt`
+          (`gt` fires whenever the machine draws power) against a threshold that
+          is ABOVE zero and no higher than 0.01 W: `lt 0` can never fire, because
+          the max of a non-negative gauge is never negative, and anything near
+          the measured idle floor (1.492526 W on eq12, 5.382494 W on n5pro) fires
+          forever. And noDataState must be OK — obs-rapl-power-absent-{{ _fz_host }}
+          already owns absence at the same severity, so Alerting here
+          double-reports one fault (#151).
+        quiet: true
+      loop: "{{ _rapl_frozen_rules }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
 # #202: the SMART / sensors / fan absence rules, reconciled against inventory the
 # same way the RAPL pair above is, and for the same measured reason — a threshold
 # in a rule file and a count in host_vars are TWO COPIES OF ONE FACT, and both
@@ -618,11 +734,31 @@
     # means a non-absence warning rule falls into half B where it belongs. Half
     # A's fail_msg has always said in prose that such a rule "does not belong in
     # telegraf-health.yaml"; this is what makes that more than a wish.
+    #
+    # `-frozen` JOINS `-absent` HERE (#206), and the distinction it has to hold
+    # up is CONSUMER vs HEALTH OWNER. obs-rapl-power-frozen-* reads
+    # rapl_power_watts, so half B would flag it as a consumer and fail the
+    # deploy — but the grading claim half B protects is "nothing goes blind
+    # ABOVE warning when this family disappears", and a frozen-counter rule
+    # cannot violate it: it is a second health owner of the same family, at the
+    # same severity, whose entire blind spot (the family gone) is the sibling
+    # absence rule's FIRING condition — which is exactly why it carries
+    # noDataState: OK. It never reads the value as data about the machine; it
+    # reads it as a statement about the pipeline, the same job as `-absent` in
+    # the value domain rather than the presence domain.
+    #
+    # The narrowness that made this list `-absent` in the first place survives:
+    # the hypothetical this guard was written to catch — an `obs-sensors-temp-high`
+    # thermal rule at severity warning — still falls into half B, because a rule
+    # that consumes a family for a decision about the HARDWARE has no business
+    # calling itself `-absent` or `-frozen`. Adding a third suffix here means
+    # making that same argument for it, in writing, or the grading quietly stops
+    # being enforced for whatever it admits.
     _family_owner_rules: >-
       {{ _telegraf_health_rules
          | selectattr('labels.severity', 'defined')
          | selectattr('labels.severity', 'equalto', 'warning')
-         | selectattr('uid', 'search', '-absent') | list }}
+         | selectattr('uid', 'search', '-(absent|frozen)') | list }}
     _family_owner_uids: >-
       {{ _family_owner_rules | map(attribute='uid') | sort | list }}
     # obs-docker-metrics-unlabelled reads `docker_.+` and is severity CRITICAL,
