@@ -313,8 +313,14 @@
 # while its frozen detector is silently missing. Same fault class as #188/#194 —
 # two per-host rule families that must be added in one change.
 #
-# THE SHAPE IS CHECKED, NOT JUST THE HOST SET, and every clause below is a way
-# this rule can be made permanently inert while still reading as a rule:
+# THE SHAPE IS CHECKED, NOT JUST THE HOST SET. Every clause below is a way this
+# rule can be made permanently inert while still reading as a rule — but the list
+# is deliberately NOT exhaustive, and saying so is part of the guard: it pins what
+# a plausible edit would break (selector, aggregation, polarity, threshold, no-data
+# handling, pause state, and the inventory that decides whether the series exists
+# at all), not every field Grafana accepts. relativeTimeRange and execErrState are
+# unpinned here, exactly as they are on the sibling rules; pin them fleet-wide in
+# one change if that ever bites, rather than for this pair alone.
 #   * a missing `domain="package-0"` pin widens it to every domain, and eq12's
 #     `uncore` is legitimately 0.000000 for 18.6% of its samples with 6h maxima
 #     of 0.000121-0.000305 W — BELOW the threshold (measured 2026-08-29), so the
@@ -393,6 +399,25 @@
           - _fz_threshold | float > 0
           - _fz_threshold | float <= 0.01
           - item.noDataState == 'OK'
+          # THE QUERIED SERIES MUST BE ABLE TO EXIST. Every clause above
+          # reads the rule; this one reads INVENTORY, and it closes the one
+          # failure that leaves the rule syntactically perfect and permanently
+          # unfireable: package-0 moved into telegraf_agent_rapl_exclude_domains,
+          # so the host never ships the series, the query is always empty, and
+          # noDataState: OK turns that into a silent Normal forever. The sibling
+          # threshold reconciler two tasks up reaches into hostvars the same way.
+          - "'package-0' in hostvars[_fz_host].telegraf_agent_rapl_expected_domains"
+          # max_over_time is the aggregation the whole rule rests on: a
+          # min_over_time edit passes every other clause here and converts the
+          # detector into fire-on-any-single-zero — the rule comment argues the
+          # choice at length, and an argument in a comment is not a check.
+          - "'max_over_time(' in _fz_expr"
+          # A paused rule is not a rule. This is not hypothetical housekeeping:
+          # the drill recipe in this role's README recommends staging drill rules
+          # `isPaused: true`, which makes a pasted-and-forgotten pause an idiom
+          # rather than an accident — and a paused rule reads identically to a
+          # live one everywhere except this field.
+          - item.isPaused == false
         fail_msg: >-
           Alert rule {{ item.uid }} does not have the shape a frozen-counter
           detector needs (#206). Its query is `{{ _fz_expr }}` and it fires
@@ -409,9 +434,21 @@
           is ABOVE zero and no higher than 0.01 W: `lt 0` can never fire, because
           the max of a non-negative gauge is never negative, and anything near
           the measured idle floor (1.492526 W on eq12, 5.382494 W on n5pro) fires
-          forever. And noDataState must be OK — obs-rapl-power-absent-{{ _fz_host }}
+          forever. The aggregation must be `max_over_time(` — `min_over_time`
+          passes every other check here and turns the rule into
+          fire-on-any-single-zero. And `package-0` must be in
+          {{ _fz_host }}'s telegraf_agent_rapl_expected_domains
+          ({{ hostvars[_fz_host].telegraf_agent_rapl_expected_domains
+             | default('<undeclared>') }}): excluding it at the source leaves this
+          rule querying a series the host never ships, which is permanent NoData,
+          which noDataState: OK renders as a permanent, silent Normal — a detector
+          that cannot fire, reported green by every deploy. And noDataState must be OK — obs-rapl-power-absent-{{ _fz_host }}
           already owns absence at the same severity, so Alerting here
-          double-reports one fault (#151).
+          double-reports one fault (#151). And isPaused must be false: a paused
+          rule is indistinguishable from a live one in every other field, and
+          this role's README recommends staging DRILL rules paused, so a pause
+          left behind by a copy is a realistic way to ship a detector that never
+          evaluates.
         quiet: true
       loop: "{{ _rapl_frozen_rules }}"
       loop_control:
@@ -719,6 +756,12 @@
       - sensors_temp
       - acpi_fan_state
       - rapl_power_watts
+      # #206. Registered in the same change that created the family, which is what
+      # half A's fail_msg asks for — and it is not redundant with the line above
+      # it: the deferred all-domain freshness rule reads rapl_energy_uj and NOT
+      # rapl_power_watts, so without this fragment that future rule would be a
+      # consumer of a warning-graded family that this guard could not see.
+      - rapl_energy_uj
     _telegraf_health_rules: >-
       {{ (lookup('file', _obs_alerting_dir_grading ~ '/telegraf-health.yaml')
           | from_yaml).groups | map(attribute='rules') | flatten | list }}
