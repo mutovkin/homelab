@@ -1503,6 +1503,20 @@
 #     the file does NOT delete the rule (#220) — retirement is a `deleteRules:`
 #     block in a file that also ships rules.
 #
+# ONE ESCAPE PATH FROM *THIS* ASSERT, WRITTEN DOWN SO NOBODY REDISCOVERS IT AS A
+# HOLE. The rule scan below excludes notification-templates.yaml by name, and so
+# does the per-file "contributed rules" assert further up — so a `groups:` block
+# smuggled into THAT file carries rules neither of them can see, drill-marked or
+# not. It is still caught, just not here and not statically: Grafana's file
+# provisioner loads the whole directory, so it would SERVE those rules, and
+# #212's set-equality check compares the served set against an expected set that
+# excludes the same file — the smuggled uid lands in NOT IN THE REPO and fails
+# the deploy. (#181's deep-link guard also reads the file, deliberately, so an
+# unpaired __dashboardUid__ in it is caught statically.) The catcher is live-only
+# and runs at the END of the deploy, which is the cost of the exclusion; closing
+# it statically would mean parsing that file as a rule document, which is
+# precisely what the exclusion exists to avoid. Do not add rules to it.
+#
 # BOTH markers are required, and a HALF-marked rule fails even with the window
 # open. That is not pedantry: the label without the uid is a drill nobody can
 # grep for afterwards, and the uid without the label is a drill that pages

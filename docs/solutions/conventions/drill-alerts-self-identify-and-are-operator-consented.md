@@ -175,11 +175,17 @@ deleteRules:
 ```
 
 `deleteRules:` is a TOP-LEVEL key, so a tombstone-only file has no `groups:` and trips the
-per-file "contributed rules" assert — put the block in a file that also ships rules. The
-provisioning API cannot do it instead: `DELETE /api/v1/provisioning/alert-rules/<uid>` on a
-file-provisioned rule returns HTTP 409 `cannot delete with provided provenance '', needs
-'classic-file-provisioning'`, and `X-Disable-Provenance: true` does not help — it is what
-sets the provenance to `''` and CAUSES the mismatch.
+per-file "contributed rules" assert — put the block in a file that also ships rules.
+
+**The provisioning API cannot do it instead, and this was measured in #212, not here.**
+#201 inherits the finding; it did not re-derive it. The measurements live in master's
+served-set `fail_msg` (`roles/services/observability/tasks/main.yml`, commit `ae9ce5e`):
+`DELETE /api/v1/provisioning/alert-rules/<uid>` on a file-provisioned rule returns HTTP 409
+`cannot delete with provided provenance '', needs 'classic-file-provisioning'`, and
+`X-Disable-Provenance: true` does not help — it is what sets the provenance to `''` and
+CAUSES the mismatch. That header path works only on an API-CREATED stray. The same #212 run
+measured the sibling fact this section opens with: rules dropped from the files were still
+served afterwards, with `delete: true` on the rsync and a Grafana restart.
 
 For a drill SERIES there is nothing to retire: it self-resolves when the datasource's
 staleness window empties. That is a property to preserve deliberately, not a happy accident
