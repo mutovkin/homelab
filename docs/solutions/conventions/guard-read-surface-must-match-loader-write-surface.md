@@ -252,7 +252,7 @@ inspects "the files" while a shipper moves "the directory" is one file extension
 from being decorative. The complement assert is the cheap, durable form of the fix
 because it fails on growth instead of silently ignoring it.
 
-And the harness lesson is the sharpest of the five, because it attacks the *evidence*
+And the harness lesson is the sharpest of them, because it attacks the *evidence*
 rather than the code: a proof procedure that can revert the thing it proves will
 certify anything. Ordering (commit, then prove) removes the failure mode entirely, at
 no cost.
