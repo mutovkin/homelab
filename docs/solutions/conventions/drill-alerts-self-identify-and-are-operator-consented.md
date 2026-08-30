@@ -277,6 +277,43 @@ The four fixtures to keep re-running:
 | `devname="sdd"`, firing | `[FIRING:1] ...` (no marker) |
 | `drill="201"`, resolved | `[DRILL #201] [RESOLVED] ...` |
 
+### A deploy is a delivery event — and a restart does NOT re-page what was already firing
+
+Measured across the #201 apply itself, 2026-08-30, because "did we page anyone?" is the one
+question this whole convention exists to answer and it deserved a real measurement rather
+than an assumption in either direction.
+
+**Grafana's alerting counters are PROCESS-lifetime.** The deploy restarts Grafana, so
+`grafana_alerting_notifications_total` resets and a naive before/after delta is meaningless
+— it will always look like zero or like a decrease. The answerable question is *how many
+notifications has the new process sent*, and the series does not exist at all until the
+first one, so its absence is the evidence.
+
+**The restart did not re-page for alerts that were already firing.** Two real
+`obs-vector-component-errors` instances were active before the apply and stayed active
+after it. For 15 minutes the scheduler logged `Sending alerts to local notifier count=2`
+every 5 minutes while the counters stayed at zero: Grafana's notification log survives the
+restart, so the dispatcher deduplicated against what had already been delivered. A restart
+is therefore not automatically a re-page — but that is a measured property of this version,
+not a guarantee to lean on.
+
+**What DID get delivered, and why it is not a false alarm.** In the 15-17 minute window
+after the apply, exactly four notifications went out (2 email + 2 telegram, zero failures):
+the daily delivery heartbeat, whose entire job is to be delivered; and the RESOLVE of those
+two Vector errors, which genuinely cleared at 02:52Z. Both are real. Neither is synthetic,
+and neither carried a marker — correctly, since neither is a drill.
+
+**The useful corollary is the one that is easy to miss:** those two real notifications
+rendered through the new `homelab.subject` / `homelab.message` templates and were delivered
+with `notification_requests_total == notifications_total` and no failure counter. That is
+stronger evidence than any render fixture — a dangling template reference fails at NOTIFY
+time, and this is the notify path actually running in production. Watch for it after any
+change to these templates: the first real notification after the deploy is the test.
+
+So: **plan a deploy window as though something may be delivered during it**, because
+anything that resolves — or newly fires — while you are applying will be. "Announce before
+firing" has a quieter sibling: if something is already firing when you deploy, say so.
+
 The reference is resolved at NOTIFY time, not at provisioning time, so a renamed define or a
 deleted template file fails only when an alert actually needs sending. That pairing is
 therefore asserted statically at deploy time (`Verify every notification template the contact
