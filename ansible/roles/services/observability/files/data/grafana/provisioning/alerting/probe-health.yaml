@@ -18,6 +18,25 @@ apiVersion: 1
 # `result` and `status_code` are telegraf TAGS, so a probe changing outcome
 # changes series identity. Everything below aggregates across that churn rather
 # than matching on it.
+
+# NO DEEP LINKS IN THIS FILE (#181), for a measured reason rather than a
+# cautious one: nothing under files/data/grafana/dashboards/ plots
+# http_response_result_code or http_response_http_response_code. The tree
+# ships the two #214 host dashboards, the NAS dashboard and six Home Assistant
+# ones, and none of them touches this file's series (verified across all nine
+# dashboard JSONs, 2026-08-29). No panel goes blank when these rules fire, so
+# there is nothing to point at honestly, and a "View panel" button onto an
+# unrelated graph is worse than no button.
+#
+# IF A DASHBOARD FOR THIS IS EVER ADDED, a link is a MANDATORY PAIR of
+# __dashboardUid__ and __panelId__ pointing at a panel whose id is PINNED in
+# the dashboard JSON. Half a pair is boot-fatal for the WHOLE Grafana process
+# and withdraws every provisioned rule in the org (measured 2026-08-24). The
+# static guard "Verify every alert deep link is a paired, pinned reference" in
+# roles/services/observability/tasks/main.yml enforces both halves before a
+# deploy touches anything. See
+# docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md
+
 groups:
   - orgId: 1
     name: service-probes

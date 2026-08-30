@@ -124,6 +124,25 @@ apiVersion: 1
 # NO `hostname:` MATCHER, deliberately. Adding a host to the fleet must not require
 # editing this file — the same property #139 established for the probe rules. That
 # property is what the 24h tail buys.
+
+# NO DEEP LINKS IN THIS FILE (#181), for a measured reason rather than a
+# cautious one: nothing under files/data/grafana/dashboards/ plots the per-
+# host heartbeat row counts this file queries out of VictoriaLogs. The tree
+# ships the two #214 host dashboards, the NAS dashboard and six Home Assistant
+# ones, and none of them touches this file's series (verified across all nine
+# dashboard JSONs, 2026-08-29). No panel goes blank when these rules fire, so
+# there is nothing to point at honestly, and a "View panel" button onto an
+# unrelated graph is worse than no button.
+#
+# IF A DASHBOARD FOR THIS IS EVER ADDED, a link is a MANDATORY PAIR of
+# __dashboardUid__ and __panelId__ pointing at a panel whose id is PINNED in
+# the dashboard JSON. Half a pair is boot-fatal for the WHOLE Grafana process
+# and withdraws every provisioned rule in the org (measured 2026-08-24). The
+# static guard "Verify every alert deep link is a paired, pinned reference" in
+# roles/services/observability/tasks/main.yml enforces both halves before a
+# deploy touches anything. See
+# docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md
+
 groups:
   - orgId: 1
     name: per-host-ingest-health

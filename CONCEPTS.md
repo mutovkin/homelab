@@ -194,6 +194,22 @@ cover, because a guard with no stated scope has no definition of done and review
 cannot terminate. Not to be confused with a Fail-open firewall, where "open" names
 a deliberate lockout trade-off rather than a guard permitting what it forbids.
 
+### Complement assert
+An assertion that the surface a guard reads is the whole surface the deploy ships,
+made by naming what the guard skipped and requiring that remainder to be empty.
+
+A guard that parses "the files" while the deploy ships "the directory" is one
+unanticipated extension away from being decorative, and the gap is invisible: the
+guard still reports success over the documents it happens to match, including on the
+run where the defect it exists to catch is sitting in a file it never opened.
+Widening the pattern is a point fix; the complement assert is what keeps it fixed,
+because it fails the first time reality grows past the guard rather than quietly
+ignoring the addition. Inert residents that legitimately live in the shipped surface
+are allow-listed individually with their reason, so each exemption is a recorded
+decision rather than a loosened pattern. Sibling of the Affirmative-allow guard —
+the same instinct, enumerate what is permitted and refuse the rest, applied to a
+guard's inputs instead of its targets.
+
 ### Check-and-heal
 A deploy-time discipline for controls whose managing service can report healthy
 while the control's effect is gone: probe the real artifact on every run, treat its
@@ -481,6 +497,38 @@ in flight. Where the signal of interest is intermittent, the choices are to
 manufacture a continuous one or to watch a continuously published stand-in on the
 same collection path; the stand-in then has to be recorded as load-bearing at both
 ends, because nothing connects a rule to the collection filter that feeds it.
+
+### Paired deep link
+The reserved pair of alert annotations that turns a notification into a one-tap jump
+to the graph the alert is about: a dashboard identifier and a panel identifier, which
+the dashboard platform validates only as a pair.
+
+Half a pair is not a degraded link but a rejected document, and the rejection is not
+scoped to the offending rule — provisioning is a startup-blocking stage, so one
+unpaired annotation stops the whole process from serving and withdraws every
+provisioned rule in the org. No "link at the dashboard, no panel" form is
+representable, so even a rule whose subject is an entire delivery path going dark has
+to name one panel; the convention is to pick the panel that goes blank when the rule
+fires — or, for a rule about a signal that is lying rather than missing, the panel
+where the flat line is legible — and to write that reasoning beside the pair so a
+later cleanup pass does not tidy the redundant-looking line away. The same pair is
+the precondition for an attached screenshot: a rule with no panel association can
+never carry one, whatever the renderer situation is.
+
+### Linkable panel id
+A dashboard panel identifier that is a legal deep-link target, as distinct from one
+that merely exists and is pinned.
+
+Structural elements — rows above all — take identifiers from the same sequence as
+panels and consume them, but a link at one renders nothing while still showing its
+button, so the mistake is silent at every layer and sits one keystroke from a real
+target. Two sets therefore have to be kept apart: the linkable set, which excludes
+structural elements, and the full set, which includes them because the "every panel
+is pinned" check is only meaningful over all of them. Pinning matters because
+unpinned identifiers are assigned at load, making them an accident of document order
+that an inserted panel or a UI re-export silently renumbers; pinned identifiers must
+also be unique, since duplicates satisfy a naive count while leaving the target
+ambiguous.
 
 ### Heartbeat marker
 A signal emitted on a fixed cadence for no reason other than to be counted, so that

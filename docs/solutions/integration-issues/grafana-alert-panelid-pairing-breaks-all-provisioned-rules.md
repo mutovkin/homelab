@@ -278,6 +278,19 @@ plus the CLAUDE.md gotcha from #151.
    drift. When editing a dashboard through the Grafana UI and re-exporting, diff the `"id"`
    values before committing — a renumber produces no error at any layer.
 
+**SUPERSEDED IN PART, #181 (2026-08-29).** The paragraph below was true when this was
+written and is no longer the current state: the observability role now carries a
+check-mode-safe gate — "Verify every alert deep link is a paired, pinned reference" —
+that parses every alerting document and every dashboard JSON on the control machine
+and fails the deploy on an unpaired annotation, a link into a uid or panel id that
+does not exist, a link at a row, or a referenced dashboard that is not fully and
+uniquely pinned. What remains true: ansible-lint and `--syntax-check` still know
+nothing about Grafana's schema, `--check` still skips the Grafana restart, and no
+repo-side check covers provisioning documents beyond the deep-link classes. How to
+build such a gate so it cannot silently pass — and the four ways this one did before
+it shipped — is
+[a static guard is only as strong as the surface it reads and the harness that proves it](../conventions/guard-read-surface-must-match-loader-write-surface.md).
+
 **Do not expect local tooling to catch it.** The alerting YAML is role `files/` content rsynced
 verbatim (`ansible/roles/services/observability/tasks/main.yml:294`–`:318`); nothing in this repo validates it against Grafana's
 alert-rule schema. A YAML parse, `task ansible:lint` and `ansible-playbook --syntax-check` all

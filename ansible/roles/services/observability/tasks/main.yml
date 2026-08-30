@@ -1084,6 +1084,275 @@
           parser rather than the symptom.
         quiet: true
 
+# #181: a deep link is a PAIR, and half of one is boot-fatal for the whole
+# Grafana process. Measured 2026-08-24 on this fleet: a single
+# `__dashboardUid__` with no `__panelId__` beside it made Grafana's file
+# provisioner reject the document, and provisioning is a startup-blocking
+# module — ten "Starting Grafana" lines, zero "HTTP Server Listen", all 22
+# provisioned rules withdrawn, the alerting stack gone until the annotation was
+# paired. See
+# docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md
+#
+# NOTHING ELSE IN THIS REPO CAN SEE IT. The alerting YAML and the dashboard JSON
+# are role files/ content, rsynced verbatim; the document stays valid YAML,
+# ansible-lint and --syntax-check pass, and `--check` skips the Grafana restart
+# entirely (`when: not ansible_check_mode` further down), so the dry run of the
+# change that kills Grafana is green. Before this guard the live apply was the
+# first real test. These asserts are pure control-machine lookups over the SAME
+# files the deploy ships, so they run under --check and fail before anything
+# touches state.
+#
+# FIVE FAULTS. A, B and C are the ones the format itself creates; D and E are
+# ways THIS GUARD was measured going green over a real defect (adversarial
+# fixtures, 2026-08-29 — every one of them is a regression test now, and the
+# reason the read surface below is deliberately wider than "the files we happen
+# to ship today"):
+#   A. PAIRING — `__dashboardUid__` XOR `__panelId__` is the boot-fatal shape.
+#   B. EXISTENCE — a link to a dashboard uid or a panel id that is not in the
+#      deployed JSON. Grafana accepts it happily: the notification still carries
+#      a "View panel" button, and the button opens nothing or the wrong graph.
+#      There is no error at any layer, which is why it needs a static check.
+#   C. PINNING — a referenced dashboard in which ANY panel lacks an explicit
+#      `id`, or in which two panels share one. Grafana assigns ids at load to
+#      panels that have none, so a dashboard that is not fully and UNIQUELY
+#      pinned makes every id in it an accident of document order; the link
+#      validates today and silently drifts the next time a panel is inserted,
+#      reordered, or re-exported from the UI. Only REFERENCED dashboards are
+#      checked — the six home-assistant dashboards have no pinned ids and no
+#      alert rules pointing at them, and pinning them is its own change, not a
+#      side effect of this one.
+#   D. A ROW ID IS NOT A LINKABLE PANEL. Rows carry ids and consume them, but
+#      `?viewPanel=<row id>` renders nothing, so a link at a row is as dead as a
+#      link at a non-existent id and just as silent. Live dashboards keep their
+#      rows at round numbers — 1/10/20/30/40/50/60 on the host dashboards,
+#      1/4/9/12/15 on the NAS one — so every real link here is one dropped digit
+#      away from landing on one. Rows are therefore excluded from the LINKABLE
+#      set while still counting toward the pinning check, because they do
+#      consume ids. A collapsed row's CHILD panels stay linkable.
+#   E. AN UNREAD FILE IS AN UNGUARDED FILE. Grafana's provisioner loads .yaml,
+#      .yml AND .json out of this directory, and the rsync ships whatever is in
+#      it. A guard that globbed `*.yaml` alone reported green over an `evil.yml`
+#      carrying exactly the 2026-08-24 half-pair. So the read is by extension
+#      set, not by habit, and a second assert insists the directory holds
+#      NOTHING ELSE — a stray backup or editor artefact in a directory that is
+#      rsynced verbatim into Grafana's provisioning path is a decision to make
+#      deliberately, not to discover later.
+#
+# NOT in the read surface, deliberately: alerting/contact-points.yaml and
+# alerting/notification-policies.yaml are TEMPLATED straight to the host
+# (see the two template tasks below) and excluded from the rsync, so they exist
+# only under {{ data_mount }} and never in this repo directory. They carry no
+# alert rules and no deep links; the group_by reconciler above reads the policy
+# template on its own terms.
+#
+# It reads YAML and JSON structurally and looks at `annotations` and `panels`
+# and nothing else, so prose cannot feed it — the rule files name both
+# annotation tokens throughout their comments (this task does too), and a
+# grep-shaped version of this guard would report links that do not exist.
+#
+# Every dunder key is read with ['...'] and never as an attribute: `foo.__x__`
+# is an attribute lookup first in Jinja, and dunder attributes are exactly what
+# a sandboxed template environment refuses.
+- name: Verify every alert deep link is a paired, pinned reference
+  vars:
+    _obs_alerting_dir_links: "{{ role_path }}/files/data/grafana/provisioning/alerting"
+    _obs_dashboard_dir: "{{ role_path }}/files/data/grafana/dashboards"
+    # `filetree`, NOT `fileglob`, in both directions and for two separate
+    # reasons. Reading: fileglob is neither recursive nor multi-extension here,
+    # and Grafana's provisioner is both — it walks the tree and loads
+    # .yaml/.yml/.json alike. Dashboards: fileglob globs only the BASENAME and
+    # treats the dirname as a search path, so `<dir>/*/*.json` resolves nothing
+    # and warns "Unable to find '<dir>/*' in expected paths" — measured on the
+    # first dry run of #181, where it read ZERO dashboards.
+    _obs_alerting_files: >-
+      {{ query('filetree', _obs_alerting_dir_links)
+         | selectattr('state', 'equalto', 'file')
+         | map(attribute='src') | select('search', '\.(ya?ml|json)$') | sort }}
+    # Everything else sitting in the same rsynced directory. `.gitkeep` is the
+    # one sanctioned resident (it holds the otherwise-empty dir in git and
+    # Grafana ignores it); anything else has to be justified in this list.
+    _obs_alerting_unread: >-
+      {{ query('filetree', _obs_alerting_dir_links)
+         | selectattr('state', 'equalto', 'file')
+         | map(attribute='src') | reject('search', '\.(ya?ml|json)$')
+         | reject('search', '/\.gitkeep$') | list }}
+    _obs_dashboard_files: >-
+      {{ query('filetree', _obs_dashboard_dir)
+         | selectattr('state', 'equalto', 'file')
+         | map(attribute='src') | select('search', '\.json$') | sort }}
+    # Number of rules carrying a __dashboardUid__, counted over annotation KEYS
+    # rather than by attribute lookup. This is the witness that the guard has
+    # real input: the tree ships deep links today, so zero means broken parse.
+    _obs_link_annotation_count: >-
+      {{ _obs_link_rules | default([])
+         | map(attribute='annotations', default={}) | map('default', {}, true) | map('list') | flatten
+         | select('equalto', '__dashboardUid__') | list | length }}
+  block:
+    - name: Assert the alerting directory holds nothing the deep-link guard skips
+      ansible.builtin.assert:
+        that:
+          - _obs_alerting_unread | length == 0
+        fail_msg: >-
+          files/data/grafana/provisioning/alerting/ contains
+          {{ _obs_alerting_unread | map('basename') | list }}, which this guard
+          does not read. That directory is rsynced VERBATIM into Grafana's
+          provisioning path, and Grafana's provisioner loads .yaml, .yml and
+          .json out of it — so a file the guard skips is a file that can carry an
+          unpaired __dashboardUid__ into a live Grafana and crash-loop it with
+          every check here still green. That is not hypothetical: it is how this
+          guard was measured passing over an `evil.yml` half-pair on 2026-08-29.
+          Either give it a provisioning extension so it is read and checked, or
+          take it out of a directory that ships verbatim to the host. If it is a
+          new kind of inert file that genuinely belongs here, add it to the
+          reject list in this task's vars WITH the reason — do not widen the
+          pattern to make the failure go away.
+        quiet: true
+
+    - name: Read every deployed dashboard's uid and pinned panel ids
+      vars:
+        _dash: "{{ lookup('file', item) | from_json }}"
+        # One level of nesting: a COLLAPSED row carries its children in its own
+        # `panels` list, and those children are linkable panels with ids of their
+        # own. Every dashboard in the tree is flat today (measured 2026-08-29:
+        # 0 nested panels across all nine), so this arm is protection against the
+        # first collapsed row rather than something currently exercised.
+        _dash_panels: >-
+          {{ (_dash.panels | default([]))
+             + ((_dash.panels | default([])) | map(attribute='panels', default=[]) | flatten | list) }}
+        # Every id in the document, rows included — rows consume ids, so this is
+        # the list the FULL-PINNING check has to be made against.
+        _dash_ids_all: >-
+          {{ _dash_panels | selectattr('id', 'defined') | map(attribute='id') | map('string') | list }}
+        # The row ids, computed separately rather than with a rejectattr on
+        # `type`: a panel with no `type` key at all must survive this step, and
+        # rejectattr on a missing attribute is exactly where that would break.
+        _dash_row_ids: >-
+          {{ _dash_panels | selectattr('type', 'defined')
+             | selectattr('type', 'equalto', 'row')
+             | selectattr('id', 'defined') | map(attribute='id') | map('string') | list }}
+      ansible.builtin.set_fact:
+        _obs_dashboard_panels: >-
+          {{ (_obs_dashboard_panels | default({})) | combine({
+               (_dash.uid | default('')): {
+                 'file': item | basename,
+                 'panels': _dash_panels | length,
+                 'pinned': _dash_ids_all | unique | length,
+                 'ids': _dash_ids_all | difference(_dash_row_ids),
+                 'rows': _dash_row_ids,
+               } }) }}
+      loop: "{{ _obs_dashboard_files }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Read every provisioned alert rule for the deep-link check
+      ansible.builtin.set_fact:
+        _obs_link_rules: >-
+          {{ _obs_link_rules | default([])
+             + ((lookup('file', item) | from_yaml).groups | default([])
+                | map(attribute='rules') | flatten | list) }}
+      loop: "{{ _obs_alerting_files }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Assert the deep-link check actually read the rules and the dashboards
+      ansible.builtin.assert:
+        that:
+          - _obs_link_rules | default([]) | length > 0
+          - _obs_dashboard_panels | default({}) | length > 0
+          - "'' not in (_obs_dashboard_panels | default({}))"
+          - _obs_dashboard_files | length == (_obs_dashboard_panels | default({}) | length)
+          - _obs_link_annotation_count | int > 0
+        fail_msg: >-
+          This guard read {{ _obs_link_rules | default([]) | length }} alert rules
+          from {{ _obs_alerting_files | length }} files and
+          {{ _obs_dashboard_files | length }} dashboard files yielding
+          {{ _obs_dashboard_panels | default({}) | length }} uids
+          ({{ (_obs_dashboard_panels | default({})) | dict2items
+              | map(attribute='key') | sort | join(', ') }}), and found
+          {{ _obs_link_annotation_count }} rules carrying a __dashboardUid__.
+          FEWER UIDS THAN FILES means two dashboards share a uid: they collapse
+          into one entry in this guard's accumulator, last file wins, and every
+          link into that uid is then judged against the WRONG file's panels —
+          measured going green over exactly that on 2026-08-29. Grafana has the
+          same problem at import, so the fix is the dashboard's, not the guard's.
+          An empty-string uid means a dashboard JSON has no `uid` key at all:
+          Grafana would assign one at import and no alert link could ever address
+          it. A ZERO anywhere else means the parse or the directory walk is
+          broken, not that the links were removed — the tree ships deep links
+          today (telegraf-health.yaml and truenas-health.yaml) — and a guard
+          whose input is empty is `assert: true`, the exact shape this repo keeps
+          being bitten by. Fix the parse, the filetree walks, or the dashboard,
+          and do not delete this.
+        quiet: true
+
+    - name: Assert every alert deep link carries BOTH reserved annotations
+      vars:
+        _ann: "{{ item.annotations | default({}, true) }}"
+      ansible.builtin.assert:
+        that:
+          - ('__dashboardUid__' in _ann) == ('__panelId__' in _ann)
+        fail_msg: >-
+          Alert rule {{ item.uid }} carries
+          {{ '__dashboardUid__' if '__dashboardUid__' in _ann else '__panelId__' }}
+          without the other half. Grafana validates the two as a MANDATORY PAIR
+          ("both annotations __dashboardUid__ and __panelId__ must be specified")
+          and rejects the whole provisioning document — and the rejection is not
+          scoped to this rule: provisioning is a startup-blocking module, so
+          Grafana crash-loops and EVERY provisioned alert rule in the org
+          disappears (measured 2026-08-24, ten "Starting Grafana" lines and zero
+          "HTTP Server Listen"). A dashboard-only deep link is not representable;
+          if no single panel fits, pick the one the rule's own description names
+          first and write the reason beside it — or drop the link entirely.
+          Never ship half a pair.
+        quiet: true
+      loop: "{{ _obs_link_rules | default([]) }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
+    - name: Assert every alert deep link points at a pinned, linkable panel
+      vars:
+        _ann: "{{ item.annotations | default({}, true) }}"
+        _uid: "{{ _ann['__dashboardUid__'] | default('') }}"
+        _pid: "{{ _ann['__panelId__'] | default('') }}"
+        _dash: "{{ (_obs_dashboard_panels | default({}))[_uid] | default({}) }}"
+      ansible.builtin.assert:
+        that:
+          - _ann['__panelId__'] is string
+          - _uid in (_obs_dashboard_panels | default({}))
+          - _pid in (_dash.ids | default([]))
+          - (_dash.pinned | default(0)) == (_dash.panels | default(0))
+        fail_msg: >-
+          Alert rule {{ item.uid }} deep-links to dashboard uid "{{ _uid }}" panel
+          "{{ _pid }}", and that reference does not hold up against
+          files/data/grafana/dashboards/. Known dashboards:
+          {{ (_obs_dashboard_panels | default({})) | dict2items
+             | map(attribute='key') | sort | join(', ') }}.
+          "{{ _uid }}" is {{ _dash.file | default('NOT DEPLOYED BY THIS ROLE') }}
+          with {{ _dash.panels | default(0) }} panels,
+          {{ _dash.pinned | default(0) }} distinct pinned ids, linkable ids
+          [{{ _dash.ids | default([]) | join(', ') }}] and ROW ids
+          [{{ _dash.rows | default([]) | join(', ') }}].
+          Grafana does not object to any of this — the notification still shows a
+          "View panel" button, and it opens nothing or the wrong graph, with no
+          error at any layer. Five ways to fail this, in order of likelihood: the
+          panel id is not a STRING (write it quoted, `__panelId__: "11"`); the id
+          names a ROW, which carries an id but renders nothing under
+          ?viewPanel= — the rows are listed above and sit at round numbers, one
+          dropped digit from any real link; the uid is wrong, or its dashboard is
+          not shipped by this role; the id is not in that dashboard at all; or
+          the dashboard is not FULLY and UNIQUELY pinned — Grafana assigns ids at
+          load to panels that lack them, and two panels sharing an id is the same
+          drift wearing a disguise, so `pinned` must equal `panels`. Pin the ids
+          in the dashboard JSON in the SAME change as the annotation (#187,
+          #214), never afterwards.
+        quiet: true
+      # Only the rules that carry a link. The pairing assert above owns the
+      # half-a-pair case, so anything reaching here has both keys.
+      when: "'__dashboardUid__' in (item.annotations | default({}, true))"
+      loop: "{{ _obs_link_rules | default([]) }}"
+      loop_control:
+        label: "{{ item.uid }}"
+
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
 # Governed ports and why each is on the list:
 #

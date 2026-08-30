@@ -139,6 +139,10 @@ groups:
       # NOTE for whoever renames this host on purpose: the rule is scoped to the
       # name, so a deliberate rename makes it fire — update the selector in the
       # same change that does the rename.
+      #
+      # NO DEEP LINK on this rule: eq12_docker has no dashboard to point at. The
+      # full reasoning, shared with the other three eq12_docker rules, is in the
+      # block above obs-docker-metrics-absent further down this file.
       - uid: obs-telegraf-metrics-absent
         title: Telegraf metrics stopped arriving for eq12_docker
         condition: C
@@ -246,18 +250,32 @@ groups:
       # series. These two rules are their absence owners, mirroring the container
       # rule above one-for-one so the three read the same way.
       #
-      # NO DEEP LINKS ON THESE TWO, DELIBERATELY. The natural link for a rule
-      # that says "a whole delivery path went dark" is the DASHBOARD, and a
-      # dashboard-only deep link is NOT REPRESENTABLE in file provisioning:
-      # Grafana validates __dashboardUid__ and __panelId__ as a mandatory PAIR
-      # and rejects the document otherwise — and that rejection is boot-fatal for
-      # ALL provisioned rules, not just the offending one (measured 2026-08-24:
-      # one unpaired annotation crash-looped Grafana, ten "Starting Grafana"
-      # lines, zero "HTTP Server Listen", all 22 rules withdrawn). Nothing
-      # repo-side can catch it — the file is valid YAML, lint-clean, and --check
-      # skips the Grafana restart entirely. So: add a link only as a real pair,
-      # pointing at a panel with a PINNED id. See
+      # DEEP LINKS ON THESE TWO, ADDED BY #181 — and read the pairing rule below
+      # before touching one. This block used to say "NO DEEP LINKS, DELIBERATELY"
+      # because a rule announcing that a whole delivery path went dark wants to
+      # link at the DASHBOARD, and a dashboard-only link is not representable.
+      # That reason expired with #214, which landed hosts/eq12.json (uid
+      # host-eq12) and hosts/n5pro.json (uid host-n5pro) with EVERY panel id
+      # PINNED: there is now a specific panel that goes blank when each of these
+      # fires, so the mandatory pair carries information instead of noise.
+      #
+      # THE PAIR IS MANDATORY AND BREAKING IT IS BOOT-FATAL. Grafana validates
+      # __dashboardUid__ and __panelId__ as a pair and rejects the document
+      # otherwise — and the rejection is not scoped to the offending rule:
+      # provisioning is a startup-blocking module, so ALL provisioned rules go
+      # (measured 2026-08-24: one unpaired annotation crash-looped Grafana, ten
+      # "Starting Grafana" lines, zero "HTTP Server Listen", all 22 rules
+      # withdrawn). The file stays valid YAML and lint-clean, and --check skips
+      # the Grafana restart, so the live apply used to be the first real test —
+      # which is why "Verify every alert deep link is a paired, pinned
+      # reference" in roles/services/observability/tasks/main.yml now parses
+      # these files AND the dashboard JSON on the control machine, before
+      # anything deploys. See
       # docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md
+      #
+      # Choose the panel that goes BLANK when the rule fires, never the most
+      # convenient one, and keep the comment beside each pair: it is what stops a
+      # later cleanup pass "tidying" the redundant-looking line away.
 
       # ---------------------------------------------------------------------
       # WHEN THIS FIRES, on the host itself — this agent is native, so there is
@@ -309,6 +327,20 @@ groups:
           description: |-
             The native systemd agent on the Proxmox host eq12: `systemctl status telegraf` then `journalctl -u telegraf -n 100` over ssh root@eq12.
             Its host label is templated literally from inventory_hostname into /etc/telegraf/telegraf.conf, so a wrong label means that file changed — there is no env var to go missing here.
+          __dashboardUid__: host-eq12
+          # Grafana REJECTS __dashboardUid__ without __panelId__ ("both
+          # annotations ... must be specified") and crash-loops, withdrawing
+          # EVERY provisioned rule in the org — see the pairing note above.
+          # 2 = "Uptime", which plots the eq12 series of system_uptime: the
+          # exact series this rule reduces through lag(), so that panel is the
+          # one that goes blank the moment this fires. Id pinned in
+          # dashboards/hosts/eq12.json (#214). The metric and its selector are
+          # deliberately NOT quoted verbatim here — "Verify the telegraf alert
+          # rule's pinned host selector" in the role greps this file for
+          # system_uptime host selectors and counts them, so an expr repeated in
+          # a COMMENT is a false anchor that fails the deploy. Measured: it did,
+          # on the first dry run of #181.
+          __panelId__: "2"
         labels:
           severity: critical
           component: metrics-pipeline
@@ -428,6 +460,13 @@ groups:
           description: |-
             The native systemd agent on the Proxmox host n5pro: `systemctl status telegraf` then `journalctl -u telegraf -n 100` over ssh root@n5pro.
             Its host label is templated literally from inventory_hostname into /etc/telegraf/telegraf.conf, so a wrong label means that file changed — there is no env var to go missing here.
+          __dashboardUid__: host-n5pro
+          # Paired, and it must be — an unpaired __dashboardUid__ is boot-fatal
+          # for every provisioned rule (see the note above these two). 2 =
+          # "Uptime", the n5pro series of system_uptime — the exact series this
+          # rule reduces through lag(). Id pinned in dashboards/hosts/n5pro.json.
+          # Selector not quoted verbatim, for the reason given on the eq12 rule.
+          __panelId__: "2"
         labels:
           severity: critical
           component: metrics-pipeline
@@ -522,9 +561,11 @@ groups:
       # one that IS a page — is already owned by the two rules above, at
       # severity critical. This deliberately keeps the #193 fatigue posture.
       #
-      # NO DEEP LINKS ON THESE TWO EITHER, for the reason spelled out above the
-      # native-agent rules: a dashboard-only __dashboardUid__ is not
-      # representable and its rejection is boot-fatal for ALL provisioned rules.
+      # DEEP LINKS ON THESE TWO (#181), each to panel 11 "CPU power by RAPL
+      # domain" on its host's #214 dashboard — the panel that plots the exact
+      # domain set this pair counts. Both annotations or neither: an unpaired
+      # __dashboardUid__ is boot-fatal for EVERY provisioned rule, and the
+      # reasoning is spelled out above the native-agent rules.
       #
       # WHEN EITHER FIRES, on the host itself:
       #   ssh root@<host> 'systemctl status telegraf'
@@ -568,6 +609,15 @@ groups:
           description: |-
             The exec input can die while the agent stays healthy, so this is separate from the agent-liveness rule. On the host: `journalctl -u telegraf -n 100 | grep -i exec`, then run /usr/local/lib/telegraf/rapl_power.sh by hand — it prints one line per readable domain and nothing for one it cannot read.
             energy_uj is root-only and is reached through the unit's ambient CAP_DAC_OVERRIDE; a drop-in regression takes this family out while every other family keeps flowing.
+          __dashboardUid__: host-eq12
+          # Paired — an unpaired __dashboardUid__ crash-loops Grafana and
+          # withdraws every rule. 11 = "CPU power by RAPL domain", query
+          # `rapl_power_watts{host="eq12"}` with no domain selector: the panel
+          # plots exactly the series set this rule COUNTS, so losing one domain
+          # thins that graph and trips the `lt 3` threshold together. Panels 6
+          # and 12 are deliberately NOT the target — both pin domain="package-0"
+          # and would still be drawing while core/uncore were gone.
+          __panelId__: "11"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -663,6 +713,11 @@ groups:
           description: |-
             The exec input can die while the agent stays healthy, so this is separate from the agent-liveness rule. On the host: `journalctl -u telegraf -n 100 | grep -i exec`, then run /usr/local/lib/telegraf/rapl_power.sh by hand — it prints one line per readable domain and nothing for one it cannot read.
             One domain is correct here: this board has package-0 and core, and core is excluded at the source because it was measured to be a single core rather than a package aggregate.
+          __dashboardUid__: host-n5pro
+          # Paired (see above). 11 = "CPU power by RAPL domain", query
+          # `rapl_power_watts{host="n5pro"}` — the whole domain set this rule
+          # counts, not the package-0 stat on panel 6.
+          __panelId__: "11"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -817,9 +872,18 @@ groups:
       # the root policy, same #193 posture and same grading argument as the pair
       # above: nothing else in this folder reads rapl_power_watts as data.
       #
-      # NO DEEP LINKS, same as every rule in this file: a dashboard-only
-      # __dashboardUid__ is unrepresentable and its rejection is boot-fatal for
-      # ALL provisioned rules.
+      # DEEP LINKS ON THESE TWO (#181), both to panel 11 "CPU power by RAPL
+      # domain" on their own host's #214 dashboard. This comment used to read
+      # "NO DEEP LINKS, same as every rule in this file"; that stopped being true
+      # when #181 paired eleven links in this file. What has NOT changed, and is
+      # why a link must be a PAIR or nothing: a dashboard-only __dashboardUid__
+      # is unrepresentable and its rejection is boot-fatal for ALL provisioned
+      # rules.
+      #
+      # These two are the one place in this file where the linked panel does not
+      # go BLANK when the rule fires — the series keeps arriving, flat at zero.
+      # The per-rule comments below record why 11 is still the honest target and
+      # why ids 6 and 12 are not.
       #
       # WHEN EITHER FIRES, on the host itself:
       #   ssh root@<host> '/usr/local/lib/telegraf/rapl_power.sh'   # ~1s
@@ -846,6 +910,29 @@ groups:
           description: |-
             A readable but non-advancing energy_uj reads as a confident 0.000000 W, which the domain-count absence rule cannot see: the series is still arriving. eq12's package has never sampled below 1.492526 W (measured over the family's full history, 2026-08-29), so a 6h maximum under 1 mW is a stopped counter or a powercap driver fault, not an idle box.
             On the host: run /usr/local/lib/telegraf/rapl_power.sh — a frozen zone prints power_watts=0.000000 with a STATIC energy_uj — and read /sys/class/powercap/intel-rapl:0/energy_uj twice 60s apart. Per domain, changes(rapl_energy_uj{host="eq12"}[1h]) answers the same question from Grafana.
+          __dashboardUid__: host-eq12
+          # Paired — an unpaired __dashboardUid__ is boot-fatal for EVERY
+          # provisioned rule (see the note above the native-agent rules). 11 =
+          # "CPU power by RAPL domain".
+          #
+          # THIS RULE'S PANEL DOES NOT GO BLANK, which is the rule of thumb the
+          # absence rules above are chosen by, and the difference is this rule's
+          # whole point: the series is still ARRIVING and lying. So the link goes
+          # where the EVIDENCE is legible. Panel 11 plots rapl_power_watts with
+          # no domain selector, so package-0 — the domain this rule reads — shows
+          # as a flatline pinned at 0.000000 W with the sibling domains beside it
+          # in the same view. That neighbouring context is exactly what separates
+          # this fault from the one obs-rapl-power-absent-eq12 owns: a frozen
+          # counter is a flat line among live ones, total loss is no lines at all.
+          #
+          # NOT panel 6: right series (domain="package-0"), wrong shape — a STAT
+          # shows one current number and no history, and a freeze is only legible
+          # over time. NOT panel 12 either, and that one is a trap worth naming:
+          # on host-eq12 id 12 is "Package power — 7 day trend", which would suit
+          # this rule well, but on host-n5pro id 12 is "iGPU power and clock", an
+          # unrelated family. Using it here invites the copy-paste that points
+          # the n5pro twin at the iGPU. 11 means the same thing on both boards.
+          __panelId__: "11"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -934,6 +1021,14 @@ groups:
           description: |-
             A readable but non-advancing energy_uj reads as a confident 0.000000 W, which the domain-count absence rule cannot see: the series is still arriving. n5pro's package has never sampled below 5.382494 W (measured over the family's full history, 2026-08-29), so a 6h maximum under 1 mW is a stopped counter or a powercap driver fault, not an idle box.
             On the host: run /usr/local/lib/telegraf/rapl_power.sh — a frozen zone prints power_watts=0.000000 with a STATIC energy_uj — and read /sys/class/powercap/intel-rapl:0/energy_uj twice 60s apart. Per domain, changes(rapl_energy_uj{host="n5pro"}[1h]) answers the same question from Grafana.
+          __dashboardUid__: host-n5pro
+          # Paired (see above). 11 = "CPU power by RAPL domain". On this board
+          # package-0 is the WHOLE RAPL surface — `core` is excluded at source as
+          # a single-core counter (#194) — so panel 11 plots exactly the one
+          # series this rule reads, and a frozen counter is its flatline at
+          # 0.000000 W. Deliberately NOT id 12: on THIS dashboard 12 is "iGPU
+          # power and clock", not the package trend it is on host-eq12.
+          __panelId__: "11"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1007,9 +1102,13 @@ groups:
       # a warning" in roles/services/observability/tasks/main.yml fails the deploy
       # if that ever stops being true, rather than leaving it to memory.
       #
-      # NO DEEP LINKS on any of these, for the reason above the native-agent
-      # rules: an unpaired __dashboardUid__ is boot-fatal for EVERY provisioned
-      # rule, and "a delivery path went dark" has no one panel to point at.
+      # DEEP LINKS ON ALL FIVE (#181), each to the panel on that host's #214
+      # dashboard that plots the EXACT series the rule evaluates — 64 for the
+      # SMART pair, 21 for the sensors pair, 33 for the fan rule, with the
+      # reasoning (including the panels deliberately NOT chosen) beside each
+      # pair. Both annotations or neither: an unpaired __dashboardUid__ is
+      # boot-fatal for EVERY provisioned rule. See the note above the
+      # native-agent rules.
 
       # THE ANCHOR IS smart_device_health_ok, NOT A smart_device_.+ REGEX, and
       # that is the whole design of these two rules. Measured on eq12,
@@ -1062,6 +1161,15 @@ groups:
             (2) `journalctl -u telegraf -n 100 | grep -i smart`;
             (3) `/usr/sbin/smartctl --scan` still finds the root NVMe.
             Do NOT "fix" this by moving the unit to User=root — relax the specific hardening directive that broke, with the measured failure recorded beside it (roles/telegraf_agent/README.md).
+          __dashboardUid__: host-eq12
+          # Paired — unpaired is boot-fatal for every provisioned rule. 64 =
+          # "NVMe health (SMART)", whose FIRST target is
+          # `smart_device_health_ok{host="eq12"}` — this rule's own anchor
+          # series, the one thing the capability regression above takes away.
+          # Panel 22 ("NVMe (SMART)") is the tempting pick and is rejected on
+          # purpose: it plots smart_device_temp_c, a DIFFERENT field of the same
+          # family, so it is a neighbour of the fault rather than the fault.
+          __panelId__: "64"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1145,6 +1253,11 @@ groups:
             (2) `journalctl -u telegraf -n 100 | grep -i smart`;
             (3) `/usr/sbin/smartctl --scan` still finds the root NVMe.
             The pool disks are NOT covered here — they belong to the TrueNAS VM and are owned by truenas-poller-absent and the truenas thermal rules.
+          __dashboardUid__: host-n5pro
+          # Paired (see above). 64 = "NVMe health (SMART)", first target
+          # `smart_device_health_ok{host="n5pro"}` — this rule's anchor series,
+          # not the temperature graph on panel 22.
+          __panelId__: "64"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1235,6 +1348,14 @@ groups:
           description: |-
             A LOW count means chips went unreadable, not that the metric is missing — which is why this is a count and not a presence check. On the host: `sensors` to see what lm-sensors still enumerates, then `journalctl -u telegraf -n 100 | grep -i sensors`. A kernel upgrade that renamed or stopped loading an hwmon module is the usual cause.
             Extra chips never fire this rule: the comparison is one-sided on purpose, because a forced it87 binding on this board has added series before — and as of 2026-08-25 that binding is PERSISTED, which is what took this count from 7 to 11.
+          __dashboardUid__: host-eq12
+          # Paired — unpaired is boot-fatal for every provisioned rule. 21 =
+          # "Every temperature sensor", query
+          # `{__name__=~"sensors_temp[0-9]_input", host="eq12"}`: one line per
+          # series, which is what this rule's COUNT threshold is about — a
+          # thinning set is visible there and invisible on panel 7, whose
+          # max() over the same family keeps drawing until the last chip goes.
+          __panelId__: "21"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1320,6 +1441,11 @@ groups:
           description: |-
             A LOW count means chips went unreadable, not that the metric is missing. On the host: `sensors`, then `journalctl -u telegraf -n 100 | grep -i sensors`.
             Two of the nine are NIC PHY sensors (nic1-pci-c400 mac/phy, r8169_0_c500 temp1). If this rule proves flappy, the recorded remedy is to narrow the selector to exclude those chips and lower the declared count in host_vars in the same change — NOT to lower the count alone, which would stop detecting a real loss.
+          __dashboardUid__: host-n5pro
+          # Paired (see above). 21 = "Every temperature sensor", one line per
+          # series over the same `sensors_temp[0-9]_input` family this rule
+          # counts — not the max() stat on panel 7.
+          __panelId__: "21"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1411,6 +1537,15 @@ groups:
           description: |-
             The script emits nothing for a device it cannot read rather than a fabricated zero, so a LOW count means devices went unreadable — this thins silently and a presence check would not see it. On the host: `grep . /sys/class/thermal/cooling_device*/type` and the matching cur_state files, then `journalctl -u telegraf -n 100 | grep -i exec`.
             This is BINARY state, not RPM — it says the fan state is being collected, nothing about whether the fans are spinning.
+          __dashboardUid__: host-eq12
+          # Paired — unpaired is boot-fatal for every provisioned rule. 33 =
+          # "ACPI cooling-device state", query
+          # `acpi_fan_state_state{host="eq12"}`: the exact series this rule
+          # counts, and one line per cooling device, so the thinning this rule
+          # exists to catch is what the panel shows. NOT panel 31 ("Fan speed",
+          # sensors_fan*_input) — a different family from a different input, and
+          # this rule is binary state, never RPM.
+          __panelId__: "33"
         labels:
           severity: warning
           component: metrics-pipeline
@@ -1506,9 +1641,19 @@ groups:
       # mutually exclusive. So the co-fire is accepted and the SEVERITIES are
       # what keep it cheap: one page, plus emails.
       #
-      # NO DEEP LINKS, for the reason spelled out above the native-agent rules: a
-      # dashboard-only __dashboardUid__ is not representable and its rejection is
-      # boot-fatal for ALL provisioned rules.
+      # STILL NO DEEP LINKS ON THE eq12_docker RULES — obs-telegraf-metrics-absent
+      # at the top of this file, and these three — and the reason is now a
+      # DIFFERENT one from the note that used to sit here. It is not "an unpaired
+      # link is boot-fatal" (that is true of every link, and the native-agent
+      # rules above now carry paired ones): it is that eq12_docker HAS NO
+      # DASHBOARD. #214 built host-eq12 and host-n5pro for the two Proxmox hosts;
+      # nothing under files/data/grafana/dashboards/ plots docker_n_containers,
+      # ping_percent_packet_loss, docker_* with an empty host label, or the
+      # eq12_docker series of system_uptime (verified across all nine dashboard
+      # JSONs, 2026-08-29). There is no panel that goes blank when these fire, so
+      # there is nothing to point honestly at, and a "View panel" button onto an
+      # unrelated graph is worse than no button. If a CT-101 dashboard is ever
+      # added, pin its panel ids and add the pairs here in the SAME change.
 
       # docker_n_containers is ENGINE-level (not per-container), emitted every
       # collection interval whenever [[inputs.docker]] runs at all, and it churns
