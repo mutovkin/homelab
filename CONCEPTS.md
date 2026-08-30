@@ -540,6 +540,19 @@ functioned at all: it leaves no regression, no failing run, and no drift, so the
 nothing to notice and the only defence is verifying a control the first time it is
 introduced.
 
+A further variant survives every check made on the control itself. The control runs,
+its logic is sound and its extraction is deliberately non-vacuous — and it still
+cannot see the fault, because the field it asserts on cannot represent that fault.
+This arises wherever the asserted value is derived downstream of a configurable
+mapping, a setting of the form "when this happens, report that instead": such a field
+describes the operator's declared preference rather than the observed world, and a
+fault the mapping absorbs never reaches it. Reviewing the control cannot surface
+this, because nothing about the control is wrong. Only running it against the fault
+does. A control that passes its own negative test has reported a fact about itself
+rather than about the system, so the question to ask of every asserted field is what
+value it would hold if the fault were present — if that is the value it already
+holds, the control is decoration however carefully the rest of it is built.
+
 ### Pre-deploy dump
 A backup a service role takes of its own data immediately before handing that data to a
 possibly newer image, so a one-way schema migration always has something to go back to.
