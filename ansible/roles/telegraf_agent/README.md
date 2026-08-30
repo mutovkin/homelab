@@ -53,6 +53,42 @@ credentials file fails the unit loudly instead of starting an agent that ships
 unauthenticated. `/etc/default/telegraf` is a dpkg conffile and is left alone;
 EnvironmentFile entries are additive and later entries win.
 
+## The write path: why `outputs.http` sets `idle_conn_timeout = "45s"` (#208)
+
+`[[outputs.http]]` pushes prometheusremotewrite to VictoriaMetrics on eq12_docker
+every 60 s. Telegraf's Go transport defaults `idle_conn_timeout` to `0`, which means
+**keep idle connections forever** — and VictoriaMetrics runs the default
+`-http.idleConnTimeout=1m0s`, armed the moment it finishes writing each 204. Two
+60-second timers, so in steady state *every* keep-alive reuse arrived within a
+millisecond or two of the server's idle deadline.
+
+Measured 2026-08-29 from a 2100 s capture taken simultaneously on n5pro, eq12 and the
+VictoriaMetrics side (one clock for both clients): all 16 at-risk reuses landed within
+±5 ms of the 60.000 s deadline. Miss it by more than ~0.45 ms and the POST dies as
+`EOF`, `connection reset by peer` or `write: broken pipe` — 508 such errors on n5pro
+and 68 on eq12 over 48 h. It is not a per-host fault: **eq12 failed more often than
+n5pro during that capture**, and each host's rate switches on and off in multi-hour
+epochs as the two timers drift past each other.
+
+45 s is chosen against the reuse pattern, not picked round: the only dangerous reuses
+are the 50 s and 60 s ones, and 45 s evicts before both with headroom, while still
+pooling the 10 s split-flush pair that a slow input sometimes produces. It must stay
+below 60 s; if VictoriaMetrics' flag is ever set explicitly, this value has to move
+with it.
+
+Why the client and not the server: the server's FIN went out **22 µs after** the
+doomed request had already arrived, so no amount of client-side timing care could have
+dodged it — the client can only stop *offering* the connection. Client-side eviction
+is race-free by construction (Go's idle timer takes the pool mutex and skips the close
+if a request has already claimed the connection), which is why this is the fix rather
+than one option among several.
+
+Verify it structurally, never by counting errors — the epochs make short-window counts
+worthless. The check is that no connection is ever reused at ≥45 s idle and that the
+**client** sends the first FIN with no request in flight. Measured after the change:
+max idle at any reuse 9.998 s, client FIN at 45.000742 s idle, zero server-close
+failures on either host.
+
 ## Privilege: why not root, why not sudo, why not setuid
 
 **The shipped `User=telegraf` stays.** `[[inputs.smart]]` genuinely needs
