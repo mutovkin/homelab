@@ -846,37 +846,66 @@
     # that lost its `groups` key — a restructure, a stray indent — into a silent
     # zero-rule contribution, and the aggregate witness below cannot see it: 33
     # is still comfortably greater than telegraf-health.yaml's 13 with an entire
-    # file missing. Every file in this directory is a rule document today, so
-    # "yields at least one rule" is the right claim; a future non-rule file here
-    # means teaching this assert about it, deliberately.
+    # file missing. That fault is still exactly what this assert exists for: a
+    # RULE file that loses its `groups:` key still fails here.
     #
-    # #201 is that future, and this is what "deliberately" looks like:
-    # notification-templates.yaml is EXCLUDED BY NAME from the loop below, not
-    # admitted by relaxing the assert. The claim the guard makes is unchanged —
-    # every file it looks at is a rule document and must yield rules — so a
-    # rule file that loses its `groups:` key still fails here, and any OTHER
-    # non-rule file added to this folder fails here too, which is the point.
-    # Measured before the exclusion landed: this assert failed the deploy on
-    # notification-templates.yaml, naming the file. A guard seen to fail.
-    - name: Assert every alerting file actually contributed rules
+    # TWO KINDS OF NON-RULE DOCUMENT NOW LIVE IN THIS DIRECTORY, AND THEY ARE
+    # HANDLED DIFFERENTLY ON PURPOSE. The question that separates them is
+    # whether the file makes a claim about RULES at all.
+    #   notification-templates.yaml (#201) does not — it is a provisioned
+    #     Grafana notification template, nothing in it is rule-shaped — so it is
+    #     EXCLUDED BY NAME from the loop below and the claim this assert makes
+    #     over the files it does look at is unchanged.
+    #   retired.yaml (#220) DOES. Its `deleteRules:` entries are statements about
+    #     rules: which uids must stop existing. Naming it out would therefore be
+    #     the WEAKER move — a retired.yaml that lost its `deleteRules:` key to a
+    #     restructure would sail through, which is this assert's own defect one
+    #     level over. It stays IN the loop and has to contribute tombstones.
+    # So the claim is now "every file this loop looks at declares rules or
+    # retires them", and a file that does neither still fails.
+    #
+    # #201's rule stands and is not weakened by this: a THIRD kind of non-rule
+    # file fails here until someone teaches this assert about it DELIBERATELY —
+    # by name if it makes no claim about rules, or with a positive clause of its
+    # own if it does. What is forbidden is admitting an unspecified file by
+    # relaxing the assertion into "anything goes".
+    #
+    # Both halves are guards seen to fail. Measured before #201's exclusion
+    # landed: this assert failed the deploy on notification-templates.yaml,
+    # naming the file. #220 re-witnessed both clauses against fixtures before
+    # shipping: a document with no `groups:` fails clause 1, and a tombstone with
+    # no `uid:` fails clause 2.
+    - name: Assert every alerting file contributes rules or tombstones
       vars:
+        _file_doc: "{{ lookup('file', item) | from_yaml }}"
         _file_rules: >-
-          {{ ((lookup('file', item) | from_yaml).groups | default([]))
+          {{ (_file_doc.groups | default([]))
              | map(attribute='rules') | flatten | list }}
+        _file_tombstones: "{{ _file_doc.deleteRules | default([]) }}"
       ansible.builtin.assert:
         that:
-          - _file_rules | length > 0
+          - _file_rules | length > 0 or _file_tombstones | length > 0
+          # A tombstone with no `uid` retires nothing: Grafana has no rule to
+          # match it against, the orphan keeps evaluating, and the file still
+          # satisfies the clause above.
+          - _file_tombstones | rejectattr('uid', 'defined') | list | length == 0
         fail_msg: >-
-          {{ item | basename }} contributed ZERO rules to the grading check. Every
-          file in files/data/grafana/provisioning/alerting/ is a rule document, so
-          this means the file lost its top-level `groups:` key (a restructure or a
-          stray indent) and `| default([])` silently swallowed it. The aggregate
-          size check below cannot see this — the other files still add up to more
-          than one file's worth — so the consumer sweep would simply stop covering
-          that file's rules while every deploy stayed green. Fix the file, or, if
-          a genuine non-rule file now lives here, teach this assert about it —
-          as #201 did for notification-templates.yaml, by naming it in the
-          reject() below rather than by weakening the assertion.
+          {{ item | basename }} contributed ZERO rules AND ZERO `deleteRules:`
+          tombstones to the grading check — or one of its tombstones has no
+          `uid:`, which retires nothing while still counting as content. The
+          files this loop looks at are rule documents, or retired.yaml, the
+          tombstone document (#220). Zero of both normally means the file lost
+          its top-level `groups:` key (a restructure or a stray indent) and
+          `| default([])` silently swallowed it. The aggregate size check below
+          cannot see this — the other files still add up to more than one file's
+          worth — so the consumer sweep would simply stop covering that file's
+          rules while every deploy stayed green.
+          Fix the file; or, if a genuine NEW non-rule file now lives here, teach
+          this assert about it deliberately: name it in the reject() below if it
+          makes no claim about rules, as #201 did for
+          notification-templates.yaml, or give it a positive clause of its own if
+          it does, as #220 did for retired.yaml's tombstones. Do not weaken the
+          assertion to admit an unnamed file.
         quiet: true
       loop: >-
         {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
@@ -1018,19 +1047,25 @@
     # attribute 'split'"; reproduced on 2.21). `*` gives the lookup one term
     # per path.
     #
-    # notification-templates.yaml is rejected BY NAME (#201): it is the one
-    # declared non-rule document here (a provisioned notification template — the
-    # [DRILL] marker), it has no `groups:` key, and this chain's
-    # `map(attribute='groups')` carries NO default on purpose — a rule file that
-    # lost its `groups:` key must raise here rather than quietly shrink the
-    # witness set, because a shrunken set makes assert B (no inert group_by key)
-    # fail and assert A pass on almost nothing. Excluding the file by name keeps
-    # that strictness intact for every file that IS a rule document; adding
-    # `default=[]` instead would have bought the same green run at the cost of
-    # the guard.
+    # TWO non-rule documents are rejected BY NAME here, as separate literals.
+    # notification-templates.yaml (#201) is a provisioned notification template;
+    # retired.yaml (#220) is the tombstone document. Neither has a `groups:` key
+    # and neither ever will, so neither can contribute a `by (...)` label.
+    #
+    # This chain's `map(attribute='groups')` still carries NO default, and #220
+    # deliberately did NOT add one: a RULE file that lost its `groups:` key must
+    # RAISE here rather than quietly shrink the witness set, because a shrunken
+    # set makes assert B (no inert group_by key) fail and assert A pass on almost
+    # nothing. Naming the two non-rule files keeps that strictness intact for
+    # every file that IS a rule document; `default=[]` would have bought the same
+    # green run at the cost of the guard. This is the one site where #220's
+    # tombstone file is handled #201's way rather than with a positive clause —
+    # a file that declares no rules has nothing to say about aggregation labels,
+    # so there is no claim to make about it here.
     _obs_all_by_labels: >-
       {{ ((query('file', *(query('fileglob', _obs_alerting_dir ~ '/*.yaml')
-                           | reject('search', '/notification-templates[.]yaml$') | list))
+                           | reject('search', '/notification-templates[.]yaml$')
+                           | reject('search', '/retired[.]yaml$') | list))
            | map('from_yaml') | map(attribute='groups') | flatten
            | map(attribute='rules') | flatten
            | map(attribute='data') | flatten
@@ -1501,7 +1536,8 @@
 #   SERVED-SIDE, #212's set-equality check further down: a drill rule left in
 #     Grafana after its branch died is a uid NOT IN THE REPO. Note that deleting
 #     the file does NOT delete the rule (#220) — retirement is a `deleteRules:`
-#     block in a file that also ships rules.
+#     tombstone in alerting/retired.yaml, added in the same change that removes
+#     the rule.
 #
 # ONE ESCAPE PATH FROM *THIS* ASSERT, WRITTEN DOWN SO NOBODY REDISCOVERS IT AS A
 # HOLE. The rule scan below excludes notification-templates.yaml by name, and so
@@ -1592,8 +1628,8 @@
       paperwork.
       If this fired on a ROUTINE deploy, a drill has OUTLIVED ITS WINDOW: remove
       the rule from files/data/grafana/provisioning/alerting/ AND retire it from
-      Grafana with a `deleteRules:` block — deleting the file alone leaves the
-      rule serving and paging (#220). See
+      Grafana by appending its uid to alerting/retired.yaml — deleting the file
+      alone leaves the rule serving and paging (#220). See
       docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md.
     quiet: true
 
@@ -2131,8 +2167,9 @@
 # with three rules removed, Grafana restarted cleanly, and all three were still
 # served afterwards. So deleting or renaming a rule in this repo leaves an orphan
 # that keeps evaluating and keeps paging while git says it is gone. The
-# version-controlled way to retire a rule is a `deleteRules:` block in the rule
-# file; this check is what makes forgetting it impossible.
+# version-controlled way to retire a rule is a `deleteRules:` tombstone in
+# alerting/retired.yaml (#220); this check is what makes forgetting it
+# impossible.
 #
 # These two checks close both directions. They are the checks the comment at the
 # top of this file used to CLAIM existed while they did not (#212).
@@ -2469,11 +2506,13 @@
           '', needs 'classic-file-provisioning'` — and `X-Disable-Provenance: true`
           does not help, it is what sets the provenance to '' and CAUSES the
           mismatch (measured). `DELETE /api/v1/provisioning/alert-rules/<uid>`
-          works only on an API-CREATED stray, which is cause (1). Note also that
-          `deleteRules:` is a TOP-LEVEL key, so a tombstone-only file has no
-          `groups:` and trips the per-file "contributed rules" assert further up —
-          put the block in a file that also ships rules. If the rule is wanted,
-          write it into this role's alerting folder instead.
+          works only on an API-CREATED stray, which is cause (1). The tombstone
+          goes in files/data/grafana/provisioning/alerting/retired.yaml — the
+          canonical tombstone-only document, which the per-file assert further up
+          accepts on its `deleteRules:` entries alone (#220). Remove the rule from
+          its own file and append its uid to retired.yaml in the SAME change; the
+          README's "Retiring an alert rule" section is the procedure. If the rule
+          is wanted, write it into this role's alerting folder instead.
           HTTP status was {{ grafana_served_rules.status | default('none') }}.
         quiet: true
       when: not ansible_check_mode

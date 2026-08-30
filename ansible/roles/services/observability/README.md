@@ -67,7 +67,8 @@ roles/services/observability/
                 ├── probe-health.yaml           three http_response rules (#139)
                 ├── vector-health.yaml          four Vector internal-metric rules (#151)
                 ├── delivery-health.yaml        heartbeat + delivery-failure (#152)
-                └── truenas-health.yaml         NAS thermals, pool/scrub, drive-health, liveness (#174/#176/#183)
+                ├── truenas-health.yaml         NAS thermals, pool/scrub, drive-health, liveness (#174/#176/#183)
+                └── retired.yaml                deleteRules: tombstones ONLY, no rules (#220)
                     (contact-points.yaml AND notification-policies.yaml are
                      TEMPLATED, not files here — see templates/*.j2. Both are
                      --exclude'd from the provisioning rsync; see Alerting.)
@@ -257,6 +258,33 @@ The two neighbouring failures are not silent, measured in the same run — a
 `smartctl` that runs and fails at `--scan` emits nothing at all, and a *missing*
 `smartctl` stops telegraf initialising, which takes out `system_uptime` and pages
 via the agent rule.
+
+### Retiring an alert rule (#220)
+
+**Deleting the rule from its YAML does not retire it.** Grafana's file provisioner
+reconciles the rules a file *declares* and never removes the ones it stopped
+declaring, so a deleted or renamed rule keeps living in Grafana's database, keeps
+being evaluated and keeps paging — while git says it is gone and every deploy
+stays green. Measured on eq12_docker: three rules dropped from these files
+survived both the `delete: true` rsync and a full Grafana restart. A rename leaves
+**both** uids firing.
+
+The API cannot fix it either. `DELETE /api/v1/provisioning/alert-rules/<uid>`
+returns HTTP 409 `cannot delete with provided provenance '', needs
+'classic-file-provisioning'` for a file-provisioned rule, and
+`X-Disable-Provenance: true` makes it *worse* — that header is what sets the
+provided provenance to `''` and causes the mismatch. It works only on a rule that
+was created through the API in the first place.
+
+So, in ONE commit:
+
+1. Delete the rule from its file in `files/data/grafana/provisioning/alerting/`.
+2. Append its uid to `alerting/retired.yaml`: `- orgId: 1` / `uid: <uid>`.
+3. Deploy. #212's served-set guard asserts served == declared, so a forgotten
+   tombstone fails the deploy and names the uid.
+
+Tombstones **stay** — a rebuilt host replays the file from scratch, and an entry
+pruned early resurrects the rule. Pruning is a deliberate, separate decision.
 
 ### Why every per-family absence rule is `severity: warning` (#189, #194, #202)
 
