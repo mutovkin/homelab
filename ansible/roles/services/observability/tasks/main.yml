@@ -1650,7 +1650,7 @@
 #   OK           ok           inactive    Normal (NoData)    no
 #   Alerting     ok           pending     Pending (NoData)   no (v2/alerts: 0)
 #
-# `health` is `ok` for BOTH. This is not an inference from "0 of 37 rules use
+# `health` is `ok` for BOTH. This is not an inference from "no rule here uses
 # noDataState: NoData" — it is what the API returned for each mapping in turn. The
 # `health == 'ok'` clause below therefore cannot see absence-of-data for ANY rule in
 # this repo, in either cohort.
@@ -2016,16 +2016,19 @@
           {{ _obs_eval_bad_timestamp | join(', ') | default('none', true) }}.
           STALE (healthy but not evaluated inside the window):
           {{ _obs_eval_stale_uids | join(', ') | default('none', true) }}.
-          `health: nodata` on a rule means its query returned nothing — almost
-          always a typo'd or renamed metric/label in its `expr`, which provisions
-          perfectly and then sits in NoData forever; with `noDataState: Alerting`
-          that is a permanent false page, which is exactly why this fails the
-          deploy instead. Run the rule's expr by hand against its datasource.
+          READ THE BUCKETS ABOVE, NOT A GUESS ABOUT NoData. `health: nodata`
+          would mean a query returned nothing, but measured on Grafana 13.2.0 no
+          rule this repo ships can ever report it: `noDataState` maps the NoData
+          result to a state BEFORE `health` is derived, and every rule here is
+          `Alerting` or `OK`, never `NoData`. So this guard does NOT catch a
+          typo'd or renamed selector, and a green run is not evidence that every
+          `expr` still matches something — that gap is tracked in #232.
           `health: error` is a datasource or query error — check the datasource
           asserts above first. STALE with everything else healthy means the
-          scheduler is not running the group at all. Note that `state` is NOT read
-          here on purpose: obs-alert-delivery-heartbeat fires by design, and
-          `inactive` is also what a rule that never ran reports.
+          scheduler is not running the group at all: the rules are served, but
+          nothing is evaluating them. Note that `state` is NOT read here on
+          purpose: obs-alert-delivery-heartbeat fires by design, and `inactive` is
+          also what a rule that never ran reports.
           HTTP status was {{ grafana_rule_eval.status | default('none') }}.
         quiet: true
       when: not ansible_check_mode
