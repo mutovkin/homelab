@@ -1,0 +1,88 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — notification templates (#201).
+#
+# THE DRILL MARKER. #201: a synthetic verification alert paged the operator at
+# ~3am and was indistinguishable from a real incident — the only clue was a
+# `devname` the reader would have had to recognise as fabricated. Any alert
+# group that is a drill must say so IN the notification, and that decision is
+# made HERE, at the template layer, so no per-probe step can forget it.
+#
+# Detection is by either of the two conventional markers (the convention itself:
+# docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md):
+#
+#   1. a `drill` label — a temporary drill RULE carries `drill: "<issue#>"`
+#      alongside uid `obs-drill-<issue#>-<slug>`;
+#   2. any group-label VALUE matching `probe<issue#><letter>` — the marker that
+#      survives a real rule's `by (...)` clause. A synthetic SERIES pushed into
+#      a REAL rule (the #188/#201 shape, where the whole point is exercising the
+#      real rule and the real routing) cannot carry a `drill` label at all: the
+#      aggregation drops every label name not in the `by` list. Its identity
+#      label's VALUE does survive, and the notification policy's group_by
+#      carries every identity label (devname, host, hostname, server, pool,
+#      klass, component_id, ...), so that value is always in `.CommonLabels`.
+#
+# Resolve notices render through these same templates on purpose (#201 scope
+# item 4): an unmarked "resolved" re-raises the same was-that-real question in
+# reverse. Nothing here branches on `.Status`.
+#
+# ONE CONDITION, ONE DEFINE — deliberately. The obvious shape is a subject
+# prefix plus a separate body banner, which means the same condition written
+# twice and kept in lockstep by comment alone. Go text/template cannot return a
+# boolean from a template and cannot capture another template's output into a
+# variable, so there is no way to derive the second from the first. A drifted
+# pair would mark the subject and not the body (or the reverse) — the exact
+# half-marked failure this file exists to prevent. So the marker is a single
+# define and both consumers prefix it. `[DRILL #201] ` in front of `[FIRING:1]`
+# in an email subject, and in front of `**Firing**` in a Telegram message, is
+# unmistakable at a glance, which is all scope item 1 asks for.
+#
+# The per-VALUE match is load-bearing and is NOT the same as matching the joined
+# label values: `join " " .CommonLabels.Values` would let a value containing a
+# space (Grafana supplies `grafana_folder`, and folder names may contain one)
+# manufacture a `probe201a` token out of two adjacent labels. A false POSITIVE
+# here is the dangerous direction — it stamps [DRILL] on a REAL incident and
+# invites the operator to ignore it — so each value is matched whole, anchored
+# `^...$`. Measured against the live label set 2026-08-29: no real value in this
+# fleet matches (hosts eq12_docker/n5pro, devnames sda-sdf/nvme0n1, integrations
+# email/telegram, check_type http_health, ...); bare `probe` does not match
+# either, the digits are required.
+#
+# THIS IS THE ONE NON-RULE DOCUMENT in this directory. Four guards in
+# tasks/main.yml read this folder as a set of rule documents and each one names
+# this file explicitly (search `#201` there). Adding a SECOND non-rule file
+# means teaching them again, deliberately — do not reach for a silent
+# `default([])`, which is exactly what the per-file "contributed rules" assert
+# was written to stop.
+#
+# Verified against the live Grafana 13.2.0 with
+# POST /api/alertmanager/grafana/config/api/v1/templates/test (renders a
+# candidate template against fixture alerts; persists nothing, sends nothing):
+# `match` (pattern first), `join` (separator first — Alertmanager redefines
+# strings.Join that way), `.CommonLabels.Values`, `default.title` and
+# `default.message` all exist. Re-run those fixtures after any Grafana major
+# bump; a broken alerting provisioning document is boot-fatal and withdraws
+# every provisioned rule.
+templates:
+  - orgId: 1
+    name: homelab-drill-marker
+    template: |
+      {{ define "homelab.drill_marker" -}}
+      {{- $marker := "" -}}
+      {{- if .CommonLabels.drill -}}
+      {{- $marker = printf "[DRILL #%s] " .CommonLabels.drill -}}
+      {{- else -}}
+      {{- range .CommonLabels.Values -}}
+      {{- if match "^probe[0-9]+[a-z]*$" . -}}{{- $marker = "[DRILL] " -}}{{- end -}}
+      {{- end -}}
+      {{- end -}}
+      {{- $marker -}}
+      {{- end }}
+
+      {{ define "homelab.subject" -}}
+      {{ template "homelab.drill_marker" . }}{{ template "default.title" . }}
+      {{- end }}
+
+      {{ define "homelab.message" -}}
+      {{ template "homelab.drill_marker" . }}{{ template "default.message" . }}
+      {{- end }}

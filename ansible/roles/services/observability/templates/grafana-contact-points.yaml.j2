@@ -23,7 +23,26 @@ apiVersion: 1
    indentation in the rendered output, which is valid YAML today only because
    `settings` has exactly one key. (And never write a literal comment-close
    sequence inside one of these blocks — it terminates the comment early and the
-   rest of the prose renders into the file. Yes, that happened.) #}
+   rest of the prose renders into the file. Yes, that happened.)
+
+   #201 — THE DRILL MARKER IS WIRED IN HERE. Every email receiver below carries a
+   `subject:` and every telegram receiver a `message:`, both pointing at the
+   templates provisioned by
+   files/data/grafana/provisioning/alerting/notification-templates.yaml. Those
+   are GO template braces, so each one sits inside a Jinja raw block — without it
+   Jinja would try to resolve `template` as a variable and the render would fail
+   (loudly, which is the good case) or emit an empty string (the boot-fatal
+   case). The lines are YAML comments, not Jinja comment blocks, precisely
+   because of the indentation trap described above.
+
+   Email gets `subject:` only: Grafana renders the email BODY from its own HTML
+   template, and the subject is what a phone shows at 3am. Telegram has no
+   subject, so the marker goes at the front of the message. All four receivers
+   are covered — homelab-email-primary, homelab-critical-email,
+   homelab-critical-telegram, homelab-telegram-primary — and tasks/main.yml
+   asserts that every template name referenced here is actually defined by that
+   file, because a dangling `template "..."` reference is a render error at
+   NOTIFY time, i.e. an alert that fires and is never delivered. #}
 contactPoints:
   - orgId: 1
     name: homelab-email
@@ -32,6 +51,8 @@ contactPoints:
         type: email
         settings:
           addresses: {{ vault_watchtower_email_to }}
+          # #201: renders the [DRILL] marker ahead of Grafana's default.title.
+          subject: '{% raw %}{{ template "homelab.subject" . }}{% endraw %}'
         disableResolveMessage: false
 
 {# homelab-critical (#152): the both-channels receiver the severity=critical route
@@ -47,6 +68,8 @@ contactPoints:
         type: email
         settings:
           addresses: {{ vault_watchtower_email_to }}
+          # #201: renders the [DRILL] marker ahead of Grafana's default.title.
+          subject: '{% raw %}{{ template "homelab.subject" . }}{% endraw %}'
         disableResolveMessage: false
 {% if observability_alert_telegram | bool %}
       - uid: homelab-critical-telegram
@@ -54,6 +77,8 @@ contactPoints:
         settings:
           bottoken: "{{ vault_grafana_telegram_bot_token }}"
           chatid: "{{ vault_grafana_telegram_chat_id }}"
+          # #201: telegram has no subject, so the marker leads the message.
+          message: '{% raw %}{{ template "homelab.message" . }}{% endraw %}'
         disableResolveMessage: false
 {% endif %}
 {% if observability_alert_telegram | bool %}
@@ -77,5 +102,7 @@ contactPoints:
         settings:
           bottoken: "{{ vault_grafana_telegram_bot_token }}"
           chatid: "{{ vault_grafana_telegram_chat_id }}"
+          # #201: telegram has no subject, so the marker leads the message.
+          message: '{% raw %}{{ template "homelab.message" . }}{% endraw %}'
         disableResolveMessage: false
 {% endif %}

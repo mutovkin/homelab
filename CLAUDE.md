@@ -373,6 +373,28 @@ Hard-won lessons — check here before debugging from scratch.
   architecture, measured only for this annotation. See
   [docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md](docs/solutions/integration-issues/grafana-alert-panelid-pairing-breaks-all-provisioned-rules.md).
 
+- **A synthetic alert that reaches a live channel must SAY it is one, and needs typed
+  operator consent to deploy.** #188's verification pushed fake disk temps under
+  `probe188c`/`probe188d`, proved the per-drive notification split — and paged the operator
+  at ~3am with text indistinguishable from a real incident. Four agents in one batch
+  invented four ad-hoc safety schemes and one leaked (#206's review reports a fixture at
+  `state=pending`, unmarked), so the marker is decided at the TEMPLATE layer where no step can
+  forget it: `files/data/grafana/provisioning/alerting/notification-templates.yaml` renders
+  `[DRILL #<issue>] ` for a rule labelled `drill: "<issue#>"` and `[DRILL] ` for a
+  `probe<issue#><letter>` identity VALUE (the only marker that survives a real rule's
+  `by (...)`), on resolves too. A drill RULE needs BOTH markers plus
+  `-e observability_drill_issue=<n>`, or the deploy fails — half-marked fails as well, since
+  the uid alone pages unmarked and the label alone is ungreppable. A leaked drill then fails
+  twice: repo-side (no window var on a routine deploy) and served-side (#212 flags the
+  orphan uid — retire with `deleteRules:`, file deletion leaves it serving, #220). Grading:
+  pending-only staleness probe A (labelling only), unfireable fixture A, consented live
+  delivery drill A (the ONLY delivery proof), dead-webhook route B (first-match-wins can
+  black-hole real alerts), Grafana silence C (expires silently), `isPaused` F (excluded from
+  evaluation entirely). Render-test a candidate template with
+  `POST /api/alertmanager/grafana/config/api/v1/templates/test` — it persists and sends
+  nothing — because a broken alerting provisioning document is boot-fatal.
+  See [docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md](docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md).
+
 - **A configured TrueNAS reporting exporter is not a DELIVERING one — and forwarded
   metrics get stamped with the forwarder's identity.** `reporting.exporters.create`
   returns success and the object reads back exactly right (`enabled: true`, correct

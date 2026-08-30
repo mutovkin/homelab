@@ -64,6 +64,20 @@ policies:
     # is which — merge into one `[FIRING:2]` naming neither. It is also what makes
     # the A5 routing split below observable: the two instances take different
     # routes and must not be grouped back together first.
+    #
+    # #201 — `drill` is deliberately NOT a key in the list below, and the next
+    # person to reach for it should read this before adding it. The inert-key
+    # guard in tasks/main.yml fails the deploy on any key that no rule
+    # aggregates on, and a drill never needs one: a drill RULE has its own
+    # alertname (and its own obs-drill- uid), and a drill SERIES is a
+    # probe-named VALUE of an identity label that is ALREADY grouped on here.
+    # Either way a drill group can never merge with a real group. The [DRILL]
+    # marker itself is decided in the notification TEMPLATE
+    # (files/data/grafana/provisioning/alerting/notification-templates.yaml),
+    # which reads CommonLabels directly — it does not need the label to be a
+    # grouping key. Adding one would be an inert key, and failing the deploy
+    # over it would be correct. (Written colon-free and brace-free for the same
+    # reasons the note below the list gives.)
     group_by:
       - grafana_folder
       - alertname
