@@ -187,6 +187,48 @@ CAUSES the mismatch. That header path works only on an API-CREATED stray. The sa
 measured the sibling fact this section opens with: rules dropped from the files were still
 served afterwards, with `delete: true` on the rsync and a Grafana restart.
 
+### The same leak, one level over: CONTACT POINTS and silences
+
+Measured on the live stack 2026-08-30, immediately after this issue's own apply, and it is
+the reason this section is not rules-only.
+
+**A drill contact point leaks exactly like a drill rule, and nothing catches it.** #181 used
+the grade-B dead-webhook mechanism. Its receiver was still there:
+
+```
+uid='issue-181-sink-webhook'  name='issue-181-sink'  type=webhook  provenance='file'
+```
+
+`provenance='file'` — so the stanza had been removed from the template and Grafana kept the
+object anyway, the #220 mechanism one level over from rules. #212's set-equality guard
+compares RULES only, so nothing failed. It is inert today (the live policy tree references
+`homelab-email`, `homelab-telegram` and `homelab-critical` and nothing else, so no route
+points at it), which is the only reason it is a finding rather than an incident: a webhook
+receiver that a route DID match would black-hole every alert taking that route.
+
+Retirement is `deleteContactPoints: [{orgId: 1, uid: <uid>}]`, the documented sibling of
+`deleteRules:` — **not exercised on this stack, and it must not be tried casually.** A
+provisioning key this repo has never run is a boot-fatal gamble if the schema is wrong
+(a bad alerting document withdraws every rule), and the receiver is inert, so #201
+deliberately left it in place and wrote it down instead of cleaning it up inside an
+unrelated deploy window. Retire it in a change that can watch Grafana come back.
+
+**The grade-C hazard is not theoretical either.** Both silences on the stack were expired:
+
+```
+630377e6-…  expired  endsAt 2026-08-29T23:48:36Z
+af6d6453-…  expired  endsAt 2026-08-29T22:45:06Z
+```
+
+An expired silence suppresses nothing and says so nowhere. Anything relying on one to stay
+safe was unprotected from the moment it lapsed.
+
+**So the retirement checklist is per-OBJECT, not per-rule:** rules via `deleteRules:`,
+contact points via `deleteContactPoints:`, routes by removing them from the policy template
+(the tree is fully rewritten each deploy, so routes do NOT leak), silences by expiry —
+and re-read each object class from the API afterwards, because for rules and contact points
+alike, removing the declaration does not remove the object.
+
 For a drill SERIES there is nothing to retire: it self-resolves when the datasource's
 staleness window empties. That is a property to preserve deliberately, not a happy accident
 — never push a synthetic series without a bound on how long you will push it.
