@@ -838,7 +838,7 @@
                 | map(attribute='rules') | flatten | list) }}
       loop: >-
         {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
-           | reject('search', '/notification-templates\.yaml$') | list }}
+           | reject('search', '/notification-templates[.]yaml$') | list }}
       loop_control:
         label: "{{ item | basename }}"
 
@@ -880,7 +880,7 @@
         quiet: true
       loop: >-
         {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
-           | reject('search', '/notification-templates\.yaml$') | list }}
+           | reject('search', '/notification-templates[.]yaml$') | list }}
       loop_control:
         label: "{{ item | basename }}"
 
@@ -1030,7 +1030,7 @@
     # the guard.
     _obs_all_by_labels: >-
       {{ ((query('file', *(query('fileglob', _obs_alerting_dir ~ '/*.yaml')
-                           | reject('search', '/notification-templates\.yaml$') | list))
+                           | reject('search', '/notification-templates[.]yaml$') | list))
            | map('from_yaml') | map(attribute='groups') | flatten
            | map(attribute='rules') | flatten
            | map(attribute='data') | flatten
@@ -1280,6 +1280,17 @@
       loop_control:
         label: "{{ item | basename }}"
 
+    # notification-templates.yaml (#201) is the one NON-RULE document in this
+    # directory and it is READ HERE ON PURPOSE — the only one of the five
+    # alerting-dir consumers that does not exclude it. The other four assert
+    # rule-shaped properties, so a document with no `groups:` has to be named
+    # out of them. This guard asserts the opposite kind of property: that
+    # nothing Grafana LOADS out of this directory can carry an unpaired
+    # __dashboardUid__ into a boot-fatal provisioning error. Grafana loads that
+    # file, so excluding it would re-open exactly the hole the `evil.yml`
+    # measurement above closed. `.groups | default([])` gives it a zero-rule
+    # contribution, which is inert here (the witness assert below counts rules
+    # in AGGREGATE, never per file).
     - name: Read every provisioned alert rule for the deep-link check
       ansible.builtin.set_fact:
         _obs_link_rules: >-
@@ -1388,6 +1399,81 @@
       loop: "{{ _obs_link_rules | default([]) }}"
       loop_control:
         label: "{{ item.uid }}"
+
+# #201: THE CONTACT POINTS AND THE NOTIFICATION TEMPLATE ARE A MATCHED PAIR.
+#
+# Every email receiver's `subject:` and every telegram receiver's `message:`
+# resolves a Go template by NAME out of
+# files/data/grafana/provisioning/alerting/notification-templates.yaml. Grafana
+# resolves that name at NOTIFY time, not at provisioning time — so a renamed
+# define, a deleted file, or a typo does not fail the deploy, does not fail
+# Grafana's start, and does not show up in any health endpoint. It fails the
+# first time an alert actually needs to be sent. That is the #174 pairing trap
+# again: two halves that only meet on the path nobody exercises until it
+# matters, which here is the path that carries the page.
+#
+# So the pairing is checked statically, from the same files the deploy ships.
+# Both directions of the drill-marker chain are covered: what the contact
+# points ask for, and what the template file itself asks for internally
+# (homelab.subject -> homelab.drill_marker + Grafana's default.title).
+#
+# THE REGEX REQUIRES THE FULL CALL FORM `template "<name>" . }}`, not just
+# `template "<name>"`, and that is not tidiness: both files discuss template
+# names in their own prose, and a looser pattern would let a comment vote a
+# name into the reference set — the guard-shadowed-by-prose trap this file
+# closes twice already. Prose never writes the trailing ` . }}`.
+#
+# Pure control-machine lookups, so it runs under --check.
+- name: Verify every notification template the contact points reference is defined
+  vars:
+    _obs_cp_src: "{{ lookup('file', role_path ~ '/templates/grafana-contact-points.yaml.j2') }}"
+    _obs_nt_src: >-
+      {{ lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/notification-templates.yaml') }}
+    _obs_nt_defines: >-
+      {{ _obs_nt_src | regex_findall('define "([A-Za-z0-9_.]+)"') | unique | sort }}
+    _obs_cp_template_refs: >-
+      {{ _obs_cp_src | regex_findall('template "([A-Za-z0-9_.]+)" [.] }}') | unique | sort }}
+    _obs_nt_internal_refs: >-
+      {{ _obs_nt_src | regex_findall('template "([A-Za-z0-9_.]+)" [.] }}') | unique | sort }}
+    # Shipped by Grafana itself, not by this repo. Verified present on the live
+    # Grafana 13.2.0 by rendering both through the template-test endpoint —
+    # which is the only way to check them, since nothing in this repo defines
+    # them. A Grafana major bump means re-running those fixtures.
+    _obs_grafana_builtin_templates:
+      - default.title
+      - default.message
+    # `union`, not `+`: the vars above render as templated STRINGS and a bare
+    # `+` against a real list raises "can only concatenate str (not
+    # _AnsibleLazyTemplateList) to str" (caught by ansible-lint's
+    # jinja[invalid], not by a dry run).
+    _obs_nt_resolvable: "{{ _obs_nt_defines | union(_obs_grafana_builtin_templates) }}"
+  ansible.builtin.assert:
+    that:
+      # Parse sanity first: an empty set on either side would make the two
+      # difference checks below trivially true — a guard that cannot fail.
+      - _obs_nt_defines | length >= 3
+      - _obs_cp_template_refs | length >= 2
+      - _obs_cp_template_refs | difference(_obs_nt_defines) | length == 0
+      - _obs_nt_internal_refs | difference(_obs_nt_resolvable) | length == 0
+    fail_msg: >-
+      The Grafana contact points reference notification templates that are not
+      defined. Referenced by templates/grafana-contact-points.yaml.j2:
+      {{ _obs_cp_template_refs }}; defined by
+      files/data/grafana/provisioning/alerting/notification-templates.yaml:
+      {{ _obs_nt_defines }}; DANGLING:
+      {{ _obs_cp_template_refs | difference(_obs_nt_defines) | join(', ') | default('none', true) }}.
+      Dangling INSIDE the template file itself (neither defined there nor a
+      Grafana builtin {{ _obs_grafana_builtin_templates }}):
+      {{ _obs_nt_internal_refs | difference(_obs_nt_resolvable) | join(', ') | default('none', true) }}.
+      Grafana resolves these names when it SENDS, so a dangling reference is an
+      alert that fires and is never delivered — invisible to every deploy gate,
+      every /api/health check and every dry run. Fix the name on whichever side
+      is wrong; do not delete the reference to make this pass, because the
+      reference is what puts the [DRILL] marker on synthetic alerts (#201).
+      A short list on either side means this guard could no longer PARSE its
+      inputs (it reads the full call form `template "<name>" . }}` on purpose,
+      so prose cannot feed it) — teach it the new shape rather than deleting it.
+    quiet: true
 
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
 # Governed ports and why each is on the list:
@@ -2068,7 +2154,7 @@
     # master (retire it with `deleteRules:`, per the fail_msg below).
     _obs_repo_groups: >-
       {{ query('file', *(query('fileglob', _obs_rule_dir ~ '/*.yaml')
-                         | reject('search', '/notification-templates\.yaml$') | list))
+                         | reject('search', '/notification-templates[.]yaml$') | list))
          | map('from_yaml') | map(attribute='groups', default=[]) | flatten | list }}
     _obs_repo_rules: >-
       {{ _obs_repo_groups | map(attribute='rules', default=[]) | flatten | list }}
