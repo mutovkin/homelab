@@ -215,6 +215,13 @@ journalctl -u telegraf --since '<apply time>' | grep -c 'Error writing to output
 - [instant-query-cannot-prove-a-series-is-live.md](instant-query-cannot-prove-a-series-is-live.md)
   — same telegraf → VictoriaMetrics path, same "a point observation is not a statement
   about a window" logic.
-- Issue #208 (this diagnosis and fix); issue #235 (the same 60 s-vs-60 s race in
-  vector's `prometheus_remote_write` sink, measured, and in the containerized telegraf,
-  inferred).
+- Issue #208 — this diagnosis and fix.
+- **Sibling exposure, recorded here because it is not separately tracked.** The same
+  60 s-vs-60 s coincidence reaches two other writers to the same endpoint. Vector's
+  `prometheus_remote_write` sink is *measured* hitting it (`Retrying after error` with
+  `connection closed before message completed` / `Connection reset by peer`, 16 times on
+  one host and 7 on the other over 48 h); it self-heals, because that sink retries the
+  batch itself, so it surfaces as WARN rather than ERROR. The telegraf that runs inside
+  the observability stack is *inferred* — same 60 s interval, same endpoint, no client
+  idle ceiling in its config — but was never captured, and the distinction between the
+  measured case and the inferred one is deliberate.

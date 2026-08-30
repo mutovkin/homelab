@@ -55,8 +55,10 @@ EnvironmentFile entries are additive and later entries win.
 
 ## The write path: why `outputs.http` sets `idle_conn_timeout = "45s"` (#208)
 
-`[[outputs.http]]` pushes prometheusremotewrite to VictoriaMetrics on eq12_docker
-every 60 s. Telegraf's Go transport defaults `idle_conn_timeout` to `0`, which means
+Each physical host's agent pushes prometheusremotewrite every 60 s, over
+`[[outputs.http]]`, to the VictoriaMetrics that runs in eq12_docker's observability
+stack. (The telegraf inside that stack is a different agent this role does not manage
+— see the note at the top of this file.) Telegraf's Go transport defaults `idle_conn_timeout` to `0`, which means
 **keep idle connections forever** — and VictoriaMetrics runs the default
 `-http.idleConnTimeout=1m0s`, armed the moment it finishes writing each 204. Two
 60-second timers, so in steady state *every* keep-alive reuse arrived within a
@@ -72,9 +74,17 @@ epochs as the two timers drift past each other.
 
 45 s is chosen against the reuse pattern, not picked round: the only dangerous reuses
 are the 50 s and 60 s ones, and 45 s evicts before both with headroom, while still
-pooling the 10 s split-flush pair that a slow input sometimes produces. It must stay
-below 60 s; if VictoriaMetrics' flag is ever set explicitly, this value has to move
-with it.
+pooling the 10 s split-flush pair that a slow input sometimes produces.
+
+**The invariant is one-sided — strictly below the server's idle timeout, with margin —
+and the server's value is an undeclared default.** `roles/services/observability`'s
+compose file passes no `-http.idleConnTimeout` and runs the `latest` image, so 45 s is
+correct only for as long as upstream's default stays at 1 m. Setting that flag
+explicitly to a *larger* value, or changing telegraf's own cadence, requires no change
+here; setting it *below 45 s*, or an upstream default that drops, silently reinstates
+the race. Nothing in the repo enforces that coupling today, and the failure is
+invisible in the journal for hours at a time — so it is written down here rather than
+discovered.
 
 Why the client and not the server: the server's FIN went out **22 µs after** the
 doomed request had already arrived, so no amount of client-side timing care could have
