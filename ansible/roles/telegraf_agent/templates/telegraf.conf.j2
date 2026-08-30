@@ -33,6 +33,31 @@
   url = "{{ victoriametrics_ingest_endpoint }}"
   data_format = "prometheusremotewrite"
   timeout = "10s"
+  # Evict pooled connections BEFORE VictoriaMetrics closes them (#208). VM runs with
+  # the default -http.idleConnTimeout=1m0s and telegraf's flush cadence is exactly
+  # 60 s, so with the default (0 = keep idle connections forever) EVERY keep-alive
+  # reuse raced the server's idle deadline. Measured 2026-08-29 from a three-point
+  # capture: all 16 at-risk reuses across both hosts landed within +-5 ms of the
+  # 60.000 s deadline, and the three that missed it by more than ~+0.45 ms died as
+  # EOF / RST / broken pipe (one on n5pro at +599 us, two on eq12, the first at
+  # +534 us; the server's FIN went out 22 us AFTER the doomed request arrived, so
+  # no client could have seen it coming).
+  # Not an n5pro problem — eq12 failed MORE often during that capture; the per-host
+  # rate swings in multi-hour epochs as the two 60 s timers drift past each other.
+  # 45 s evicts before the 50 s and 60 s reuses (the only dangerous ones) with
+  # headroom, while still pooling the 10 s split-flush pair. Client-side eviction is
+  # race-free by construction: Go's idle timer takes the pool mutex and skips the
+  # close if a request has already claimed the connection.
+  #
+  # THIS VALUE IS COUPLED TO THE SERVER'S, WHICH THE REPO DOES NOT PIN. The invariant
+  # is one-sided: strictly below VictoriaMetrics' idle timeout, with margin. That
+  # timeout is currently an UNDECLARED DEFAULT — roles/services/observability's
+  # compose.yaml passes no -http.idleConnTimeout and runs the `latest` image — so the
+  # coupling breaks silently if someone sets that flag BELOW 45 s or upstream lowers
+  # its default. Raising it, or setting it explicitly to a larger value, needs no
+  # change here. The regression is invisible in the journal for hours at a time
+  # (see the epochs above), so it will not announce itself.
+  idle_conn_timeout = "45s"
   username = "${VM_AUTH_USERNAME}"
   password = "${VM_AUTH_PASSWORD}"
   [outputs.http.headers]
