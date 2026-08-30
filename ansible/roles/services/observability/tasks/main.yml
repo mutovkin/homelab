@@ -1475,6 +1475,114 @@
       so prose cannot feed it) — teach it the new shape rather than deleting it.
     quiet: true
 
+# ===== #201: DRILLS ARE OPERATOR-CONSENTED AND CANNOT OUTLIVE THEIR WINDOW =====
+#
+# A drill RULE — a temporary rule that exists only to make a real notification
+# happen, so delivery can be proven — carries BOTH conventional markers:
+#
+#   labels: {drill: "<issue#>"}     routes the [DRILL] marker into the
+#                                   notification (notification-templates.yaml)
+#   uid:    obs-drill-<issue#>-<slug>  makes it greppable, here and in Grafana
+#
+# It may only deploy while the operator has granted an explicit window:
+#
+#   ansible-playbook playbooks/deploy-services.yml --limit eq12_docker \
+#     --tags observability -e observability_drill_issue=<issue#>
+#
+# That var is the consent token #201 demands. An agent cannot page a human
+# channel with a synthetic alert unless a human typed the issue number — which
+# is the machine-checkable half of "announce before firing"; the announcement
+# itself stays procedural (risk gate in the change-loop skill).
+#
+# Master never carries drill rules: they live on a branch and are retired before
+# merge. So a drill that outlives its window fails in TWO independent places.
+#   REPO-SIDE, here: a routine deploy passes no window var, the rule is still in
+#     the files, and this assert fails before anything is shipped.
+#   SERVED-SIDE, #212's set-equality check further down: a drill rule left in
+#     Grafana after its branch died is a uid NOT IN THE REPO. Note that deleting
+#     the file does NOT delete the rule (#220) — retirement is a `deleteRules:`
+#     block in a file that also ships rules.
+#
+# BOTH markers are required, and a HALF-marked rule fails even with the window
+# open. That is not pedantry: the label without the uid is a drill nobody can
+# grep for afterwards, and the uid without the label is a drill that pages
+# UNMARKED — exactly the 3am notification #201 exists to prevent. A guard that
+# accepted either alone would accept the original defect.
+#
+# Static (control-machine lookups only), so it runs under --check and fails
+# before anything touches state.
+- name: Enforce the operator drill window on drill-marked alert rules (#201)
+  vars:
+    _obs_drill_dir: "{{ role_path }}/files/data/grafana/provisioning/alerting"
+    # Same varargs idiom, same non-rule exclusion, as the guards above. A
+    # SEPARATE derivation from _obs_all_rules on purpose: that one is a set_fact
+    # built inside the grading block and is not in scope here, and a guard that
+    # reads its own inputs cannot be broken by a reordering elsewhere.
+    _obs_drill_rules: >-
+      {{ query('file', *(query('fileglob', _obs_drill_dir ~ '/*.yaml')
+                         | reject('search', '/notification-templates[.]yaml$') | list))
+         | map('from_yaml') | map(attribute='groups', default=[]) | flatten
+         | map(attribute='rules', default=[]) | flatten | list }}
+    # Marked sets are carried as UIDS, not rule dicts: `union` and `unique` go
+    # through a set, and a dict is unhashable.
+    _obs_drill_uid_marked: >-
+      {{ _obs_drill_rules | selectattr('uid', 'search', '^obs-drill-')
+         | map(attribute='uid') | sort | list }}
+    _obs_drill_label_marked: >-
+      {{ _obs_drill_rules | selectattr('labels', 'defined')
+         | selectattr('labels.drill', 'defined')
+         | map(attribute='uid') | sort | list }}
+    _obs_drill_label_values: >-
+      {{ _obs_drill_rules | selectattr('labels', 'defined')
+         | selectattr('labels.drill', 'defined')
+         | map(attribute='labels.drill') | map('string') | unique | sort | list }}
+    _obs_drill_all_marked: >-
+      {{ _obs_drill_uid_marked | union(_obs_drill_label_marked) | sort | list }}
+    _obs_drill_half_marked: >-
+      {{ _obs_drill_uid_marked | symmetric_difference(_obs_drill_label_marked) | sort | list }}
+    _obs_drill_window: "{{ observability_drill_issue | default('') | string | trim }}"
+    # The window value is interpolated into a regex below, so its SHAPE is part
+    # of the guard: an unvalidated input turns a bound into a no-op (CLAUDE.md,
+    # #194). Digits only — it is an issue number.
+    _obs_drill_window_ok: "{{ _obs_drill_window is match('^[0-9]+$') }}"
+    _obs_drill_uid_prefix_bad: >-
+      {{ _obs_drill_all_marked
+         | reject('search', '^obs-drill-' ~ _obs_drill_window ~ '-') | sort | list }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        _obs_drill_all_marked | length == 0
+        or (
+          _obs_drill_window_ok | bool
+          and _obs_drill_half_marked | length == 0
+          and _obs_drill_label_values == [_obs_drill_window]
+          and _obs_drill_uid_prefix_bad | length == 0
+        )
+    fail_msg: >-
+      Drill-marked alert rules are present but no matching operator window is
+      open (#201). MARKED: {{ _obs_drill_all_marked | join(', ') }}.
+      Window var `observability_drill_issue`:
+      {{ _obs_drill_window | default('(unset)', true) }}
+      (must be an issue NUMBER; parsed-ok={{ _obs_drill_window_ok }}).
+      HALF-MARKED (carries one marker but not the other — fails even with the
+      window open, because a drill without its `drill` label pages UNMARKED and
+      a drill without its `obs-drill-` uid cannot be grepped for afterwards):
+      {{ _obs_drill_half_marked | join(', ') | default('none', true) }}.
+      `drill` LABEL VALUES found: {{ _obs_drill_label_values }} — every one must
+      equal the window.
+      UIDs not prefixed `obs-drill-{{ _obs_drill_window | default('<issue>', true) }}-`:
+      {{ _obs_drill_uid_prefix_bad | join(', ') | default('none', true) }}.
+      To RUN a drill: re-run with `-e observability_drill_issue=<issue#>`, after
+      announcing it to the operator — a drill reaches the real channels by
+      design (#201 forbids a side channel), so the var is consent, not
+      paperwork.
+      If this fired on a ROUTINE deploy, a drill has OUTLIVED ITS WINDOW: remove
+      the rule from files/data/grafana/provisioning/alerting/ AND retire it from
+      Grafana with a `deleteRules:` block — deleting the file alone leaves the
+      rule serving and paging (#220). See
+      docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md.
+    quiet: true
+
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
 # Governed ports and why each is on the list:
 #
