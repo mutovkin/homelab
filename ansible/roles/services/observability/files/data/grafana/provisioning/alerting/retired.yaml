@@ -1,0 +1,40 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — TOMBSTONES ONLY (#220)
+#
+# WHY THIS FILE EXISTS. Grafana's file provisioner reconciles the rules a file
+# DECLARES and never removes the ones it stopped declaring, so deleting a rule
+# from its YAML does not retire it: the rule stays in Grafana's database, keeps
+# being evaluated and keeps paging, while git says it is gone and every deploy
+# stays green. Measured on eq12_docker, 2026-08-29: three rules dropped from
+# these files survived both the `delete: true` rsync and a full Grafana restart.
+# The provisioning API is not a way out either —
+# `DELETE /api/v1/provisioning/alert-rules/<uid>` returns HTTP 409 `cannot delete
+# with provided provenance '', needs 'classic-file-provisioning'` for a
+# file-provisioned rule, and `X-Disable-Provenance: true` CAUSES that mismatch
+# rather than clearing it (the header is what sets the provided provenance to
+# ''). A `deleteRules:` block is the only mechanism there is.
+#
+# HOW TO RETIRE A RULE — one commit:
+#   1. delete the rule from its own file in this directory;
+#   2. append `- orgId: 1` / `uid: <uid>` below;
+#   3. deploy. #212's served-set guard asserts served == declared, so a
+#      forgotten tombstone fails the deploy and names the uid.
+#
+# `deleteRules:` is a TOP-LEVEL key, a sibling of `groups:`, which is why this
+# file has no `groups:` at all. The role's per-file "contributes rules or
+# tombstones" assert knows about that (#220); it still fails a file that
+# contributes neither, and a tombstone with no `uid:`.
+#
+# ENTRIES STAY. A rebuilt host replays this file from scratch, so an entry pruned
+# early resurrects the rule it retired. Garbage-collecting old tombstones is a
+# deliberate, separate decision — not something to do while retiring the next
+# rule.
+deleteRules:
+  # The worked example from #220 itself: a paused, unfireable fixture added to
+  # vector-health.yaml by the previous commit purely so the retirement path could
+  # be demonstrated on a live host, then retired by this one. It stays here
+  # permanently — it is the documentation, and it keeps the tombstone-only path
+  # exercised on every deploy.
+  - orgId: 1
+    uid: retire-demo-220
