@@ -821,13 +821,24 @@
     _family_consumer_allowlist:
       - obs-docker-metrics-unlabelled
   block:
+    # #201: notification-templates.yaml is the ONE declared NON-RULE document in
+    # this directory — a provisioned Grafana notification template (the [DRILL]
+    # marker), not a rule file. It is named here, and at three more glob sites in
+    # this file, EXPLICITLY rather than swallowed by a `default([])`: each guard
+    # gets taught about it deliberately, which is what the per-file assert below
+    # demands in its own fail_msg. Consequence, and it is the desired one: a
+    # SECOND non-rule file in this folder fails every one of those guards until
+    # someone teaches all four, one edit at a time. Do not replace these literals
+    # with a shared list — that would turn four deliberate decisions into one.
     - name: Read every provisioned alert rule for the grading check
       ansible.builtin.set_fact:
         _obs_all_rules: >-
           {{ _obs_all_rules | default([])
              + ((lookup('file', item) | from_yaml).groups | default([])
                 | map(attribute='rules') | flatten | list) }}
-      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop: >-
+        {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
+           | reject('search', '/notification-templates\.yaml$') | list }}
       loop_control:
         label: "{{ item | basename }}"
 
@@ -838,6 +849,15 @@
     # file missing. Every file in this directory is a rule document today, so
     # "yields at least one rule" is the right claim; a future non-rule file here
     # means teaching this assert about it, deliberately.
+    #
+    # #201 is that future, and this is what "deliberately" looks like:
+    # notification-templates.yaml is EXCLUDED BY NAME from the loop below, not
+    # admitted by relaxing the assert. The claim the guard makes is unchanged —
+    # every file it looks at is a rule document and must yield rules — so a
+    # rule file that loses its `groups:` key still fails here, and any OTHER
+    # non-rule file added to this folder fails here too, which is the point.
+    # Measured before the exclusion landed: this assert failed the deploy on
+    # notification-templates.yaml, naming the file. A guard seen to fail.
     - name: Assert every alerting file actually contributed rules
       vars:
         _file_rules: >-
@@ -854,9 +874,13 @@
           size check below cannot see this — the other files still add up to more
           than one file's worth — so the consumer sweep would simply stop covering
           that file's rules while every deploy stayed green. Fix the file, or, if
-          a genuine non-rule file now lives here, teach this assert about it.
+          a genuine non-rule file now lives here, teach this assert about it —
+          as #201 did for notification-templates.yaml, by naming it in the
+          reject() below rather than by weakening the assertion.
         quiet: true
-      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop: >-
+        {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
+           | reject('search', '/notification-templates\.yaml$') | list }}
       loop_control:
         label: "{{ item | basename }}"
 
@@ -993,8 +1017,20 @@
     # itself and it dies with "'_AnsibleLazyTemplateList' object has no
     # attribute 'split'"; reproduced on 2.21). `*` gives the lookup one term
     # per path.
+    #
+    # notification-templates.yaml is rejected BY NAME (#201): it is the one
+    # declared non-rule document here (a provisioned notification template — the
+    # [DRILL] marker), it has no `groups:` key, and this chain's
+    # `map(attribute='groups')` carries NO default on purpose — a rule file that
+    # lost its `groups:` key must raise here rather than quietly shrink the
+    # witness set, because a shrunken set makes assert B (no inert group_by key)
+    # fail and assert A pass on almost nothing. Excluding the file by name keeps
+    # that strictness intact for every file that IS a rule document; adding
+    # `default=[]` instead would have bought the same green run at the cost of
+    # the guard.
     _obs_all_by_labels: >-
-      {{ ((query('file', *query('fileglob', _obs_alerting_dir ~ '/*.yaml'))
+      {{ ((query('file', *(query('fileglob', _obs_alerting_dir ~ '/*.yaml')
+                           | reject('search', '/notification-templates\.yaml$') | list))
            | map('from_yaml') | map(attribute='groups') | flatten
            | map(attribute='rules') | flatten
            | map(attribute='data') | flatten
@@ -2021,8 +2057,18 @@
     # attribute — so following this role's own advice would fail every deploy with
     # a raw Jinja error. Same precedent as `map(attribute='expr', default='')` in
     # the grading check above.
+    #
+    # notification-templates.yaml is ALSO rejected by name (#201). The
+    # `default=[]` above would already absorb it silently — which is precisely
+    # why the exclusion is written out: the SERVED set this compares against
+    # contains rules only, so a non-rule document must be visibly absent from
+    # the expected side rather than invisibly contributing nothing. This guard
+    # is #201's served-side twin — a drill rule left in Grafana after its branch
+    # died shows up here as a uid NOT IN THE REPO and fails the next deploy from
+    # master (retire it with `deleteRules:`, per the fail_msg below).
     _obs_repo_groups: >-
-      {{ query('file', *query('fileglob', _obs_rule_dir ~ '/*.yaml'))
+      {{ query('file', *(query('fileglob', _obs_rule_dir ~ '/*.yaml')
+                         | reject('search', '/notification-templates\.yaml$') | list))
          | map('from_yaml') | map(attribute='groups', default=[]) | flatten | list }}
     _obs_repo_rules: >-
       {{ _obs_repo_groups | map(attribute='rules', default=[]) | flatten | list }}
