@@ -821,13 +821,24 @@
     _family_consumer_allowlist:
       - obs-docker-metrics-unlabelled
   block:
+    # #201: notification-templates.yaml is the ONE declared NON-RULE document in
+    # this directory — a provisioned Grafana notification template (the [DRILL]
+    # marker), not a rule file. It is named here, and at three more glob sites in
+    # this file, EXPLICITLY rather than swallowed by a `default([])`: each guard
+    # gets taught about it deliberately, which is what the per-file assert below
+    # demands in its own fail_msg. Consequence, and it is the desired one: a
+    # SECOND non-rule file in this folder fails every one of those guards until
+    # someone teaches all four, one edit at a time. Do not replace these literals
+    # with a shared list — that would turn four deliberate decisions into one.
     - name: Read every provisioned alert rule for the grading check
       ansible.builtin.set_fact:
         _obs_all_rules: >-
           {{ _obs_all_rules | default([])
              + ((lookup('file', item) | from_yaml).groups | default([])
                 | map(attribute='rules') | flatten | list) }}
-      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop: >-
+        {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
+           | reject('search', '/notification-templates[.]yaml$') | list }}
       loop_control:
         label: "{{ item | basename }}"
 
@@ -838,6 +849,15 @@
     # file missing. Every file in this directory is a rule document today, so
     # "yields at least one rule" is the right claim; a future non-rule file here
     # means teaching this assert about it, deliberately.
+    #
+    # #201 is that future, and this is what "deliberately" looks like:
+    # notification-templates.yaml is EXCLUDED BY NAME from the loop below, not
+    # admitted by relaxing the assert. The claim the guard makes is unchanged —
+    # every file it looks at is a rule document and must yield rules — so a
+    # rule file that loses its `groups:` key still fails here, and any OTHER
+    # non-rule file added to this folder fails here too, which is the point.
+    # Measured before the exclusion landed: this assert failed the deploy on
+    # notification-templates.yaml, naming the file. A guard seen to fail.
     - name: Assert every alerting file actually contributed rules
       vars:
         _file_rules: >-
@@ -854,9 +874,13 @@
           size check below cannot see this — the other files still add up to more
           than one file's worth — so the consumer sweep would simply stop covering
           that file's rules while every deploy stayed green. Fix the file, or, if
-          a genuine non-rule file now lives here, teach this assert about it.
+          a genuine non-rule file now lives here, teach this assert about it —
+          as #201 did for notification-templates.yaml, by naming it in the
+          reject() below rather than by weakening the assertion.
         quiet: true
-      loop: "{{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort }}"
+      loop: >-
+        {{ query('fileglob', _obs_alerting_dir_grading ~ '/*.yaml') | sort
+           | reject('search', '/notification-templates[.]yaml$') | list }}
       loop_control:
         label: "{{ item | basename }}"
 
@@ -993,8 +1017,20 @@
     # itself and it dies with "'_AnsibleLazyTemplateList' object has no
     # attribute 'split'"; reproduced on 2.21). `*` gives the lookup one term
     # per path.
+    #
+    # notification-templates.yaml is rejected BY NAME (#201): it is the one
+    # declared non-rule document here (a provisioned notification template — the
+    # [DRILL] marker), it has no `groups:` key, and this chain's
+    # `map(attribute='groups')` carries NO default on purpose — a rule file that
+    # lost its `groups:` key must raise here rather than quietly shrink the
+    # witness set, because a shrunken set makes assert B (no inert group_by key)
+    # fail and assert A pass on almost nothing. Excluding the file by name keeps
+    # that strictness intact for every file that IS a rule document; adding
+    # `default=[]` instead would have bought the same green run at the cost of
+    # the guard.
     _obs_all_by_labels: >-
-      {{ ((query('file', *query('fileglob', _obs_alerting_dir ~ '/*.yaml'))
+      {{ ((query('file', *(query('fileglob', _obs_alerting_dir ~ '/*.yaml')
+                           | reject('search', '/notification-templates[.]yaml$') | list))
            | map('from_yaml') | map(attribute='groups') | flatten
            | map(attribute='rules') | flatten
            | map(attribute='data') | flatten
@@ -1244,6 +1280,17 @@
       loop_control:
         label: "{{ item | basename }}"
 
+    # notification-templates.yaml (#201) is the one NON-RULE document in this
+    # directory and it is READ HERE ON PURPOSE — the only one of the five
+    # alerting-dir consumers that does not exclude it. The other four assert
+    # rule-shaped properties, so a document with no `groups:` has to be named
+    # out of them. This guard asserts the opposite kind of property: that
+    # nothing Grafana LOADS out of this directory can carry an unpaired
+    # __dashboardUid__ into a boot-fatal provisioning error. Grafana loads that
+    # file, so excluding it would re-open exactly the hole the `evil.yml`
+    # measurement above closed. `.groups | default([])` gives it a zero-rule
+    # contribution, which is inert here (the witness assert below counts rules
+    # in AGGREGATE, never per file).
     - name: Read every provisioned alert rule for the deep-link check
       ansible.builtin.set_fact:
         _obs_link_rules: >-
@@ -1352,6 +1399,203 @@
       loop: "{{ _obs_link_rules | default([]) }}"
       loop_control:
         label: "{{ item.uid }}"
+
+# #201: THE CONTACT POINTS AND THE NOTIFICATION TEMPLATE ARE A MATCHED PAIR.
+#
+# Every email receiver's `subject:` and every telegram receiver's `message:`
+# resolves a Go template by NAME out of
+# files/data/grafana/provisioning/alerting/notification-templates.yaml. Grafana
+# resolves that name at NOTIFY time, not at provisioning time — so a renamed
+# define, a deleted file, or a typo does not fail the deploy, does not fail
+# Grafana's start, and does not show up in any health endpoint. It fails the
+# first time an alert actually needs to be sent. That is the #174 pairing trap
+# again: two halves that only meet on the path nobody exercises until it
+# matters, which here is the path that carries the page.
+#
+# So the pairing is checked statically, from the same files the deploy ships.
+# Both directions of the drill-marker chain are covered: what the contact
+# points ask for, and what the template file itself asks for internally
+# (homelab.subject -> homelab.drill_marker + Grafana's default.title).
+#
+# THE REGEX REQUIRES THE FULL CALL FORM `template "<name>" . }}`, not just
+# `template "<name>"`, and that is not tidiness: both files discuss template
+# names in their own prose, and a looser pattern would let a comment vote a
+# name into the reference set — the guard-shadowed-by-prose trap this file
+# closes twice already. Prose never writes the trailing ` . }}`.
+#
+# Pure control-machine lookups, so it runs under --check.
+- name: Verify every notification template the contact points reference is defined
+  vars:
+    _obs_cp_src: "{{ lookup('file', role_path ~ '/templates/grafana-contact-points.yaml.j2') }}"
+    _obs_nt_src: >-
+      {{ lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/notification-templates.yaml') }}
+    _obs_nt_defines: >-
+      {{ _obs_nt_src | regex_findall('define "([A-Za-z0-9_.]+)"') | unique | sort }}
+    _obs_cp_template_refs: >-
+      {{ _obs_cp_src | regex_findall('template "([A-Za-z0-9_.]+)" [.] }}') | unique | sort }}
+    _obs_nt_internal_refs: >-
+      {{ _obs_nt_src | regex_findall('template "([A-Za-z0-9_.]+)" [.] }}') | unique | sort }}
+    # Shipped by Grafana itself, not by this repo. Verified present on the live
+    # Grafana 13.2.0 by rendering both through the template-test endpoint —
+    # which is the only way to check them, since nothing in this repo defines
+    # them. A Grafana major bump means re-running those fixtures.
+    _obs_grafana_builtin_templates:
+      - default.title
+      - default.message
+    # `union`, not `+`: the vars above render as templated STRINGS and a bare
+    # `+` against a real list raises "can only concatenate str (not
+    # _AnsibleLazyTemplateList) to str" (caught by ansible-lint's
+    # jinja[invalid], not by a dry run).
+    _obs_nt_resolvable: "{{ _obs_nt_defines | union(_obs_grafana_builtin_templates) }}"
+  ansible.builtin.assert:
+    that:
+      # Parse sanity first: an empty set on either side would make the two
+      # difference checks below trivially true — a guard that cannot fail.
+      - _obs_nt_defines | length >= 3
+      - _obs_cp_template_refs | length >= 2
+      - _obs_cp_template_refs | difference(_obs_nt_defines) | length == 0
+      - _obs_nt_internal_refs | difference(_obs_nt_resolvable) | length == 0
+    fail_msg: >-
+      The Grafana contact points reference notification templates that are not
+      defined. Referenced by templates/grafana-contact-points.yaml.j2:
+      {{ _obs_cp_template_refs }}; defined by
+      files/data/grafana/provisioning/alerting/notification-templates.yaml:
+      {{ _obs_nt_defines }}; DANGLING:
+      {{ _obs_cp_template_refs | difference(_obs_nt_defines) | join(', ') | default('none', true) }}.
+      Dangling INSIDE the template file itself (neither defined there nor a
+      Grafana builtin {{ _obs_grafana_builtin_templates }}):
+      {{ _obs_nt_internal_refs | difference(_obs_nt_resolvable) | join(', ') | default('none', true) }}.
+      Grafana resolves these names when it SENDS, so a dangling reference is an
+      alert that fires and is never delivered — invisible to every deploy gate,
+      every /api/health check and every dry run. Fix the name on whichever side
+      is wrong; do not delete the reference to make this pass, because the
+      reference is what puts the [DRILL] marker on synthetic alerts (#201).
+      A short list on either side means this guard could no longer PARSE its
+      inputs (it reads the full call form `template "<name>" . }}` on purpose,
+      so prose cannot feed it) — teach it the new shape rather than deleting it.
+    quiet: true
+
+# ===== #201: DRILLS ARE OPERATOR-CONSENTED AND CANNOT OUTLIVE THEIR WINDOW =====
+#
+# A drill RULE — a temporary rule that exists only to make a real notification
+# happen, so delivery can be proven — carries BOTH conventional markers:
+#
+#   labels: {drill: "<issue#>"}     routes the [DRILL] marker into the
+#                                   notification (notification-templates.yaml)
+#   uid:    obs-drill-<issue#>-<slug>  makes it greppable, here and in Grafana
+#
+# It may only deploy while the operator has granted an explicit window:
+#
+#   ansible-playbook playbooks/deploy-services.yml --limit eq12_docker \
+#     --tags observability -e observability_drill_issue=<issue#>
+#
+# That var is the consent token #201 demands. An agent cannot page a human
+# channel with a synthetic alert unless a human typed the issue number — which
+# is the machine-checkable half of "announce before firing"; the announcement
+# itself stays procedural (risk gate in the change-loop skill).
+#
+# Master never carries drill rules: they live on a branch and are retired before
+# merge. So a drill that outlives its window fails in TWO independent places.
+#   REPO-SIDE, here: a routine deploy passes no window var, the rule is still in
+#     the files, and this assert fails before anything is shipped.
+#   SERVED-SIDE, #212's set-equality check further down: a drill rule left in
+#     Grafana after its branch died is a uid NOT IN THE REPO. Note that deleting
+#     the file does NOT delete the rule (#220) — retirement is a `deleteRules:`
+#     block in a file that also ships rules.
+#
+# ONE ESCAPE PATH FROM *THIS* ASSERT, WRITTEN DOWN SO NOBODY REDISCOVERS IT AS A
+# HOLE. The rule scan below excludes notification-templates.yaml by name, and so
+# does the per-file "contributed rules" assert further up — so a `groups:` block
+# smuggled into THAT file carries rules neither of them can see, drill-marked or
+# not. It is still caught, just not here and not statically: Grafana's file
+# provisioner loads the whole directory, so it would SERVE those rules, and
+# #212's set-equality check compares the served set against an expected set that
+# excludes the same file — the smuggled uid lands in NOT IN THE REPO and fails
+# the deploy. (#181's deep-link guard also reads the file, deliberately, so an
+# unpaired __dashboardUid__ in it is caught statically.) The catcher is live-only
+# and runs at the END of the deploy, which is the cost of the exclusion; closing
+# it statically would mean parsing that file as a rule document, which is
+# precisely what the exclusion exists to avoid. Do not add rules to it.
+#
+# BOTH markers are required, and a HALF-marked rule fails even with the window
+# open. That is not pedantry: the label without the uid is a drill nobody can
+# grep for afterwards, and the uid without the label is a drill that pages
+# UNMARKED — exactly the 3am notification #201 exists to prevent. A guard that
+# accepted either alone would accept the original defect.
+#
+# Static (control-machine lookups only), so it runs under --check and fails
+# before anything touches state.
+- name: Enforce the operator drill window on drill-marked alert rules (#201)
+  vars:
+    _obs_drill_dir: "{{ role_path }}/files/data/grafana/provisioning/alerting"
+    # Same varargs idiom, same non-rule exclusion, as the guards above. A
+    # SEPARATE derivation from _obs_all_rules on purpose: that one is a set_fact
+    # built inside the grading block and is not in scope here, and a guard that
+    # reads its own inputs cannot be broken by a reordering elsewhere.
+    _obs_drill_rules: >-
+      {{ query('file', *(query('fileglob', _obs_drill_dir ~ '/*.yaml')
+                         | reject('search', '/notification-templates[.]yaml$') | list))
+         | map('from_yaml') | map(attribute='groups', default=[]) | flatten
+         | map(attribute='rules', default=[]) | flatten | list }}
+    # Marked sets are carried as UIDS, not rule dicts: `union` and `unique` go
+    # through a set, and a dict is unhashable.
+    _obs_drill_uid_marked: >-
+      {{ _obs_drill_rules | selectattr('uid', 'search', '^obs-drill-')
+         | map(attribute='uid') | sort | list }}
+    _obs_drill_label_marked: >-
+      {{ _obs_drill_rules | selectattr('labels', 'defined')
+         | selectattr('labels.drill', 'defined')
+         | map(attribute='uid') | sort | list }}
+    _obs_drill_label_values: >-
+      {{ _obs_drill_rules | selectattr('labels', 'defined')
+         | selectattr('labels.drill', 'defined')
+         | map(attribute='labels.drill') | map('string') | unique | sort | list }}
+    _obs_drill_all_marked: >-
+      {{ _obs_drill_uid_marked | union(_obs_drill_label_marked) | sort | list }}
+    _obs_drill_half_marked: >-
+      {{ _obs_drill_uid_marked | symmetric_difference(_obs_drill_label_marked) | sort | list }}
+    _obs_drill_window: "{{ observability_drill_issue | default('') | string | trim }}"
+    # The window value is interpolated into a regex below, so its SHAPE is part
+    # of the guard: an unvalidated input turns a bound into a no-op (CLAUDE.md,
+    # #194). Digits only — it is an issue number.
+    _obs_drill_window_ok: "{{ _obs_drill_window is match('^[0-9]+$') }}"
+    _obs_drill_uid_prefix_bad: >-
+      {{ _obs_drill_all_marked
+         | reject('search', '^obs-drill-' ~ _obs_drill_window ~ '-') | sort | list }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        _obs_drill_all_marked | length == 0
+        or (
+          _obs_drill_window_ok | bool
+          and _obs_drill_half_marked | length == 0
+          and _obs_drill_label_values == [_obs_drill_window]
+          and _obs_drill_uid_prefix_bad | length == 0
+        )
+    fail_msg: >-
+      Drill-marked alert rules are present but no matching operator window is
+      open (#201). MARKED: {{ _obs_drill_all_marked | join(', ') }}.
+      Window var `observability_drill_issue`:
+      {{ _obs_drill_window | default('(unset)', true) }}
+      (must be an issue NUMBER; parsed-ok={{ _obs_drill_window_ok }}).
+      HALF-MARKED (carries one marker but not the other — fails even with the
+      window open, because a drill without its `drill` label pages UNMARKED and
+      a drill without its `obs-drill-` uid cannot be grepped for afterwards):
+      {{ _obs_drill_half_marked | join(', ') | default('none', true) }}.
+      `drill` LABEL VALUES found: {{ _obs_drill_label_values }} — every one must
+      equal the window.
+      UIDs not prefixed `obs-drill-{{ _obs_drill_window | default('<issue>', true) }}-`:
+      {{ _obs_drill_uid_prefix_bad | join(', ') | default('none', true) }}.
+      To RUN a drill: re-run with `-e observability_drill_issue=<issue#>`, after
+      announcing it to the operator — a drill reaches the real channels by
+      design (#201 forbids a side channel), so the var is consent, not
+      paperwork.
+      If this fired on a ROUTINE deploy, a drill has OUTLIVED ITS WINDOW: remove
+      the rule from files/data/grafana/provisioning/alerting/ AND retire it from
+      Grafana with a `deleteRules:` block — deleting the file alone leaves the
+      rule serving and paging (#220). See
+      docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md.
+    quiet: true
 
 # --- Firewall: scope the observability ports to their approved clients (#122, #134, #161) ---
 # Governed ports and why each is on the list:
@@ -2021,8 +2265,18 @@
     # attribute — so following this role's own advice would fail every deploy with
     # a raw Jinja error. Same precedent as `map(attribute='expr', default='')` in
     # the grading check above.
+    #
+    # notification-templates.yaml is ALSO rejected by name (#201). The
+    # `default=[]` above would already absorb it silently — which is precisely
+    # why the exclusion is written out: the SERVED set this compares against
+    # contains rules only, so a non-rule document must be visibly absent from
+    # the expected side rather than invisibly contributing nothing. This guard
+    # is #201's served-side twin — a drill rule left in Grafana after its branch
+    # died shows up here as a uid NOT IN THE REPO and fails the next deploy from
+    # master (retire it with `deleteRules:`, per the fail_msg below).
     _obs_repo_groups: >-
-      {{ query('file', *query('fileglob', _obs_rule_dir ~ '/*.yaml'))
+      {{ query('file', *(query('fileglob', _obs_rule_dir ~ '/*.yaml')
+                         | reject('search', '/notification-templates[.]yaml$') | list))
          | map('from_yaml') | map(attribute='groups', default=[]) | flatten | list }}
     _obs_repo_rules: >-
       {{ _obs_repo_groups | map(attribute='rules', default=[]) | flatten | list }}

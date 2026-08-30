@@ -189,6 +189,13 @@ Apply-before-merge is the default, but pause for the human on:
 - **Service recreation** (compose redeploys bounce live containers — seconds of
   downtime).
 - **Anything irreversible** (disk/ZFS/destroy operations).
+- **Delivery drills** — any synthetic alert that will reach a live notification
+  channel (a `[DRILL]`-marked rule, or a probe series pushed into a real rule).
+  Announce it to the operator and get an explicit OK BEFORE it can fire; deploy
+  a drill rule only under `-e observability_drill_issue=<n>`, and retire it with
+  a `deleteRules:` block before merge (#201). The convention, the marker
+  mechanics and the graded table of drill mechanisms:
+  `docs/solutions/conventions/drill-alerts-self-identify-and-are-operator-consented.md`.
 
 ## Anti-patterns (what this loop forbids)
 

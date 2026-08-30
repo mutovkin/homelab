@@ -174,8 +174,15 @@ alongside the instance list.
 
 ## See also
 
-- #201 — the synthetic probe that paged the operator at 3am; still open, and still the
-  right issue for the notification-delivery half of this problem.
+- [drill-alerts-self-identify-and-are-operator-consented.md](drill-alerts-self-identify-and-are-operator-consented.md)
+  — #201, the synthetic probe that paged the operator at 3am, and the convention that
+  answers it: the drill markers, the `-e observability_drill_issue` consent window, and the
+  graded table this technique sits at the top of (grade A, labelling only). Two of this
+  page's preconditions gained measured backing there: `isPaused: true` is **not** a
+  substitute for a non-alerting `noDataState` — #212 measured that a paused rule is excluded
+  from evaluation entirely, so it proves nothing about a rule that must evaluate — and the
+  `noDataState` precondition, reasoned here from how the mechanism works, has a real case
+  behind it now in #206's fixture, which reached `state=pending` carrying no marker at all.
 - [removed-metric-did-not-go-nodata-mixed-version-fleet.md](../integration-issues/removed-metric-did-not-go-nodata-mixed-version-fleet.md)
   — #216, the dropout that motivated #217's regrouping.
 - [instant-query-cannot-prove-a-series-is-live.md](instant-query-cannot-prove-a-series-is-live.md)
