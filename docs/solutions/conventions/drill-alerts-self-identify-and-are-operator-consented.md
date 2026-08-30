@@ -57,9 +57,12 @@ costly to fake.)
 Two defects, not one: the probe carried no marker, and nobody was told a drill would fire.
 
 This is not a one-off. Four agents across this batch invented four different ad-hoc safety
-schemes for the same problem, and one leaked: #206's fixture reached `state=pending`
-carrying no marker at all — a rule one evaluation away from a notification nobody could
-have identified. The improvisation is the failure mode. Hence a convention.
+schemes for the same problem, and one leaked: #206's fixture is reported to have reached
+`state=pending` carrying no marker at all — a rule one evaluation away from a notification
+nobody could have identified. (That near-miss is carried from #206's own review, not
+re-measured here; #206's merged follow-ups do record `isPaused` being left unchecked
+"while this repo's own new drill recipe recommends staging rules paused".) The
+improvisation is the failure mode. Hence a convention.
 
 ## The convention
 

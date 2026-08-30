@@ -377,8 +377,8 @@ Hard-won lessons — check here before debugging from scratch.
   operator consent to deploy.** #188's verification pushed fake disk temps under
   `probe188c`/`probe188d`, proved the per-drive notification split — and paged the operator
   at ~3am with text indistinguishable from a real incident. Four agents in one batch
-  invented four ad-hoc safety schemes and one leaked (#206 reached `state=pending`
-  unmarked), so the marker is decided at the TEMPLATE layer where no per-probe step can
+  invented four ad-hoc safety schemes and one leaked (#206's review reports a fixture at
+  `state=pending`, unmarked), so the marker is decided at the TEMPLATE layer where no step can
   forget it: `files/data/grafana/provisioning/alerting/notification-templates.yaml` renders
   `[DRILL #<issue>] ` for a rule labelled `drill: "<issue#>"` and `[DRILL] ` for a
   `probe<issue#><letter>` identity VALUE (the only marker that survives a real rule's
