@@ -45,7 +45,16 @@ services:
 
   immich-machine-learning:
     container_name: immich-machine-learning
-    image: ghcr.io/immich-app/immich-machine-learning:release
+    # ROCm ML flavour (#244): same release-family lockstep as immich-server's
+    # `:release` (this role pins by tag family — no version var). The -rocm
+    # image bundles ROCm 7.2 + MIGraphX and is Immich's ONLY ROCm flavour;
+    # kernel-side /dev/kfd is userspace-version-independent of the CT's ROCm 10
+    # (#240). Deploy-day caveats, read BEFORE enabling immich on a host:
+    #   - the image is ~35 GiB unpacked — check CT 201 rootfs (`df -h /`)
+    #     first; root_disk_size in host_vars/n5pro is grow-only live-reconciled
+    #   - first inference compiles models via MIGraphX: minutes of 100% GPU is
+    #     startup, not a hang
+    image: ghcr.io/immich-app/immich-machine-learning:release-rocm
     restart: unless-stopped
     security_opt:
       - "apparmor:unconfined"
@@ -59,10 +68,22 @@ services:
     environment:
       MACHINE_LEARNING_WORKERS: 1
       MACHINE_LEARNING_WORKER_TIMEOUT: 120
+      # Immich's own default (300), made explicit — NOT a mitigation. Verified
+      # 2026-08-31 against upstream `machine-learning/immich_ml/config.py`
+      # (`model_ttl: int = 300`) and the env-var docs table. The -rocm quirk it
+      # bounds: a loaded model holds the 890M out of its deepest idle state, so
+      # idle draw stays elevated for these 5 minutes after each inference. Pinned
+      # so an upstream default change cannot silently widen that window; lower it
+      # (never <= 0, which disables unloading) if idle power is measured to matter.
+      MACHINE_LEARNING_MODEL_TTL: 300
     volumes:
       - immich-model-cache:/cache
     devices:
-      - /dev/dri:/dev/dri  # VAAPI for ML acceleration
+      # ROCm needs BOTH: /dev/kfd is the compute driver, /dev/dri carries the
+      # render node it dispatches through. This container decodes no video, so
+      # /dev/dri is not here for VAAPI — dropping it as "unused" breaks ROCm (#244).
+      - /dev/dri:/dev/dri  # ROCm render node (renderD*), paired with kfd
+      - /dev/kfd:/dev/kfd  # ROCm compute for the -rocm ML image (#244)
     networks:
       - immich_network
     healthcheck:
