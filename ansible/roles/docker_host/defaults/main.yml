@@ -15,18 +15,28 @@ docker_default_address_pools:
     size: 24
 
 # GPU sharing / ROCm configuration
-# Override gpu_sharing in host_vars for GPU-enabled Docker hosts
+# Override gpu_sharing in host_vars for GPU-enabled Docker hosts.
+# `rocm_usecases` is gone: it was an `amdgpu-install --usecase` argument and the
+# stable-repo channel has no usecases — the per-GPU-architecture package is the
+# whole selection. Inventory REPLACES role defaults for dicts, so a host_vars
+# gpu_sharing must be the complete authoritative value.
 gpu_sharing:
   enabled: false
-  rocm_usecases:
-    - rocm
 
-# ROCm version pinning — bump these when upgrading ROCm
-rocm_version: "7.2.2"
-rocm_build: "70202"
-rocm_graphics_version: "7.2.1"  # AMD quirk: graphics repo version differs from installer
-rocm_ubuntu_codename: "noble"
-hsa_gfx_version: "11.5.0"  # HSA_OVERRIDE_GFX_VERSION for Radeon 890M (gfx1150)
+# --- ROCm (AMD stable-repo channel, #240) ---
+# ROCm >= 10 ships via stable.repo.amd.com with per-GPU-architecture packages;
+# the legacy amdgpu-install/repo.radeon.com stream ended at 7.2.4 and can never
+# deliver it. The major.minor lives in the PACKAGE NAME, so moving to 10.1 is a
+# deliberate edit here (and remember to remove the old package name in the same
+# change). Point releases within 10.0.x float on apt upgrade — the AMD repo's
+# `Origin: AMD ROCm` is not in unattended-upgrades' Origins-Pattern, so bumps
+# only arrive via a run of this role.
+rocm_release: "10.0"
+rocm_gfx_arch: "gfx1150"  # Radeon 890M (Strix Point) — native since ROCm 7.2
+rocm_package: "amdrocm{{ rocm_release }}-{{ rocm_gfx_arch }}"
+rocm_home: "/opt/rocm/core-{{ rocm_release }}"
+rocm_apt_key_url: "https://stable.repo.amd.com/rocm/gpg/packages.gpg"
+rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
 
 # NFS client — set nfs_enabled: true in host_vars to install nfs-common
 nfs_enabled: false
