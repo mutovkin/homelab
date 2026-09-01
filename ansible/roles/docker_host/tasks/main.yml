@@ -387,7 +387,12 @@
 # the repo file are already correct, the task runs under --check as normal, so
 # this never hides real drift — note the .sources content depends only on
 # rocm_apt_repo_url, so a rocm_release bump leaves rocm_repo_file unchanged and
-# the new package still shows up in the dry run.
+# the new package still shows up in the dry run. The key half is weaker and
+# knowingly so: if AMD ever re-serves the key with a fresh Last-Modified,
+# get_url reports changed under --check and this task skips, so a dry run can
+# under-report a pending bump for exactly one run. It degrades to a skip, never
+# to a false green on an install that would have failed — and the following real
+# apply installs and asserts.
 - name: Install ROCm userspace package {{ rocm_package }}
   ansible.builtin.apt:
     name:
