@@ -277,7 +277,15 @@ Hard-won lessons — check here before debugging from scratch.
   executed and the red recap proved nothing. Corrupt only the input the guard reads and
   pin every upstream consumer back (`-e rocm_package=<real>`), once per assert clause,
   then read the guard's own `fail_msg`, not the recap; a correct falsification run also
-  reports `changed=0`. Sibling: **`--check` cannot install from a repo it did not write**
+  reports `changed=0`. **This bites hardest on a guard added IN RESPONSE TO A REVIEW** —
+  it arrives late, looks defensive, and "belt-and-braces" reads as obviously safe. #240's
+  round-2 review found that round-1's `item.path != rocm_home` on a recursive delete could
+  never fire (`find … recurse: false` yields direct children of `/opt`; `rocm_home` is two
+  levels down) AND passed the very case its comment claimed to cover (a widened glob returns
+  `/opt/rocm`, the live install root). A guard justified by a hypothetical must be TESTED
+  against that hypothetical, and the test should also assert the OLD clause was wrong — a
+  test that would have failed before the fix. Sibling:
+  **`--check` cannot install from a repo it did not write**
   — add-repo-then-install dies with "No package matching …" on a host that lacks the repo,
   so gate the install `not (ansible_check_mode and <repo_file>.changed)`, narrow enough
   that a converged host still dry-runs it for real. See

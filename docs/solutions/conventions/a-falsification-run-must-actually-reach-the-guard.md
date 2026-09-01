@@ -94,6 +94,39 @@ Practical checklist before believing a falsification run:
 4. For a multi-condition `assert`, do this once **per condition**. One red run proves
    one clause.
 
+## The rule bites hardest on the guard you add *in response to a review*
+
+Review round 1 of #240 flagged an unscoped recursive delete. The fix added what
+looked like a belt-and-braces clause:
+
+```yaml
+    # never let it name the live install root no matter how the glob is edited
+    - item.path != rocm_home
+```
+
+Round 2 showed it **could not fire**. `find` ran with `recurse: false` over `/opt`,
+so `item.path` is always a direct child, while `rocm_home` is `/opt/rocm/core-10.0`
+— two levels down. And the scenario the comment promised to cover was exactly the
+one it missed: widen the glob to `rocm*` and `find` returns `/opt/rocm`, the live
+install root, which `!= /opt/rocm/core-10.0` passes — recursively deleting ROCm.
+The correct clause is a prefix test that rejects the root **and any ancestor**:
+
+```yaml
+    - not (rocm_home ~ '/').startswith(item.path ~ '/')
+```
+
+Two things generalise. **A fix written under review pressure gets the least
+scrutiny of anything in the change** — it arrives late, it looks defensive, and
+"belt-and-braces" reads as obviously safe. It is a guard like any other and owes
+the same falsification. And **a guard whose only justification is a hypothetical
+must be tested against that hypothetical**: this one was justified by "no matter
+how the glob is edited", so the test had to actually edit the glob. The test that
+landed asserts both that the new clause matches intent on every path and that the
+old clause was *wrong* on `/opt/rocm` — a test that would have failed before the
+fix, which is the only kind worth writing.
+
+This happened in the same change that added this document.
+
 ## Corollary: when a clause cannot be reached live, falsify it offline against measured strings
 
 Sometimes no `-e` combination can reach a clause, because the variable feeds an
