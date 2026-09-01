@@ -271,7 +271,17 @@ Hard-won lessons — check here before debugging from scratch.
   real apply is invisible to `--check`, so its first execution is its first test; verify
   those against the binary on a host, never against a dry run (#134 shipped
   `vector validate --config`, which the CLI rejects — the path is positional — and no
-  dry-run could have caught it).
+  dry-run could have caught it). (3) **The falsification run must actually REACH the
+  guard.** #240's planned proof (`-e rocm_gfx_arch=gfx9999`) went red in the apt install
+  several tasks earlier — `rocm_package` derives from the same var — so the assert never
+  executed and the red recap proved nothing. Corrupt only the input the guard reads and
+  pin every upstream consumer back (`-e rocm_package=<real>`), once per assert clause,
+  then read the guard's own `fail_msg`, not the recap; a correct falsification run also
+  reports `changed=0`. Sibling: **`--check` cannot install from a repo it did not write**
+  — add-repo-then-install dies with "No package matching …" on a host that lacks the repo,
+  so gate the install `not (ansible_check_mode and <repo_file>.changed)`, narrow enough
+  that a converged host still dry-runs it for real. See
+  [docs/solutions/conventions/a-falsification-run-must-actually-reach-the-guard.md](docs/solutions/conventions/a-falsification-run-must-actually-reach-the-guard.md).
 - **Arm a guard from durable state, not a one-shot `changed`.** #127's restore gate keyed
   its marker task on the provisioning result's `.changed` — a signal any run that dies
   before the marker consumes for good; later runs see `changed=false` on an existing CT and
