@@ -272,6 +272,60 @@
   when: gpu_sharing.enabled | default(false)
 
 
+- name: Ensure apt keyring directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: gpu_sharing.enabled | default(false)
+
+# AMD serves this as binary/octet-stream and names it .gpg, but the bytes are
+# an ASCII-armored "-----BEGIN PGP PUBLIC KEY BLOCK-----" (verified 2026-08-31).
+# apt's Signed-By wants a dearmored keyring, so the dearmor step is required.
+- name: Download AMD ROCm stable repo signing key (armored)
+  ansible.builtin.get_url:
+    url: "{{ rocm_apt_key_url }}"
+    dest: /etc/apt/keyrings/amdrocm.asc
+    mode: "0644"
+  register: rocm_apt_key
+  when: gpu_sharing.enabled | default(false)
+
+- name: Dearmor AMD ROCm signing key
+  ansible.builtin.command:
+    cmd: gpg --dearmor --yes -o /etc/apt/keyrings/amdrocm.gpg /etc/apt/keyrings/amdrocm.asc
+    creates: /etc/apt/keyrings/amdrocm.gpg
+  when: gpu_sharing.enabled | default(false)
+
+- name: Configure AMD ROCm stable repository (deb822)
+  ansible.builtin.copy:
+    content: |
+      X-Repo-Id: amdrocm-stable
+      Types: deb
+      URIs: {{ rocm_apt_repo_url }}
+      Suites: stable
+      Components: main
+      Architectures: amd64
+      Signed-By: /etc/apt/keyrings/amdrocm.gpg
+      Enabled: yes
+    dest: /etc/apt/sources.list.d/amdrocm-stable.sources
+    mode: "0644"
+  register: rocm_repo_file
+  when: gpu_sharing.enabled | default(false)
+
+# apt IS the version-aware reconcile: `state: present` on a versionless name
+# installs the newest 10.0.x the repo offers and leaves it alone afterwards.
+# libatomic1/libquadmath0 are AMD-documented prerequisites that the ROCm
+# packages do not declare in Depends.
+- name: Install ROCm {{ rocm_release }} for {{ rocm_gfx_arch }}
+  ansible.builtin.apt:
+    name:
+      - libatomic1
+      - libquadmath0
+      - "{{ rocm_package }}"
+    state: present
+    update_cache: true
+  when: gpu_sharing.enabled | default(false)
+
 - name: Ensure root is in render and video groups
   ansible.builtin.user:
     name: root
@@ -281,13 +335,18 @@
     append: true
   when: gpu_sharing.enabled | default(false)
 
+# No HSA_OVERRIDE_GFX_VERSION: gfx1150 has been natively supported since
+# ROCm 7.2, so the override was vestigial and masked what the runtime actually
+# detects. ROCm 10 ships nothing under /opt/rocm/bin, so PATH must point at the
+# versioned root.
 - name: Deploy ROCm environment profile
   ansible.builtin.copy:
     content: |
-      # Managed by Ansible — ROCm environment for GPU containers
-      export PATH="/opt/rocm/bin:${PATH}"
-      export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH}"
-      export HSA_OVERRIDE_GFX_VERSION={{ hsa_gfx_version }}
+      # Managed by Ansible — ROCm environment (stable-repo channel, #240)
+      export ROCM_PATH="{{ rocm_home }}"
+      export HIP_PATH="$ROCM_PATH"
+      export PATH="$ROCM_PATH/bin:${PATH}"
+      export LD_LIBRARY_PATH="$ROCM_PATH/lib:${LD_LIBRARY_PATH}"
     dest: /etc/profile.d/rocm.sh
     mode: "0644"
   when: gpu_sharing.enabled | default(false)
