@@ -419,7 +419,12 @@
 # never been seen to fail, and never could. This one gates the run. It is
 # skipped under --check because its inputs (the installed binary) only exist
 # after a real apply; its first execution is therefore its first test, which is
-# why #240 exercised every clause red before trusting it.
+# why #240 drove its clauses red before trusting it: the rocminfo-failed, the
+# gfx-mismatch and the wrong-release clauses live (each hitting exactly that
+# clause, changed=0), and the dpkg-state clause offline against measured
+# ii/rc/iU/iF/empty strings — it cannot be reached live because rocm_package
+# feeds both the apt install and this query. The `rocm_delivered is not failed`
+# clause shares its mechanism with the observed `rocm_verify is not failed` one.
 #
 # `ignore_errors`, NOT `failed_when: false`: the latter ASSIGNS failed=False and
 # would make the `is not failed` clauses below vacuous (CLAUDE.md, measured).
