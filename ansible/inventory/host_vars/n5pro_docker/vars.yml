@@ -4,13 +4,13 @@
 # Data mount point inside the LXC
 data_mount: /data
 
-# GPU sharing — ROCm userspace installed by docker_host role
+# GPU sharing — ROCm userspace installed by docker_host role.
+# `rocm_usecases` was removed in #240: it was an `amdgpu-install --usecase`
+# argument, and the stable-repo channel selects by GPU architecture instead
+# (rocm_gfx_arch in the role defaults). Inventory REPLACES role defaults for
+# dicts, so this must stay the complete authoritative value.
 gpu_sharing:
   enabled: true
-  rocm_usecases:
-    - rocm
-    - hip
-    - mllib
 
 # NFS client — install nfs-common for Docker NFS volume driver
 nfs_enabled: true

@@ -144,71 +144,266 @@
     name: python3-requests
     state: present
 
-# --- ROCm userspace (GPU-enabled containers only) ---
-# Installs AMD ROCm libraries inside the LXC for GPU compute.
-# The host provides the kernel driver (amdgpu) and device nodes;
-# this installs only userspace libraries (--no-dkms).
+# --- ROCm userspace (AMD stable-repo channel, #240) ---
+# The Proxmox host provides the kernel driver (amdgpu/kfd) and bind-mounts
+# /dev/dri + /dev/kfd into the privileged CT; this installs ONLY userspace.
+#
+# History: 7.2.2 came from the legacy amdgpu-install channel on
+# repo.radeon.com, which ended at 7.2.4 and can never deliver ROCm >= 10. The
+# migration block below removes that stack once and then never fires again.
+# The old gate (`which rocminfo`) made ANY change a silent no-op once ROCm
+# existed — even a rewrite of the pins. What the new shape reconciles is the
+# package NAME: editing rocm_release renames the package and apt installs it.
+# Point releases within a release line still need common's opt-in
+# `-e apt_apply_pending_upgrades=true` — see defaults/main.yml.
+#
+# Only the genuinely destructive steps are inside the one-shot probe gate; the
+# "make this file/link absent" reconciles live outside it, keyed on their own
+# durable state. A run that dies mid-migration would otherwise consume the gate
+# (the purge clears the probe's own signal) and leave the leftovers forever.
 
-- name: Check if ROCm is already installed
-  ansible.builtin.command: which rocminfo
-  register: rocm_check
+# rc 0 = installed, rc 1 = "no packages found matching". Anything else is a real
+# dpkg-query error and must NOT read as "no legacy present" — that would skip the
+# migration while the cleanups below still delete /opt/rocm-7.2.2 out from under
+# packages that still own it. So this is a bounded failed_when, not a blanket
+# `failed_when: false`.
+- name: Probe for the legacy amdgpu-install stack
+  ansible.builtin.command: dpkg-query -W -f='${Version}' amdgpu-install
+  register: legacy_amdgpu_install
   changed_when: false
-  failed_when: false
+  failed_when: legacy_amdgpu_install.rc not in [0, 1]
+  check_mode: false  # keep --check honest about whether the migration is queued
   when: gpu_sharing.enabled | default(false)
 
-- name: Check if amdgpu-install tool is present
-  ansible.builtin.command: which amdgpu-install
-  register: amdgpu_install_check
-  changed_when: false
-  failed_when: false
+- name: Probe for the legacy amdgpu-uninstall helper
+  ansible.builtin.stat:
+    path: /usr/bin/amdgpu-uninstall
+  register: legacy_amdgpu_uninstall_bin
   when: gpu_sharing.enabled | default(false)
 
-- name: Download amdgpu-install package
-  ansible.builtin.get_url:
-    # yamllint disable-line rule:line-length
-    url: "https://repo.radeon.com/amdgpu-install/{{ rocm_version }}/ubuntu/{{ rocm_ubuntu_codename }}/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"  # noqa: yaml[line-length]
-    dest: "/tmp/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
-    mode: "0644"
+- name: "Migrate off the legacy amdgpu-install ROCm stack (one-way, #240)"
   when:
     - gpu_sharing.enabled | default(false)
-    - amdgpu_install_check.rc != 0
+    - legacy_amdgpu_install.rc | default(1) == 0
+  block:
+    # amdgpu-uninstall has no -y flag of its own; unrecognised arguments are
+    # forwarded verbatim to the `apt-get purge` it runs (verified by reading
+    # /usr/bin/amdgpu-uninstall on CT 201), which is how this stays
+    # non-interactive. It purges rocm-core + amdgpu-core, so every dependent
+    # rocm-*/hip-* package goes with them. It also DELETES ITSELF on the way
+    # out — hence the stat gate, so a re-run after a mid-migration failure
+    # still reaches the purge below instead of dying on a missing binary.
+    - name: Remove the legacy ROCm userspace
+      ansible.builtin.command: amdgpu-uninstall -y
+      register: legacy_uninstall
+      changed_when: true
+      when: legacy_amdgpu_uninstall_bin.stat.exists
 
-- name: Install amdgpu-install package
-  ansible.builtin.apt:
-    deb: "/tmp/amdgpu-install_{{ rocm_version }}.{{ rocm_build }}-1_all.deb"
-    state: present
-  when:
-    - gpu_sharing.enabled | default(false)
-    - amdgpu_install_check.rc != 0
+    # ORDER IS LOAD-BEARING: the purge of amdgpu-install is what clears this
+    # block's own probe signal, so it must be the LAST step. With autoremove
+    # first, a run that dies on a dpkg lock or a full disk leaves amdgpu-install
+    # installed, the gate still armed, and the re-run finishes the job. The
+    # reverse order would consume the gate and orphan the 7.2.2 rocm-*/hip-*
+    # packages forever, silently — nothing downstream looks for them.
+    - name: Autoremove orphaned legacy dependencies
+      ansible.builtin.apt:
+        autoremove: true
+      register: legacy_autoremove
 
-- name: Fix AMD graphics repository version
-  ansible.builtin.replace:
-    path: /etc/apt/sources.list.d/rocm.list
-    regexp: "graphics/{{ rocm_version }}"
-    replace: "graphics/{{ rocm_graphics_version }}"
-  when:
-    - gpu_sharing.enabled | default(false)
-    - rocm_check.rc != 0
-    - rocm_version != rocm_graphics_version
+    - name: Purge the legacy installer package
+      ansible.builtin.apt:
+        name: amdgpu-install
+        state: absent
+        purge: true
 
-- name: Recover interrupted dpkg state before ROCm install
-  ansible.builtin.command: dpkg --configure -a
-  register: dpkg_configure
-  changed_when: dpkg_configure.stdout | length > 0
-  when:
-    - gpu_sharing.enabled | default(false)
-    - rocm_check.rc != 0
+    # This is a one-way, irreversible removal on a live host. Without this the
+    # only record of what it took is a `changed` line.
+    - name: Record what the legacy migration removed
+      ansible.builtin.debug:
+        msg:
+          amdgpu_uninstall: "{{ legacy_uninstall.stdout_lines | default(['(skipped — helper already gone)']) }}"
+          autoremove: "{{ legacy_autoremove.stdout_lines | default([]) }}"
 
-- name: Install ROCm userspace via amdgpu-install
-  ansible.builtin.command: >
-    amdgpu-install -y
-    --usecase={{ gpu_sharing.rocm_usecases | join(',') }}
-    --no-dkms
+# amdgpu-uninstall only cleans up its own amdgpu-local.* files, so these lists
+# and the legacy channel's keyring survive it. amdgpu-proprietary.list is fully
+# commented out but is still legacy-channel residue; rocm.gpg was the signing
+# key for the two lists above it and has no other consumer. Idempotent and
+# outside the probe gate on purpose.
+- name: Remove legacy AMD repo lists and keyring
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/rocm.list
+    - /etc/apt/sources.list.d/amdgpu.list
+    - /etc/apt/sources.list.d/amdgpu-proprietary.list
+    - /etc/apt/keyrings/rocm.gpg
+  when: gpu_sharing.enabled | default(false)
+
+# /opt/rocm was an update-alternatives link to /opt/rocm-7.2.2. ROCm 10 ships
+# /opt/rocm/core-10.0/... as real directories, and dpkg cannot unpack a
+# directory over an existing symlink — so the link must go first. Both tasks
+# are conditional on the legacy state actually being present: an unconditional
+# `state: absent` on /opt/rocm would delete the new install on the next run.
+- name: Probe for the legacy rocm update-alternatives entry
+  ansible.builtin.command: update-alternatives --query rocm
+  register: legacy_rocm_alternative
+  changed_when: false
+  # Measured on CT 201: rc 0 = link group exists, rc 2 = "no alternatives for
+  # rocm". Anything else is a real error and should fail rather than read as
+  # "nothing to clean up" — same bounded shape as the amdgpu-install probe.
+  failed_when: legacy_rocm_alternative.rc not in [0, 2]
+  check_mode: false
+  when: gpu_sharing.enabled | default(false)
+
+- name: Drop the legacy rocm update-alternatives entry
+  ansible.builtin.command: update-alternatives --remove-all rocm
   changed_when: true
   when:
     - gpu_sharing.enabled | default(false)
-    - rocm_check.rc != 0
+    - legacy_rocm_alternative.rc | default(1) == 0
+    # Only a LEGACY value: 7.x registered "Value: /opt/rocm-<ver>". Matching any
+    # `rocm` alternative would fight a future ROCm that registers one at
+    # /opt/rocm/core-<rel> and make this task changed on every run forever.
+    - "'Value: /opt/rocm-' in legacy_rocm_alternative.stdout | default('')"
 
+- name: Probe /opt/rocm for a leftover legacy symlink
+  ansible.builtin.stat:
+    path: /opt/rocm
+    follow: false
+  register: legacy_rocm_path
+  when: gpu_sharing.enabled | default(false)
+
+- name: Remove the leftover /opt/rocm symlink so ROCm can own the directory
+  ansible.builtin.file:
+    path: /opt/rocm
+    state: absent
+  when:
+    - gpu_sharing.enabled | default(false)
+    - legacy_rocm_path.stat.exists | default(false)
+    - legacy_rocm_path.stat.islnk | default(false)
+    # …and only a LEGACY target: /etc/alternatives/rocm (7.x's alternatives
+    # link) or /opt/rocm-<ver>. Deleting any symlink named /opt/rocm would
+    # delete a future ROCm's own compatibility link on every run.
+    - >-
+      legacy_rocm_path.stat.lnk_target | default('') is search('^/etc/alternatives/rocm$|^/opt/rocm-[0-9]')
+
+# Versioned legacy trees (/opt/rocm-7.2.2). Scoped to the legacy series — the
+# repo.radeon.com channel topped out at 7.2.4, so nothing this role installs can
+# ever land at /opt/rocm-[0-7].*. Deliberately NOT `rocm-[0-9]*`: that would also
+# match a hypothetical future /opt/rocm-11.0 and gut it on every run, before an
+# already-satisfied `state: present` could notice. The current layout,
+# /opt/rocm/core-10.0, is unmatchable either way (fnmatch is on the basename).
+- name: Find leftover legacy ROCm install trees
+  ansible.builtin.find:
+    paths: /opt
+    patterns: "{{ rocm_legacy_tree_glob }}"
+    file_type: directory
+    recurse: false
+  register: legacy_rocm_trees
+  when: gpu_sharing.enabled | default(false)
+
+- name: Remove leftover legacy ROCm install trees
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ legacy_rocm_trees.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when:
+    - gpu_sharing.enabled | default(false)
+    # Belt-and-braces with the glob: this is a recursive delete under /opt, so
+    # never let it name the live install root OR ANY ANCESTOR OF IT, no matter
+    # how the glob is edited. `item.path != rocm_home` would be vacuous here —
+    # find is non-recursive over /opt, so item.path is always a direct child and
+    # can never equal /opt/rocm/core-10.0. The real hazard is /opt/rocm itself,
+    # which a widened glob (`rocm*`) WOULD return and which that comparison
+    # would happily pass. Prefix test, on paths normalised with a trailing /:
+    #   /opt/rocm      -> '/opt/rocm/core-10.0/'.startswith('/opt/rocm/')      -> skip
+    #   /opt/rocm-7.2.2 -> '/opt/rocm/core-10.0/'.startswith('/opt/rocm-7.2.2/') -> delete
+    - not (rocm_home ~ '/').startswith(item.path ~ '/')
+
+- name: Ensure apt keyring directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: gpu_sharing.enabled | default(false)
+
+# AMD serves this as binary/octet-stream and names it .gpg, but the bytes are
+# an ASCII-armored "-----BEGIN PGP PUBLIC KEY BLOCK-----" (verified 2026-08-31),
+# and `Signed-By:` accepts an armored key directly — the Docker repo above does
+# exactly this with docker.asc. So there is no dearmor step, which is the point:
+# a `gpg --dearmor … creates:` would skip forever once the keyring existed, and
+# the day AMD rotates the key get_url would fetch a new .asc while apt kept
+# verifying against the stale .gpg — an unhealable NO_PUBKEY that only a manual
+# `rm` fixes. With no derived file, the file get_url rewrites IS the file apt
+# reads, and rotation reconciles itself.
+- name: Download AMD ROCm stable repo signing key (armored)
+  ansible.builtin.get_url:
+    url: "{{ rocm_apt_key_url }}"
+    dest: /etc/apt/keyrings/amdrocm.asc
+    mode: "0644"
+  register: rocm_apt_key
+  when: gpu_sharing.enabled | default(false)
+
+# Residue from the dearmored-keyring shape this role briefly deployed in #240.
+- name: Remove the superseded dearmored ROCm keyring
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/amdrocm.gpg
+    state: absent
+  when: gpu_sharing.enabled | default(false)
+
+- name: Configure AMD ROCm stable repository (deb822)
+  ansible.builtin.copy:
+    content: |
+      X-Repo-Id: amdrocm-stable
+      Types: deb
+      URIs: {{ rocm_apt_repo_url }}
+      Suites: stable
+      Components: main
+      Architectures: amd64
+      Signed-By: /etc/apt/keyrings/amdrocm.asc
+      Enabled: yes
+    dest: /etc/apt/sources.list.d/amdrocm-stable.sources
+    mode: "0644"
+  register: rocm_repo_file
+  when: gpu_sharing.enabled | default(false)
+
+# What apt reconciles here is the package NAME, not the version: an edit to
+# rocm_release renames the package and this task installs the new one. For an
+# already-installed amdrocm10.0-gfx1150, `state: present` is a no-op — point
+# releases within 10.0.x land only under common's opt-in
+# `-e apt_apply_pending_upgrades=true`, and the assert below cannot detect that
+# staleness either. That is the deliberate posture (see defaults/main.yml);
+# do NOT "fix" it with state: latest. libatomic1/libquadmath0 are
+# AMD-documented prerequisites that the ROCm packages do not declare in Depends.
+#
+# The check-mode carve-out is not a cheat: under --check neither the key nor the
+# .sources file above is written, so on a host that does not yet have the repo
+# apt genuinely cannot resolve (or verify) the package and the task dies with
+# "No package matching ...". Skipping exactly that case keeps `--check --diff`
+# usable as the documented pre-apply dry run. On any host where BOTH the key and
+# the repo file are already correct, the task runs under --check as normal, so
+# this never hides real drift — note the .sources content depends only on
+# rocm_apt_repo_url, so a rocm_release bump leaves rocm_repo_file unchanged and
+# the new package still shows up in the dry run. The key half is weaker and
+# knowingly so: if AMD ever re-serves the key with a fresh Last-Modified,
+# get_url reports changed under --check and this task skips, so a dry run can
+# under-report a pending bump for exactly one run. It degrades to a skip, never
+# to a false green on an install that would have failed — and the following real
+# apply installs and asserts.
+- name: Install ROCm userspace package {{ rocm_package }}
+  ansible.builtin.apt:
+    name:
+      - libatomic1
+      - libquadmath0
+      - "{{ rocm_package }}"
+    state: present
+    update_cache: true
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not (ansible_check_mode and (rocm_repo_file.changed or rocm_apt_key.changed))
 
 - name: Ensure root is in render and video groups
   ansible.builtin.user:
@@ -219,28 +414,90 @@
     append: true
   when: gpu_sharing.enabled | default(false)
 
+# No HSA_OVERRIDE_GFX_VERSION: gfx1150 has been natively supported since
+# ROCm 7.2, so the override was vestigial and masked what the runtime actually
+# detects. ROCm 10 ships nothing under /opt/rocm/bin, so PATH must point at the
+# versioned root.
 - name: Deploy ROCm environment profile
   ansible.builtin.copy:
     content: |
-      # Managed by Ansible — ROCm environment for GPU containers
-      export PATH="/opt/rocm/bin:${PATH}"
-      export LD_LIBRARY_PATH="/opt/rocm/lib:${LD_LIBRARY_PATH}"
-      export HSA_OVERRIDE_GFX_VERSION={{ hsa_gfx_version }}
+      # Managed by Ansible — ROCm environment (stable-repo channel, #240)
+      export ROCM_PATH="{{ rocm_home }}"
+      export HIP_PATH="$ROCM_PATH"
+      export PATH="$ROCM_PATH/bin:${PATH}"
+      export LD_LIBRARY_PATH="$ROCM_PATH/lib:${LD_LIBRARY_PATH}"
     dest: /etc/profile.d/rocm.sh
     mode: "0644"
   when: gpu_sharing.enabled | default(false)
 
-- name: Verify ROCm installation
-  ansible.builtin.command: rocminfo
+# The old check was `failed_when: false` + a debug message — a guard that had
+# never been seen to fail, and never could. This one gates the run. It is
+# skipped under --check because its inputs (the installed binary) only exist
+# after a real apply; its first execution is therefore its first test, which is
+# why #240 drove its clauses red before trusting it: the rocminfo-failed, the
+# gfx-mismatch and the wrong-release clauses live (each hitting exactly that
+# clause, changed=0), and the dpkg-state clause offline against measured
+# ii/rc/iU/iF/empty strings — it cannot be reached live because rocm_package
+# feeds both the apt install and this query. The `rocm_delivered is not failed`
+# clause shares its mechanism with the observed `rocm_verify is not failed` one.
+#
+# `ignore_errors`, NOT `failed_when: false`: the latter ASSIGNS failed=False and
+# would make the `is not failed` clauses below vacuous (CLAUDE.md, measured).
+# Letting these two fail the play directly would also make the curated fail_msg
+# unreachable — a missing /dev/kfd or a missing binary would surface as a bare
+# module error instead of the diagnostic written for exactly those cases.
+- name: Verify ROCm delivers the GPU
+  ansible.builtin.command: "{{ rocm_home }}/bin/rocminfo"
   register: rocm_verify
   changed_when: false
-  failed_when: false
-  when: gpu_sharing.enabled | default(false)
+  ignore_errors: true  # noqa: ignore-errors — the assert below is the gate
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not ansible_check_mode
 
-- name: Show ROCm verification status
-  ansible.builtin.debug:
-    msg: "{{ 'ROCm is working — agents detected' if rocm_verify.rc == 0 else 'ROCm verification failed — /dev/kfd may not be available yet (reboot host?)' }}"
-  when: gpu_sharing.enabled | default(false)
+# `${db:Status-Abbrev}`, not just `${Version}`: dpkg-query exits 0 and prints a
+# populated version for a package in ANY state — including `iU` (unpacked, never
+# configured) and `rc` (removed, config files remain). Measured on CT 201:
+# `dpkg-query -W -f='${Version}' fontconfig` -> `2.15.0-1.1ubuntu2`, rc=0, for a
+# package dpkg lists as `rc`. A half-installed ROCm would have satisfied a
+# version-only clause while its files sat unconfigured on disk.
+- name: Read the delivered ROCm package status and version
+  ansible.builtin.command: dpkg-query -W -f='${db:Status-Abbrev}|${Version}' {{ rocm_package }}
+  register: rocm_delivered
+  changed_when: false
+  ignore_errors: true  # noqa: ignore-errors — the assert below is the gate
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not ansible_check_mode
+
+- name: Assert ROCm is delivered and reports {{ rocm_gfx_arch }}
+  ansible.builtin.assert:
+    that:
+      - rocm_verify is not failed
+      - rocm_delivered is not failed
+      - rocm_gfx_arch in (rocm_verify.stdout | default(''))
+      - (rocm_delivered.stdout | default('')).startswith('ii ')
+      # default(…, true) also covers an EMPTY stdout: ''.split('|') is [''] and
+      # [1] would raise IndexError, swapping the curated message for a Jinja
+      # traceback. (Ordering already protects this — `is not failed` above is
+      # evaluated first and assert short-circuits — but a one-token belt.)
+      - (rocm_delivered.stdout | default('|', true)).split('|')[1].startswith(rocm_release ~ '.')
+    fail_msg: >-
+      ROCm on this container is not delivering. rocminfo
+      ({{ rocm_home }}/bin/rocminfo) {{ 'FAILED to run' if rocm_verify is failed
+      else 'ran but did not report ' ~ rocm_gfx_arch }}; dpkg says
+      '{{ rocm_delivered.stdout | default('(query failed)') }}' for
+      {{ rocm_package }} (want state 'ii ' and version {{ rocm_release }}.x).
+      If /dev/kfd is missing inside the CT, the host-side passthrough
+      (proxmox_guests lxc-gpu-passthrough) has not run or the host needs a
+      reboot; if rocminfo itself is absent, check the installed layout under
+      {{ rocm_home }} — the binary path here was pinned from the live layout
+      probe in #240. A non-'ii' dpkg state means the package unpacked but never
+      configured: run `dpkg --configure -a` and re-apply.
+    quiet: true
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not ansible_check_mode
 
 # --- NFS client support ---
 # Required for Docker NFS volume driver to mount remote shares.
