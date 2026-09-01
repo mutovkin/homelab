@@ -15,18 +15,20 @@ system_ram_gb: 62 # Available to Proxmox (~62GB after UMA)
 
 # ── GPU Sharing (LXC device passthrough) ─────────────────────────────────────
 #
-# Modern approach (Proxmox 9 / kernel 6.17+):
+# Modern approach (Proxmox 9 / kernel 6.14+):
 #   The inbox amdgpu kernel driver handles the GPU. The host only needs
 #   pve-firmware + udev rules (managed by the proxmox_host role).
 #   NO ROCm installation on the Proxmox host.
 #
 #   ROCm userspace is installed inside the LXC container by the docker_host
-#   role during configure-guests.yml (amdgpu-install --no-dkms).
+#   role during configure-guests.yml, from AMD's stable apt repo
+#   (apt install amdrocm<release>-<gfx arch>; legacy amdgpu-install dropped in #240).
 #
 # How it works:
 #   Host: amdgpu driver → /dev/dri + /dev/kfd exist
 #   LXC:  bind-mount /dev/dri + /dev/kfd → ROCm userspace talks to devices
-#   Docker: --device /dev/dri --device /dev/kfd + HSA_OVERRIDE_GFX_VERSION
+#   Docker: --device /dev/dri --device /dev/kfd (+ numeric render/video gids;
+#           no HSA_OVERRIDE_GFX_VERSION — gfx1150 is native since ROCm 7.2)
 #
 # Hardware reference (for diagnostics, not used by Ansible):
 #   GPU:   Radeon 890M — PCI c7:00.0 (1002:150e) — IOMMU group 23

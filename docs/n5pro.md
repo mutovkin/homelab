@@ -7,8 +7,8 @@
 - **Model**: Micro Computer (HK) Tech Limited — N5 PRO ("NAS Series")
 - **SKU**: MGF8NAA
 - **Serial**: MD················47
-- **OS**: Proxmox VE 9.1.6 (pve-manager 9.1.9)
-- **Kernel**: 6.17.13-2-pve
+- **OS**: Proxmox VE 9.2.10 (pve-manager 9.2.10)
+- **Kernel**: 7.0.14-12-pve (observed 2026-08-31)
 
 ## CPU
 
@@ -150,7 +150,8 @@ them there after any hardware re-seat that changes a path or IOMMU group.
 
 ### Architecture
 
-Kernel 6.17+ has the inbox `amdgpu` driver with full Strix Point (gfx1150) support.
+The PVE kernel (6.14+; 7.0.14-12-pve as of 2026-08-31) has the inbox `amdgpu` driver
+with full Strix Point (gfx1150) support.
 The Proxmox host does **not** need ROCm installed — only firmware and udev rules.
 ROCm userspace libraries are installed inside the LXC container only.
 
@@ -169,12 +170,13 @@ ROCm userspace libraries are installed inside the LXC container only.
 │  │  CT 201 (n5pro-docker) — Ubuntu 24.04          │   │
 │  │  Managed by: docker_host role (gpu_sharing)    │   │
 │  │                                                │   │
-│  │  amdgpu-install --usecase=rocm,hip,mllib       │   │
-│  │                 --no-dkms (userspace only)     │   │
+│  │  apt install amdrocm10.0-gfx1150 (userspace)   │   │
+│  │    from stable.repo.amd.com → /opt/rocm/core-  │   │
+│  │    10.0                                        │   │
 │  │                                                │   │
 │  │  Docker containers:                            │   │
 │  │    --device /dev/dri --device /dev/kfd         │   │
-│  │    -e HSA_OVERRIDE_GFX_VERSION=11.5.0          │   │
+│  │    --group-add <render gid> --group-add <video>│   │
 │  └────────────────────────────────────────────────┘   │
 └───────────────────────────────────────────────────────┘
 ```
@@ -185,53 +187,69 @@ ROCm userspace libraries are installed inside the LXC container only.
 | --------------------- | ------------------------------------------------ | -------------------------------------------------------------- |
 | **Proxmox host**      | `pve-firmware` + udev rules                      | `proxmox_host` role (`gpu_sharing.enabled`)                    |
 | **LXC config**        | `/dev/dri` + `/dev/kfd` bind-mount, cgroup allow | `proxmox_guests` role (`gpu_sharing: true` on LXC)             |
-| **Inside LXC**        | `amdgpu-install --usecase=<list> --no-dkms`      | `docker_host` role (`gpu_sharing.enabled` + `rocm_usecases`)   |
+| **Inside LXC**        | `apt install amdrocm10.0-gfx1150` (AMD stable repo) | `docker_host` role (`gpu_sharing.enabled`)                 |
 | **Docker containers** | `--device /dev/dri --device /dev/kfd`            | Per-service compose files                                      |
 
-### ROCm Usecases (Flag-Gated)
+### ROCm Channel and Version Pinning
 
-The `gpu_sharing.rocm_usecases` list in host_vars controls what gets installed:
+ROCm 10.0 is installed from **AMD's stable apt repository**, not the legacy
+`amdgpu-install`/`repo.radeon.com` stream. That stream ended at 7.2.4 and can never
+deliver ROCm ≥ 10. History: CT 201 ran 7.2.2 from the legacy channel until #240
+migrated it one-way.
 
-| Usecase | What it adds                             | When to use                      |
-| ------- | ---------------------------------------- | -------------------------------- |
-| `rocm`  | Base runtime (rocm-smi, rocminfo, VAAPI) | Always — minimum for GPU access  |
-| `hip`   | HIP runtime + compiler                   | AI/ML inference (Ollama, vLLM)   |
-| `mllib` | rocBLAS, MIOpen, etc.                    | Full ML training/inference       |
+The new channel has **no usecases**. Selection is by GPU architecture — one
+metapackage per `gfx` target — so `gpu_sharing` is now just `{enabled: true}` and
+`rocm_usecases` is gone.
 
-Example in `host_vars/n5pro_docker/vars.yml`:
-
-```yaml
-gpu_sharing:
-  enabled: true
-  rocm_usecases: [rocm, hip, mllib]  # full ML stack
-```
-
-### ROCm Version Pinning
-
-ROCm version is controlled by variables in `ansible/roles/docker_host/defaults/main.yml`:
+Pins live in `ansible/roles/docker_host/defaults/main.yml`:
 
 ```yaml
-rocm_version: "7.2.2"           # installer .deb version
-rocm_build: "70202"             # build suffix in .deb filename
-rocm_graphics_version: "7.2.1"  # AMD quirk: graphics repo != installer version
+rocm_release: "10.0"
+rocm_gfx_arch: "gfx1150"   # Radeon 890M (Strix Point) — native since ROCm 7.2
+rocm_package: "amdrocm{{ rocm_release }}-{{ rocm_gfx_arch }}"
+rocm_home: "/opt/rocm/core-{{ rocm_release }}"
+rocm_apt_key_url:  "https://stable.repo.amd.com/rocm/gpg/packages.gpg"
+rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
 ```
 
-The AMD quick-start guide requires a `sed` fix because the 7.2.2 installer creates a
-`graphics/7.2.2` repo entry, but packages are published under `graphics/7.2.1`.
-This is handled automatically by the `docker_host` role.
+**The major.minor lives in the package NAME.** Moving to 10.1 means editing
+`rocm_release` — a deliberate change that also renames the installed package, so the
+old package name must be removed in the same change or both releases co-exist.
+Point releases *within* 10.0.x (e.g. 10.0.0-4 → 10.0.1-x) arrive through `common`'s
+deliberate `apt upgrade`; the AMD repo's `Origin: AMD ROCm` is not in
+unattended-upgrades' `Origins-Pattern`, so nothing bumps ROCm behind your back.
 
-Bump all three variables when upgrading to a new ROCm release.
-
-### HSA_OVERRIDE_GFX_VERSION
-
-The Radeon 890M is gfx1150 (Strix Point). ROCm may not recognize it without a hint:
+**Layout.** ROCm 10 installs to `/opt/rocm/core-10.0/` — `/opt/rocm` is a real
+directory now, not the update-alternatives symlink the 7.x packages used, and the apt
+packages create **no** `/opt/rocm/bin` compatibility link. So `/etc/profile.d/rocm.sh`
+exports `ROCM_PATH`/`HIP_PATH`/`PATH`/`LD_LIBRARY_PATH` against the versioned root, and
+anything invoking a ROCm binary non-interactively must use the full path:
 
 ```bash
-export HSA_OVERRIDE_GFX_VERSION=11.5.0  # or 11.5.1 — test both
+/opt/rocm/core-10.0/bin/rocminfo | grep gfx      # -> gfx1150
+dpkg-query -W -f='${Version}' amdrocm10.0-gfx1150 # -> 10.0.0-4
 ```
 
-This is set system-wide via `/etc/profile.d/rocm.sh` inside the LXC (managed by Ansible).
-For Docker containers, pass it as `-e HSA_OVERRIDE_GFX_VERSION=11.5.0`.
+The `docker_host` role asserts both of those at the end of every run, so a deploy that
+leaves ROCm undelivered fails loudly instead of printing a hopeful debug message.
+
+**No `HSA_OVERRIDE_GFX_VERSION`.** gfx1150 has been natively supported since ROCm 7.2;
+the override was vestigial and masked what the runtime actually detects. Do not
+reintroduce it in compose files.
+
+### GPU in Docker containers
+
+```bash
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --security-opt apparmor=unconfined \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  --group-add "$(getent group video  | cut -d: -f3)" \
+  rocm/dev-ubuntu-24.04:10.0.0-full rocminfo | grep gfx
+```
+
+`--group-add render` **by name fails** — the ROCm images have no `render` group in
+`/etc/group`. Use the numeric gid from the CT (render 993, video 44). The
+`apparmor=unconfined` is the usual Docker-in-LXC requirement (see CLAUDE.md).
 
 ### LXC Config Entries (Managed by Ansible)
 
