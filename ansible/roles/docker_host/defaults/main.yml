@@ -15,18 +15,41 @@ docker_default_address_pools:
     size: 24
 
 # GPU sharing / ROCm configuration
-# Override gpu_sharing in host_vars for GPU-enabled Docker hosts
+# Override gpu_sharing in host_vars for GPU-enabled Docker hosts.
+# `rocm_usecases` is gone: it was an `amdgpu-install --usecase` argument and the
+# stable-repo channel has no usecases — the per-GPU-architecture package is the
+# whole selection. Inventory REPLACES role defaults for dicts, so a host_vars
+# gpu_sharing must be the complete authoritative value.
 gpu_sharing:
   enabled: false
-  rocm_usecases:
-    - rocm
 
-# ROCm version pinning — bump these when upgrading ROCm
-rocm_version: "7.2.2"
-rocm_build: "70202"
-rocm_graphics_version: "7.2.1"  # AMD quirk: graphics repo version differs from installer
-rocm_ubuntu_codename: "noble"
-hsa_gfx_version: "11.5.0"  # HSA_OVERRIDE_GFX_VERSION for Radeon 890M (gfx1150)
+# --- ROCm (AMD stable-repo channel, #240) ---
+# ROCm >= 10 ships via stable.repo.amd.com with per-GPU-architecture packages;
+# the legacy amdgpu-install/repo.radeon.com stream ended at 7.2.4 and can never
+# deliver it. The major.minor lives in the PACKAGE NAME, so moving to 10.1 is a
+# deliberate edit here. Nothing retires the PREVIOUS release on such a bump — the
+# old package stays installed and its ~5 GB /opt/rocm/core-<old> tree stays on
+# disk, with every assert still green because they follow the new pins. That
+# reconcile is #247, deliberately deferred: with only one release in existence a
+# destructive purge loop cannot be exercised against the state it targets.
+# Point releases WITHIN 10.0.x do not arrive on their own: `state:
+# present` on an installed package is a no-op, and the AMD repo's
+# `Origin: AMD ROCm` is absent from unattended-upgrades' Origins-Pattern. They
+# land only under common's opt-in maintenance flag,
+# `-e apt_apply_pending_upgrades=true`. That is deliberate — nothing bumps ROCm
+# behind your back.
+rocm_release: "10.0"
+rocm_gfx_arch: "gfx1150"  # Radeon 890M (Strix Point) — native since ROCm 7.2
+rocm_package: "amdrocm{{ rocm_release }}-{{ rocm_gfx_arch }}"
+rocm_home: "/opt/rocm/core-{{ rocm_release }}"
+rocm_apt_key_url: "https://stable.repo.amd.com/rocm/gpg/packages.gpg"
+rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
+# Basename glob (fnmatch, not regex) for legacy /opt/rocm-<ver> install trees the
+# migration cleans up. Scoped to the legacy series on purpose: repo.radeon.com
+# topped out at 7.2.4, and the stable channel installs to /opt/rocm/core-<rel>,
+# so this can never name anything this role installs. Widening it to
+# `rocm-[0-9]*` would make a hypothetical future /opt/rocm-11.0 a delete target.
+rocm_legacy_tree_glob: "rocm-[0-7].*"
 
 # NFS client — set nfs_enabled: true in host_vars to install nfs-common
 nfs_enabled: false

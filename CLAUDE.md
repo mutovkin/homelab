@@ -271,7 +271,25 @@ Hard-won lessons — check here before debugging from scratch.
   real apply is invisible to `--check`, so its first execution is its first test; verify
   those against the binary on a host, never against a dry run (#134 shipped
   `vector validate --config`, which the CLI rejects — the path is positional — and no
-  dry-run could have caught it).
+  dry-run could have caught it). (3) **The falsification run must actually REACH the
+  guard.** #240's planned proof (`-e rocm_gfx_arch=gfx9999`) went red in the apt install
+  several tasks earlier — `rocm_package` derives from the same var — so the assert never
+  executed and the red recap proved nothing. Corrupt only the input the guard reads and
+  pin every upstream consumer back (`-e rocm_package=<real>`), once per assert clause,
+  then read the guard's own `fail_msg`, not the recap; a correct falsification run also
+  reports `changed=0`. **This bites hardest on a guard added IN RESPONSE TO A REVIEW** —
+  it arrives late, looks defensive, and "belt-and-braces" reads as obviously safe. #240's
+  round-2 review found that round-1's `item.path != rocm_home` on a recursive delete could
+  never fire (`find … recurse: false` yields direct children of `/opt`; `rocm_home` is two
+  levels down) AND passed the very case its comment claimed to cover (a widened glob returns
+  `/opt/rocm`, the live install root). A guard justified by a hypothetical must be TESTED
+  against that hypothetical, and the test should also assert the OLD clause was wrong — a
+  test that would have failed before the fix. Sibling:
+  **`--check` cannot install from a repo it did not write**
+  — add-repo-then-install dies with "No package matching …" on a host that lacks the repo,
+  so gate the install `not (ansible_check_mode and <repo_file>.changed)`, narrow enough
+  that a converged host still dry-runs it for real. See
+  [docs/solutions/conventions/a-falsification-run-must-actually-reach-the-guard.md](docs/solutions/conventions/a-falsification-run-must-actually-reach-the-guard.md).
 - **Arm a guard from durable state, not a one-shot `changed`.** #127's restore gate keyed
   its marker task on the provisioning result's `.changed` — a signal any run that dies
   before the marker consumes for good; later runs see `changed=false` on an existing CT and
@@ -280,7 +298,20 @@ Hard-won lessons — check here before debugging from scratch.
   write-ahead intent file on the host (`fresh_allocation_intent_dir`), written before the
   create, removed only after the artefacts land. Don't probe the volume instead — empty
   `/data` + no manifest can't tell an un-armed allocation from an operator-ACKNOWLEDGED one,
-  so probing re-arms what the operator just cleared, in a loop (#148).
+  so probing re-arms what the operator just cleared, in a loop (#148). Cheaper cousin
+  when the block is probe-gated on durable state: **order the steps so the one that
+  CONSUMES the probe's signal runs last.** #240's migration probed `dpkg-query
+  amdgpu-install` and ran `uninstall → purge amdgpu-install → autoremove`; the purge IS
+  the signal, so a dpkg lock on the autoremove would have left the gate spent and the
+  legacy packages orphaned forever, silently. Reordering to put the purge last closes
+  the window with no extra state. Related shape: an existence gate over a DERIVED file
+  (`gpg --dearmor … creates:`) trusts a stale copy forever — when AMD rotates the key,
+  `get_url` refreshes the `.asc` and apt keeps verifying against the old `.gpg`, an
+  unhealable `NO_PUBKEY`. The fix was to delete the derivative (`Signed-By:` takes an
+  armored key, as the Docker repo in the same role already does), not to write a better
+  gate; a registered-but-never-read result var is the tell. And **`dpkg-query -W` exits 0
+  with a populated `${Version}` for `iU`/`iF`/`rc` packages, not just `ii`** (measured on
+  a live `rc` package), so "installed" must be asserted from `${db:Status-Abbrev}`.
 - **Absence of incidental traffic is not evidence of anything — measure the empty-window
   fraction, then make the signal deliberate.** Host logs here arrive in **bursts**:
   measured 2026-08-20, 66% of eq12_docker's and 40% of eq12's 10-minute windows were
