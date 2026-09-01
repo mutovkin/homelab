@@ -68,13 +68,21 @@ services:
     environment:
       MACHINE_LEARNING_WORKERS: 1
       MACHINE_LEARNING_WORKER_TIMEOUT: 120
-      # Known -rocm quirk: a loaded model holds the 890M out of its deepest
-      # idle state; unload after 5 idle minutes instead of holding VRAM forever.
+      # Immich's own default (300), made explicit — NOT a mitigation. Verified
+      # 2026-08-31 against upstream `machine-learning/immich_ml/config.py`
+      # (`model_ttl: int = 300`) and the env-var docs table. The -rocm quirk it
+      # bounds: a loaded model holds the 890M out of its deepest idle state, so
+      # idle draw stays elevated for these 5 minutes after each inference. Pinned
+      # so an upstream default change cannot silently widen that window; lower it
+      # (never <= 0, which disables unloading) if idle power is measured to matter.
       MACHINE_LEARNING_MODEL_TTL: 300
     volumes:
       - immich-model-cache:/cache
     devices:
-      - /dev/dri:/dev/dri  # VAAPI
+      # ROCm needs BOTH: /dev/kfd is the compute driver, /dev/dri carries the
+      # render node it dispatches through. This container decodes no video, so
+      # /dev/dri is not here for VAAPI — dropping it as "unused" breaks ROCm (#244).
+      - /dev/dri:/dev/dri  # ROCm render node (renderD*), paired with kfd
       - /dev/kfd:/dev/kfd  # ROCm compute for the -rocm ML image (#244)
     networks:
       - immich_network
