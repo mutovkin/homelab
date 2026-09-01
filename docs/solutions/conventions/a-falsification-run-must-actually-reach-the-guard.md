@@ -94,6 +94,81 @@ Practical checklist before believing a falsification run:
 4. For a multi-condition `assert`, do this once **per condition**. One red run proves
    one clause.
 
+## Corollary: when a clause cannot be reached live, falsify it offline against measured strings
+
+Sometimes no `-e` combination can reach a clause, because the variable feeds an
+upstream task that must succeed for the play to get there. #240's
+`startswith('ii ')` clause is one: `rocm_package` feeds both the apt install and
+the dpkg query, so the only way to make the query report a non-`ii` state is to
+point both at a package that is not installed — which the install task then
+installs.
+
+The answer is not to skip the test. Measure the real strings read-only, then
+evaluate **the exact expression** against them in a throwaway playbook, negatives
+included:
+
+```
+ii |10.0.0-4              state ok  version ok    <- the real package
+rc |2.15.0-1.1ubuntu2     state NO  version NO    <- measured on a real `rc` package
+iU |10.0.0-4              state NO  version ok    <- unpacked, never configured
+""  (empty stdout)        state NO  version NO    <- must not raise
+```
+
+That last row earned its place: `''.split('|')[1]` raises `IndexError`, which
+would have replaced the assert's curated `fail_msg` with a Jinja traceback. Model
+the empty and missing cases explicitly — and note that Jinja's `default()`
+substitutes for **Undefined only**, never for `None`.
+
+## `dpkg-query -W` exits 0 for a package in ANY state
+
+`dpkg-query -W -f='${Version}' <pkg>` returns rc 0 and prints a populated version
+for `iU` (unpacked, never configured), `iF` (half-configured) and `rc` (removed,
+config files remain) — not just `ii`. Measured on CT 201 against a package the
+migration itself left behind:
+
+```bash
+$ dpkg -l fontconfig | tail -1
+rc  fontconfig  2.15.0-1.1ubuntu2 ...
+$ dpkg-query -W -f='${Version}' fontconfig     # -> 2.15.0-1.1ubuntu2, rc=0
+```
+
+So "the package is installed" cannot be asserted from a version string. Ask for
+the state too — `-f='${db:Status-Abbrev}|${Version}'` — and require `ii `.
+Otherwise a package that unpacked and failed its `postinst` satisfies the assert
+with its files sitting unconfigured on disk, and if the binary landed, a
+`rocminfo`-style check passes alongside it.
+
+## A derived file is state that can go stale; prefer no derived file
+
+The draft downloaded AMD's armored key to `amdrocm.asc` and `gpg --dearmor`'d it
+to `amdrocm.gpg` with a `creates:` gate. On key rotation `get_url` refreshes the
+`.asc`, the dearmor is skipped because the `.gpg` exists, and apt keeps verifying
+against the stale key — an unhealable `NO_PUBKEY` that only a manual `rm` fixes,
+which the repo's "no ad-hoc SSH" rule forbids. This is the ISO rule
+(`docs/solutions/conventions/ansible-change-loop-pitfalls.md`) wearing a
+different hat: an existence gate over a *derived* artefact trusts a stale copy
+forever.
+
+The fix was not a better gate but **removing the derived file**: apt's
+`Signed-By:` accepts an armored key directly (the same role already relies on
+this for Docker's `docker.asc`), so the file `get_url` rewrites *is* the file apt
+reads and rotation reconciles itself. When a reconcile has a stale-derivative
+problem, ask first whether the derivative needs to exist. A registered-but-never-
+read result variable is the tell that the wiring was written and then not used.
+
+## In a one-shot block, the step that clears the gate's signal must be LAST
+
+The migration block probed `dpkg-query amdgpu-install` and, inside the gate, ran
+`uninstall → purge amdgpu-install → autoremove`. The **purge is the probe's
+signal.** A dpkg lock or a full disk on the autoremove — both plausible right
+after purging a multi-GB stack — ends the play red; the re-run then finds
+`amdgpu-install` gone, skips the whole block, and orphans the old packages
+forever, silently. Reordering to `uninstall → autoremove → purge` closes the
+window outright: any death before the purge leaves the gate armed. Cheaper and
+less state than the write-ahead intent file #127 needed, and it generalises —
+**in any probe-gated one-shot block, order the steps so the one that consumes the
+probe's signal runs last.**
+
 ## Two supporting traps from the same change
 
 **`--check` cannot install from a repo it did not write.** Adding a deb822 `.sources`

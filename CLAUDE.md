@@ -290,7 +290,20 @@ Hard-won lessons — check here before debugging from scratch.
   write-ahead intent file on the host (`fresh_allocation_intent_dir`), written before the
   create, removed only after the artefacts land. Don't probe the volume instead — empty
   `/data` + no manifest can't tell an un-armed allocation from an operator-ACKNOWLEDGED one,
-  so probing re-arms what the operator just cleared, in a loop (#148).
+  so probing re-arms what the operator just cleared, in a loop (#148). Cheaper cousin
+  when the block is probe-gated on durable state: **order the steps so the one that
+  CONSUMES the probe's signal runs last.** #240's migration probed `dpkg-query
+  amdgpu-install` and ran `uninstall → purge amdgpu-install → autoremove`; the purge IS
+  the signal, so a dpkg lock on the autoremove would have left the gate spent and the
+  legacy packages orphaned forever, silently. Reordering to put the purge last closes
+  the window with no extra state. Related shape: an existence gate over a DERIVED file
+  (`gpg --dearmor … creates:`) trusts a stale copy forever — when AMD rotates the key,
+  `get_url` refreshes the `.asc` and apt keeps verifying against the old `.gpg`, an
+  unhealable `NO_PUBKEY`. The fix was to delete the derivative (`Signed-By:` takes an
+  armored key, as the Docker repo in the same role already does), not to write a better
+  gate; a registered-but-never-read result var is the tell. And **`dpkg-query -W` exits 0
+  with a populated `${Version}` for `iU`/`iF`/`rc` packages, not just `ii`** (measured on
+  a live `rc` package), so "installed" must be asserted from `${db:Status-Abbrev}`.
 - **Absence of incidental traffic is not evidence of anything — measure the empty-window
   fraction, then make the signal deliberate.** Host logs here arrive in **bursts**:
   measured 2026-08-20, 66% of eq12_docker's and 40% of eq12's 10-minute windows were
