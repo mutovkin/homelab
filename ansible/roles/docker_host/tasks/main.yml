@@ -174,7 +174,7 @@
   register: legacy_amdgpu_uninstall_bin
   when: gpu_sharing.enabled | default(false)
 
-- name: Migrate off the legacy amdgpu-install ROCm stack (one-way, #240)
+- name: "Migrate off the legacy amdgpu-install ROCm stack (one-way, #240)"
   when:
     - gpu_sharing.enabled | default(false)
     - legacy_amdgpu_install.rc | default(1) == 0
@@ -316,7 +316,7 @@
 # installs the newest 10.0.x the repo offers and leaves it alone afterwards.
 # libatomic1/libquadmath0 are AMD-documented prerequisites that the ROCm
 # packages do not declare in Depends.
-- name: Install ROCm {{ rocm_release }} for {{ rocm_gfx_arch }}
+- name: Install ROCm userspace package {{ rocm_package }}
   ansible.builtin.apt:
     name:
       - libatomic1
@@ -372,7 +372,7 @@
     - gpu_sharing.enabled | default(false)
     - not ansible_check_mode
 
-- name: Assert ROCm {{ rocm_release }} is delivered and sees {{ rocm_gfx_arch }}
+- name: Assert ROCm is delivered and reports {{ rocm_gfx_arch }}
   ansible.builtin.assert:
     that:
       - rocm_gfx_arch in rocm_verify.stdout
