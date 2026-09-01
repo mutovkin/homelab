@@ -351,17 +351,45 @@
     mode: "0644"
   when: gpu_sharing.enabled | default(false)
 
-- name: Verify ROCm installation
-  ansible.builtin.command: rocminfo
+# The old check was `failed_when: false` + a debug message — a guard that had
+# never been seen to fail, and never could. This one gates the run. It is
+# skipped under --check because its inputs (the installed binary) only exist
+# after a real apply; its first execution is therefore its first test, which is
+# why #240 exercised it red against a bogus rocm_gfx_arch before trusting it.
+- name: Verify ROCm delivers the GPU
+  ansible.builtin.command: "{{ rocm_home }}/bin/rocminfo"
   register: rocm_verify
   changed_when: false
-  failed_when: false
-  when: gpu_sharing.enabled | default(false)
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not ansible_check_mode
 
-- name: Show ROCm verification status
-  ansible.builtin.debug:
-    msg: "{{ 'ROCm is working — agents detected' if rocm_verify.rc == 0 else 'ROCm verification failed — /dev/kfd may not be available yet (reboot host?)' }}"
-  when: gpu_sharing.enabled | default(false)
+- name: Read the delivered ROCm package version
+  ansible.builtin.command: dpkg-query -W -f='${Version}' {{ rocm_package }}
+  register: rocm_delivered
+  changed_when: false
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not ansible_check_mode
+
+- name: Assert ROCm {{ rocm_release }} is delivered and sees {{ rocm_gfx_arch }}
+  ansible.builtin.assert:
+    that:
+      - rocm_gfx_arch in rocm_verify.stdout
+      - rocm_delivered.stdout.startswith(rocm_release ~ '.')
+    fail_msg: >-
+      ROCm on this container is not delivering: rocminfo did not report
+      {{ rocm_gfx_arch }}, or {{ rocm_package }} is not at {{ rocm_release }}.x
+      (dpkg says '{{ rocm_delivered.stdout | default('') }}'). If /dev/kfd is
+      missing inside the CT, the host-side passthrough
+      (proxmox_guests lxc-gpu-passthrough) has not run or the host needs a
+      reboot; if rocminfo itself is absent, check the installed layout under
+      {{ rocm_home }} — the binary path here was pinned from the live layout
+      probe in #240.
+    quiet: true
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not ansible_check_mode
 
 # --- NFS client support ---
 # Required for Docker NFS volume driver to mount remote shares.
