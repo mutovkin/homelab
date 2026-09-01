@@ -213,8 +213,12 @@ rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
 ```
 
 **The major.minor lives in the package NAME.** Moving to 10.1 means editing
-`rocm_release` — a deliberate change that also renames the installed package, so the
-old package name must be removed in the same change or both releases co-exist.
+`rocm_release` — a deliberate change that also renames the installed package. Nothing
+yet retires the previous release: the old package stays installed and its ~5 GB
+`/opt/rocm/core-<old>` tree stays on disk, with every assert still green because they
+follow the new pins. That reconcile is [#247](https://github.com/mutovkin/homelab/issues/247),
+to land with the first real bump; until then, retire the old release by hand in the
+same change (via the role, not ad-hoc SSH).
 Point releases *within* 10.0.x (e.g. 10.0.0-4 → 10.0.1-x) do **not** arrive on their
 own — `apt state: present` on an installed package is a no-op and the AMD repo's
 `Origin: AMD ROCm` is absent from unattended-upgrades' `Origins-Pattern`. They land
