@@ -28,9 +28,12 @@ gpu_sharing:
 # the legacy amdgpu-install/repo.radeon.com stream ended at 7.2.4 and can never
 # deliver it. The major.minor lives in the PACKAGE NAME, so moving to 10.1 is a
 # deliberate edit here (and remember to remove the old package name in the same
-# change). Point releases within 10.0.x float on apt upgrade — the AMD repo's
-# `Origin: AMD ROCm` is not in unattended-upgrades' Origins-Pattern, so bumps
-# only arrive via a run of this role.
+# change). Point releases WITHIN 10.0.x do not arrive on their own: `state:
+# present` on an installed package is a no-op, and the AMD repo's
+# `Origin: AMD ROCm` is absent from unattended-upgrades' Origins-Pattern. They
+# land only under common's opt-in maintenance flag,
+# `-e apt_apply_pending_upgrades=true`. That is deliberate — nothing bumps ROCm
+# behind your back.
 rocm_release: "10.0"
 rocm_gfx_arch: "gfx1150"  # Radeon 890M (Strix Point) — native since ROCm 7.2
 rocm_package: "amdrocm{{ rocm_release }}-{{ rocm_gfx_arch }}"

@@ -234,6 +234,10 @@
   when:
     - gpu_sharing.enabled | default(false)
     - legacy_rocm_alternative.rc | default(1) == 0
+    # Only a LEGACY value: 7.x registered "Value: /opt/rocm-<ver>". Matching any
+    # `rocm` alternative would fight a future ROCm that registers one at
+    # /opt/rocm/core-<rel> and make this task changed on every run forever.
+    - "'Value: /opt/rocm-' in legacy_rocm_alternative.stdout | default('')"
 
 - name: Probe /opt/rocm for a leftover legacy symlink
   ansible.builtin.stat:
@@ -250,6 +254,11 @@
     - gpu_sharing.enabled | default(false)
     - legacy_rocm_path.stat.exists | default(false)
     - legacy_rocm_path.stat.islnk | default(false)
+    # …and only a LEGACY target: /etc/alternatives/rocm (7.x's alternatives
+    # link) or /opt/rocm-<ver>. Deleting any symlink named /opt/rocm would
+    # delete a future ROCm's own compatibility link on every run.
+    - >-
+      legacy_rocm_path.stat.lnk_target | default('') is search('^/etc/alternatives/rocm$|^/opt/rocm-[0-9]')
 
 # Versioned legacy trees (/opt/rocm-7.2.2). The new layout is /opt/rocm/core-*,
 # which this pattern cannot match.

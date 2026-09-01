@@ -215,9 +215,16 @@ rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
 **The major.minor lives in the package NAME.** Moving to 10.1 means editing
 `rocm_release` — a deliberate change that also renames the installed package, so the
 old package name must be removed in the same change or both releases co-exist.
-Point releases *within* 10.0.x (e.g. 10.0.0-4 → 10.0.1-x) arrive through `common`'s
-deliberate `apt upgrade`; the AMD repo's `Origin: AMD ROCm` is not in
-unattended-upgrades' `Origins-Pattern`, so nothing bumps ROCm behind your back.
+Point releases *within* 10.0.x (e.g. 10.0.0-4 → 10.0.1-x) do **not** arrive on their
+own — `apt state: present` on an installed package is a no-op and the AMD repo's
+`Origin: AMD ROCm` is absent from unattended-upgrades' `Origins-Pattern`. They land
+only under `common`'s opt-in maintenance flag:
+
+```bash
+task infra:guests -- --limit n5pro_docker -e apt_apply_pending_upgrades=true
+```
+
+So nothing bumps ROCm behind your back.
 
 **Layout.** ROCm 10 installs to `/opt/rocm/core-10.0/` — `/opt/rocm` is a real
 directory now, not the update-alternatives symlink the 7.x packages used, and the apt
