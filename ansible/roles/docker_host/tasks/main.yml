@@ -313,9 +313,17 @@
   when: gpu_sharing.enabled | default(false)
 
 # apt IS the version-aware reconcile: `state: present` on a versionless name
-# installs the newest 10.0.x the repo offers and leaves it alone afterwards.
-# libatomic1/libquadmath0 are AMD-documented prerequisites that the ROCm
-# packages do not declare in Depends.
+# installs the newest 10.0.x the repo offers, and later point releases arrive
+# through common's deliberate `apt upgrade`. libatomic1/libquadmath0 are
+# AMD-documented prerequisites that the ROCm packages do not declare in Depends.
+#
+# The check-mode carve-out is not a cheat: under --check the .sources file above
+# is not written, so on a host that does not yet have the repo apt genuinely
+# cannot resolve the package and the task dies with "No package matching ...".
+# Skipping exactly that case keeps `--check --diff` usable as the documented
+# pre-apply dry run. On any host where the repo file is already correct
+# (rocm_repo_file unchanged) the task runs under --check as normal, so this
+# never hides real drift.
 - name: Install ROCm userspace package {{ rocm_package }}
   ansible.builtin.apt:
     name:
@@ -324,7 +332,9 @@
       - "{{ rocm_package }}"
     state: present
     update_cache: true
-  when: gpu_sharing.enabled | default(false)
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not (ansible_check_mode and rocm_repo_file.changed)
 
 - name: Ensure root is in render and video groups
   ansible.builtin.user:
