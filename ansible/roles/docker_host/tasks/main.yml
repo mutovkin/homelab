@@ -249,7 +249,10 @@
   ansible.builtin.command: update-alternatives --query rocm
   register: legacy_rocm_alternative
   changed_when: false
-  failed_when: false
+  # Measured on CT 201: rc 0 = link group exists, rc 2 = "no alternatives for
+  # rocm". Anything else is a real error and should fail rather than read as
+  # "nothing to clean up" — same bounded shape as the amdgpu-install probe.
+  failed_when: legacy_rocm_alternative.rc not in [0, 2]
   check_mode: false
   when: gpu_sharing.enabled | default(false)
 
