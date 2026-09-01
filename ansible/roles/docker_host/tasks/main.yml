@@ -313,8 +313,15 @@
   when:
     - gpu_sharing.enabled | default(false)
     # Belt-and-braces with the glob: this is a recursive delete under /opt, so
-    # never let it name the live install root no matter how the glob is edited.
-    - item.path != rocm_home
+    # never let it name the live install root OR ANY ANCESTOR OF IT, no matter
+    # how the glob is edited. `item.path != rocm_home` would be vacuous here —
+    # find is non-recursive over /opt, so item.path is always a direct child and
+    # can never equal /opt/rocm/core-10.0. The real hazard is /opt/rocm itself,
+    # which a widened glob (`rocm*`) WOULD return and which that comparison
+    # would happily pass. Prefix test, on paths normalised with a trailing /:
+    #   /opt/rocm      -> '/opt/rocm/core-10.0/'.startswith('/opt/rocm/')      -> skip
+    #   /opt/rocm-7.2.2 -> '/opt/rocm/core-10.0/'.startswith('/opt/rocm-7.2.2/') -> delete
+    - not (rocm_home ~ '/').startswith(item.path ~ '/')
 
 - name: Ensure apt keyring directory exists
   ansible.builtin.file:
@@ -391,7 +398,7 @@
     update_cache: true
   when:
     - gpu_sharing.enabled | default(false)
-    - not (ansible_check_mode and rocm_repo_file.changed)
+    - not (ansible_check_mode and (rocm_repo_file.changed or rocm_apt_key.changed))
 
 - name: Ensure root is in render and video groups
   ansible.builtin.user:

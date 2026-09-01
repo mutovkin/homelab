@@ -237,9 +237,14 @@ exports `ROCM_PATH`/`HIP_PATH`/`PATH`/`LD_LIBRARY_PATH` against the versioned ro
 anything invoking a ROCm binary non-interactively must use the full path:
 
 ```bash
-/opt/rocm/core-10.0/bin/rocminfo | grep gfx      # -> gfx1150
-dpkg-query -W -f='${Version}' amdrocm10.0-gfx1150 # -> 10.0.0-4
+/opt/rocm/core-10.0/bin/rocminfo | grep gfx                             # -> gfx1150
+dpkg-query -W -f='${db:Status-Abbrev}|${Version}' amdrocm10.0-gfx1150   # -> ii |10.0.0-4
 ```
+
+Ask dpkg for the **state**, not just the version: `dpkg-query -W` exits 0 and prints a
+populated `${Version}` for a package in *any* state, including `iU` (unpacked, never
+configured) and `rc` (removed, config files remain). A version alone does not mean
+installed.
 
 The `docker_host` role asserts both of those at the end of every run, so a deploy that
 leaves ROCm undelivered fails loudly instead of printing a hopeful debug message.
