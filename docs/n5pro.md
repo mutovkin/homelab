@@ -213,12 +213,22 @@ rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
 ```
 
 **The major.minor lives in the package NAME.** Moving to 10.1 means editing
-`rocm_release` — a deliberate change that also renames the installed package. Nothing
-yet retires the previous release: the old package stays installed and its ~5 GB
-`/opt/rocm/core-<old>` tree stays on disk, with every assert still green because they
-follow the new pins. That reconcile is [#247](https://github.com/mutovkin/homelab/issues/247),
-to land with the first real bump; until then, retire the old release by hand in the
-same change (via the role, not ad-hoc SSH).
+`rocm_release` — a deliberate change that also renames the installed package. The role
+reconciles the rest ([#247](https://github.com/mutovkin/homelab/issues/247)): it installs
+the newly pinned package FIRST, then purges every installed `amdrocm*` package outside
+the pinned release/architecture (a closure guard refuses to purge anything the pinned
+package depends on, so mismatched pins fail loudly instead of taking the metapackage
+with them), then removes any `/opt/rocm/core-*` tree that is not `rocm_home` and that no
+package owns (a tree still owned by packages fails the run, naming the owners — a tree
+is never deleted out from under dpkg). Both halves read durable state — what dpkg has
+installed and what is on disk versus what is pinned — so they are inert on a converged
+host and self-arming on the run after an interrupted bump. Verify after a bump:
+
+```bash
+dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'amdrocm*' | grep -v '10.0'   # -> empty after a bump to 10.0
+ls -d /opt/rocm/core-*   # -> exactly /opt/rocm/core-10.0
+```
+
 Point releases *within* 10.0.x (e.g. 10.0.0-4 → 10.0.1-x) do **not** arrive on their
 own — `apt state: present` on an installed package is a no-op and the AMD repo's
 `Origin: AMD ROCm` is absent from unattended-upgrades' `Origins-Pattern`. They land
