@@ -3,11 +3,13 @@
 Self-hosted photo and video management. The stack is **latent**: the role is complete
 and `task compose:validate` parses it, but no host's `services:` list names it, so
 nothing deploys it yet (#91). The only inventory that mentions immich at all is
-`ansible/inventory/host_vars/n5pro_docker/vars.yml` — as a commented-out line (`:44`)
-inside a whole alternate `services:` block, and as its pinned subnet (`:70`). To enable
-it, add `- immich` to that host's **active** `services:` list (do not uncomment the
-block — it would also enable postgresql, frigate and nextcloud), then
-`task deploy:service -- --tags immich`.
+`ansible/inventory/host_vars/n5pro_docker/vars.yml` — as a commented-out line inside a
+whole alternate `services:` block, and as its pinned subnet in `docker_networks`. To
+enable it, add `- immich` to that host's **active** `services:` list (do not uncomment
+the block — it would also enable postgresql, frigate and nextcloud), then
+`task deploy:service -- --tags immich`. No vault file defines `vault_immich_db_password`
+yet either, and `templates/env.j2` gives it no default — add it before the first deploy
+or the template fails.
 
 ## Services
 

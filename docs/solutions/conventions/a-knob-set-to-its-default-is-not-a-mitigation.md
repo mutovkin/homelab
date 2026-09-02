@@ -61,7 +61,7 @@ research report paired the quirk with "unload after 5 idle minutes", and the pla
 copied the pairing into a comment without asking what the value would be WITHOUT the
 line.
 
-The same review found two siblings in the same file, same shape — a comment that
+The same review found two siblings in the same change, same shape — a comment that
 assigns the wrong *reason* to a correct line:
 
 - `/dev/dri:/dev/dri  # VAAPI` on the ML container. It decodes no video; dri is the
