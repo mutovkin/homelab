@@ -382,9 +382,10 @@ Hard-won lessons — check here before debugging from scratch.
   archive proves nothing about the dump inside. See
   [docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md](docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md).
 
-- **A knob set to its upstream default is not a mitigation.** #248 commented
-  `MACHINE_LEARNING_MODEL_TTL: 300` as "unload after 5 idle minutes instead of holding
-  VRAM forever" — 300 IS Immich's default, and the 5-minute window was the quirk itself.
+- **A knob set to its upstream default is not a mitigation.** #248 nearly shipped
+  `MACHINE_LEARNING_MODEL_TTL: 300` commented as "unload after 5 idle minutes instead of
+  holding VRAM forever" (caught in review, so master never carried it) — 300 IS Immich's
+  default, and the 5-minute window was the quirk itself.
   Look up the default, state the delta vs. not setting the line, cite the check. A comment
   that names the wrong REASON for a line (ML `/dev/dri  # VAAPI`) is the licence a future
   reader uses to delete it. See

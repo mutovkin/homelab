@@ -1,9 +1,13 @@
 # Immich
 
 Self-hosted photo and video management. The stack is **latent**: the role is complete
-and `task compose:validate` parses it, but `immich` is commented out of every host's
-`services:` list (`ansible/inventory/host_vars/n5pro_docker/vars.yml`), so no host
-deploys it yet (#91). Enable it there, then `task deploy:service -- --tags immich`.
+and `task compose:validate` parses it, but no host's `services:` list names it, so
+nothing deploys it yet (#91). The only inventory that mentions immich at all is
+`ansible/inventory/host_vars/n5pro_docker/vars.yml` — as a commented-out line (`:44`)
+inside a whole alternate `services:` block, and as its pinned subnet (`:70`). To enable
+it, add `- immich` to that host's **active** `services:` list (do not uncomment the
+block — it would also enable postgresql, frigate and nextcloud), then
+`task deploy:service -- --tags immich`.
 
 ## Services
 
@@ -22,14 +26,16 @@ publishes a port; the other three are reachable on that network only.
 
 ## Database — its own PostgreSQL, not the shared one
 
-Immich does **not** use the shared `postgresql` role's server on this host (#91). It
-runs the `immich-postgres` sidecar because:
+Immich does **not** use the shared `postgresql` role's server (#91) — which does not even
+run on immich's own host: `postgresql` is deployed only on eq12_docker. It runs the
+`immich-postgres` sidecar because:
 
 - Immich's supported matrix is PostgreSQL 14–17 **with VectorChord**; the shared cluster
   is vanilla `postgres:18` with no vector extension and no `immich` database in its init
   script — pointing at it would produce a server that cannot finish startup.
-- Adding an extension + `shared_preload_libraries` to the cluster that backs joplin and
-  nextcloud would make every other service inherit Immich's upgrade constraints.
+- Adding an extension + `shared_preload_libraries` to the cluster that backs joplin (and
+  nextcloud, when it is enabled) would make every other service inherit Immich's upgrade
+  constraints.
 - The stack deliberately does not attach to the shared external `postgres_network`, so a
   compromised photo service cannot reach the shared cluster at all.
 

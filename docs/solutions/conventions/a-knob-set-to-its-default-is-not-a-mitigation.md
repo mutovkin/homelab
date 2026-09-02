@@ -67,7 +67,11 @@ assigns the wrong *reason* to a correct line:
 - `/dev/dri:/dev/dri  # VAAPI` on the ML container. It decodes no video; dri is the
   ROCm render node, needed *paired* with `/dev/kfd`. As labelled, it invited a future
   reader to trim an "unused VAAPI device" and break ROCm.
-- The README's "both require `/dev/dri`", true before the `-rocm` image and false after.
+- The README's "Both require `/dev/dri` device access". The sentence stayed *true* — both
+  containers still map the device — but its reason (VAAPI, inherited from the line above
+  it) became wrong for the ML container, and it silently omitted the `/dev/kfd` the
+  `-rocm` image now also needs. A true sentence with a wrong reason is still a
+  wrong-reason comment: note that reviewing it for truth alone would have passed it.
 
 A wrong-reason comment is a config change waiting to happen: it tells the next editor
 which line is safe to delete.
