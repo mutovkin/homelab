@@ -226,7 +226,9 @@ host and self-arming on the run after an interrupted bump. Verify after a bump:
 
 ```bash
 dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'amdrocm*' | grep -v '10.0'   # -> empty after a bump to 10.0
-ls -d /opt/rocm/core-*   # -> exactly /opt/rocm/core-10.0
+# -> exactly /opt/rocm/core-10.0 (a bare `ls -d /opt/rocm/core-*` also lists the
+# update-alternatives symlink /opt/rocm/core-10, which is not an install tree)
+find /opt/rocm -maxdepth 1 -type d -name 'core-*'
 ```
 
 Point releases *within* 10.0.x (e.g. 10.0.0-4 → 10.0.1-x) do **not** arrive on their
