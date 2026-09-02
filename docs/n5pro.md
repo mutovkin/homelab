@@ -216,18 +216,29 @@ rocm_apt_repo_url: "https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/"
 `rocm_release` — a deliberate change that also renames the installed package. The role
 reconciles the rest ([#247](https://github.com/mutovkin/homelab/issues/247)): it installs
 the newly pinned package FIRST, then purges every installed `amdrocm*` package outside
-the pinned release/architecture (a closure guard refuses to purge anything the pinned
-package depends on, so mismatched pins fail loudly instead of taking the metapackage
-with them), then removes any `/opt/rocm/core-*` tree that is not `rocm_home` and that no
-package owns (a tree still owned by packages fails the run, naming the owners — a tree
-is never deleted out from under dpkg). Both halves read durable state — what dpkg has
-installed and what is on disk versus what is pinned — so they are inert on a converged
-host and self-arming on the run after an interrupted bump. Verify after a bump:
+the pinned release/architecture, then removes any `/opt/rocm/core-*` tree that is not
+`rocm_home` and that no package owns. Two guards stand in front of the purge: the pinned
+package may not itself be in the stale set, and apt's own simulation of the purge must
+remove *exactly* that set — anything else installed that depends on a stale package
+shows up as collateral and fails the run. The tree half refuses to delete any tree still
+owned by a package (naming the owners), and probes the whole subtree, not just its root
+directory entry. Both halves read durable state — what dpkg has installed and what is on
+disk versus what is pinned — so they are inert on a converged host and self-arming on the
+run after an interrupted bump. An arch swap is *not* package-count-idempotent: an arch
+metapackage can pull in arch-independent packages of the same release that the other arch
+does not need, and those legitimately stay.
+
+Verify after a bump (set `REL` to the release you bumped TO — the second grep is the
+role's own keep-rule, so it catches a wrong-architecture survivor as well as a wrong
+release, and `grep -v '^.n'` drops the not-installed `un`/`pn` entries the role ignores):
 
 ```bash
-dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'amdrocm*' | grep -v '10.0'   # -> empty after a bump to 10.0
-# -> exactly /opt/rocm/core-10.0 (a bare `ls -d /opt/rocm/core-*` also lists the
-# update-alternatives symlink /opt/rocm/core-10, which is not an install tree)
+REL=10.1; ARCH=gfx1150
+dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'amdrocm*' | grep -v '^.n' |
+  grep -Ev "\|amdrocm(-[a-z0-9-]+)?${REL//./\\.}(-${ARCH})?\$"      # -> empty
+
+# -> exactly one tree. A bare `ls -d /opt/rocm/core-*` would also list the
+# update-alternatives symlink /opt/rocm/core-10, which is not an install tree.
 find /opt/rocm -maxdepth 1 -type d -name 'core-*'
 ```
 

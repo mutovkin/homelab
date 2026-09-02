@@ -418,7 +418,16 @@
 # (arch-independent) and amdrocm-<component><rel>-<arch>. A name belongs iff its
 # release token is rocm_release and its arch token, when present, is
 # rocm_gfx_arch. Everything else that dpkg still knows about (installed OR
-# config-files-only `rc`) is stale and gets purged.
+# config-files-only `rc`) is stale and gets purged. The component class allows
+# DIGITS (amdrocm-comgr210.0 — the ordinary soname-suffix convention) but never a
+# dot, which is what keeps the release token unambiguous: today's 27 names are
+# all-alphabetic, so an alphabetic-only class would have silently classified the
+# first digit-bearing component AMD ships as stale.
+#
+# Note an arch swap is not package-COUNT-idempotent: an arch metapackage can pull
+# in arch-independent packages of the same release that the other arch does not
+# need (measured: gfx1200 brought amdrocm-rccl-host10.0). Those belong to the
+# pinned release, so the reconcile deliberately keeps them.
 #
 # No autoremove: every ROCm name is covered by the regex below, and a host-wide
 # autoremove could take unrelated orphans on every run. Non-amdrocm libraries
@@ -439,39 +448,72 @@
       {{ rocm_installed.stdout_lines | default([])
          | reject('match', '^.n')
          | map('regex_replace', '^[^|]*\|', '')
-         | reject('match', '^amdrocm(-[a-z-]+)?' ~ (rocm_release | regex_escape)
+         | reject('match', '^amdrocm(-[a-z0-9-]+)?' ~ (rocm_release | regex_escape)
                             ~ '(-' ~ (rocm_gfx_arch | regex_escape) ~ ')?$')
          | list }}
   when: gpu_sharing.enabled | default(false)
 
-# apt-get remove takes DEPENDENTS with it, silently: purging a package the pinned
-# metapackage depends on would purge the metapackage too, and the assert at the
-# end would only report the wreckage. So before purging anything, prove the stale
-# set is disjoint from the pinned package's installed dependency closure.
-- name: Read the installed dependency closure of {{ rocm_package }}
-  ansible.builtin.command: >-
-    apt-cache depends --recurse --installed --important --no-conflicts --no-breaks
-    --no-replaces --no-enhances --no-suggests --no-recommends {{ rocm_package }}
-  register: rocm_closure
+# apt-get remove takes DEPENDENTS with it, silently — and not only the pinned
+# metapackage's own closure: ANY installed package that depends on a stale one
+# goes too. Two guards, both of which have been driven red on the live host:
+#
+#   1. the pinned package must not itself be in the stale set (pins disagreeing
+#      with each other is the likely operator error, and it is cheap to name);
+#   2. apt's own simulation of the purge must remove EXACTLY the stale set. This
+#      one cannot fail open: an empty or truncated simulation makes the set
+#      comparison fail, not pass. Measured 2026-09-01 on CT 201: asking to purge
+#      two arch packages simulates removing six, including amdrocm10.0-gfx1150 —
+#      exactly the collateral this refuses.
+- name: Assert the pinned ROCm package is not itself in the stale set
+  ansible.builtin.assert:
+    that:
+      - rocm_package not in rocm_stale_packages
+    fail_msg: >-
+      {{ rocm_package }} is in the stale set, so the purge would remove the very
+      package this role just installed. rocm_release ({{ rocm_release }}) /
+      rocm_gfx_arch ({{ rocm_gfx_arch }}) and rocm_package ({{ rocm_package }})
+      disagree — fix the pins, do not widen the purge.
+    quiet: true
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_stale_packages | length > 0
+
+- name: Ask apt what purging the stale ROCm packages would actually remove
+  ansible.builtin.command:
+    argv: "{{ ['apt-get', '-s', '-y', 'purge'] + rocm_stale_packages }}"
+  register: rocm_purge_sim
   changed_when: false
   check_mode: false
   when:
     - gpu_sharing.enabled | default(false)
     - rocm_stale_packages | length > 0
 
-- name: Assert no stale ROCm package is in the installed closure of {{ rocm_package }}
+# Parse in a set_fact, NOT in the assert's `that`: a \2 backreference does not
+# survive Ansible's CONDITIONAL evaluation (measured 2026-09-01 — the same
+# expression renders correctly in a debug/fail_msg but the conditional loses the
+# group reference, so every regex_replace returned the same literal and the guard
+# went red on a purge that was in fact exactly right). Templating it once also
+# means the assert and its message read the same value.
+- name: Work out what apt says it would actually remove
+  ansible.builtin.set_fact:
+    rocm_purge_sim_removals: >-
+      {{ rocm_purge_sim.stdout_lines | default([]) | select('match', '^(Remv|Purg) ')
+         | map('regex_replace', '^(Remv|Purg) ([^ ]+).*$', '\2') | list }}
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_stale_packages | length > 0
+
+- name: Assert purging the stale ROCm packages takes nothing else with it
   ansible.builtin.assert:
     that:
-      - >-
-        rocm_stale_packages
-        | intersect(rocm_closure.stdout_lines | select('match', '^[^ ]') | list)
-        | length == 0
+      - rocm_purge_sim_removals | symmetric_difference(rocm_stale_packages) | length == 0
     fail_msg: >-
-      Refusing to purge {{ rocm_stale_packages
-        | intersect(rocm_closure.stdout_lines | select('match', '^[^ ]') | list) }}:
-      {{ rocm_package }} depends on them, so apt would remove it too. rocm_release
-      ({{ rocm_release }}) / rocm_gfx_arch ({{ rocm_gfx_arch }}) and rocm_package
-      ({{ rocm_package }}) disagree — fix the pins, do not widen the purge.
+      apt would not remove exactly the stale set. Collateral (would go but was not
+      asked for): {{ rocm_purge_sim_removals | difference(rocm_stale_packages) }}.
+      Asked for but not removed:
+      {{ rocm_stale_packages | difference(rocm_purge_sim_removals) }}.
+      Something installed depends on a package this would purge — fix the pins,
+      do not widen the purge.
     quiet: true
   when:
     - gpu_sharing.enabled | default(false)
@@ -482,6 +524,7 @@
     name: "{{ rocm_stale_packages }}"
     state: absent
     purge: true
+  register: rocm_purge
   when:
     - gpu_sharing.enabled | default(false)
     - rocm_stale_packages | length > 0
@@ -500,11 +543,28 @@
   register: rocm_core_trees
   when: gpu_sharing.enabled | default(false)
 
+# The ownership probe reads state that only a REAL purge produces, so under
+# --check on a release bump (`rocm_release: 10.0 -> 10.1`) the old tree is still
+# fully owned and the assert below would go red telling the operator to "fix the
+# pins" that are in fact correct — breaking the documented dry run on the exact
+# change this block exists for. The install task 100 lines above carves out the
+# same class of check-mode-only failure. Gate on the purge having been SIMULATED
+# rather than on ansible_check_mode alone, so a converged host still dry-runs the
+# probe and the assert for real.
+#
+# Probe the tree, not just its root inode: `dpkg-query -S <dir>` asks only whether
+# that one directory entry is in a package's file list, while the delete below is
+# recursive. rc semantics measured on CT 201 2026-09-01: a single pattern returns
+# 1 for "no path found", but MULTIPLE patterns return 1 when ANY of them misses —
+# which would read as "unowned" and fail open — so the two probes are ORed as
+# separate invocations instead of passed as two patterns.
 - name: Probe whether any stray /opt/rocm/core-* tree is still owned by a package
-  ansible.builtin.command: dpkg-query -S {{ item.path }}
+  ansible.builtin.shell:
+    cmd: dpkg-query -S {{ item.path | quote }} || dpkg-query -S {{ (item.path ~ '/*') | quote }}
   register: rocm_stray_tree_owner
   changed_when: false
-  # rc 1 = "no path found matching pattern" (measured on CT 201 for core-9.9).
+  # rc 1 = neither the directory nor anything under it is owned (measured on
+  # CT 201 for core-9.9); rc 0 = at least one of the two matched.
   failed_when: rocm_stray_tree_owner.rc not in [0, 1]
   check_mode: false
   loop: "{{ rocm_core_trees.files | default([]) }}"
@@ -513,7 +573,11 @@
   when:
     - gpu_sharing.enabled | default(false)
     - not item.islnk
-    - item.path != rocm_home
+    - not (ansible_check_mode and rocm_purge is changed)
+    # Prefix test on paths normalised with a trailing /, per the legacy-tree
+    # delete above: excludes rocm_home AND any ancestor of it, so a widened
+    # `paths:`/`patterns:` can never feed the delete below /opt/rocm itself.
+    - not (rocm_home ~ '/').startswith(item.path ~ '/')
 
 - name: Assert no stray /opt/rocm/core-* tree is still owned by an installed package
   ansible.builtin.assert:
@@ -527,7 +591,9 @@
       not rocm_home ({{ rocm_home }}) but is owned by packages means the pins disagree with
       what is installed — fix the pins; never delete a tree out from under dpkg.
     quiet: true
-  when: gpu_sharing.enabled | default(false)
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not (ansible_check_mode and rocm_purge is changed)
 
 - name: Remove stray /opt/rocm/core-* trees nothing owns
   ansible.builtin.file:
@@ -539,9 +605,12 @@
   when:
     - gpu_sharing.enabled | default(false)
     - item.rc == 1
-    # Belt with the loop above: never the live root, whatever the pins say.
-    - item.item.path != rocm_home
-
+    # rocm_home needs no clause here: only items the probe actually RAN on carry
+    # rc, and the probe's own `when` already excludes rocm_home and its ancestors
+    # — restating it would be the dead guard #240 round 2 caught. This shape test
+    # is deliberately a DIFFERENT predicate: it fails if a future edit widens the
+    # find above beyond the core-* namespace, which the probe's when would not.
+    - item.item.path.startswith('/opt/rocm/core-')
 - name: Ensure root is in render and video groups
   ansible.builtin.user:
     name: root
