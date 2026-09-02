@@ -455,15 +455,21 @@
 
 # apt-get remove takes DEPENDENTS with it, silently — and not only the pinned
 # metapackage's own closure: ANY installed package that depends on a stale one
-# goes too. Two guards, both of which have been driven red on the live host:
+# goes too. Two guards:
 #
 #   1. the pinned package must not itself be in the stale set (pins disagreeing
-#      with each other is the likely operator error, and it is cheap to name);
-#   2. apt's own simulation of the purge must remove EXACTLY the stale set. This
-#      one cannot fail open: an empty or truncated simulation makes the set
-#      comparison fail, not pass. Measured 2026-09-01 on CT 201: asking to purge
-#      two arch packages simulates removing six, including amdrocm10.0-gfx1150 —
-#      exactly the collateral this refuses.
+#      with each other is the likely operator error, and it is cheap to name).
+#      Driven RED on CT 201 with `-e rocm_gfx_arch=gfx1200 -e
+#      rocm_package=amdrocm10.0-gfx1150`: changed=0, purge never reached.
+#   2. apt's own simulation of the purge must remove EXACTLY the stale set. It
+#      cannot fail open: an empty or truncated simulation makes the set
+#      comparison fail, not pass. Guard 2 has NOT been driven red through the
+#      play — no reachable role input on this host produces collateral. Its
+#      INPUT was measured read-only (2026-09-01: asking to purge two arch
+#      packages simulates removing SIX, including amdrocm10.0-gfx1150), and the
+#      guard was falsified OFFLINE against exactly that output, with a passing
+#      positive control (#247, scratchpad guard2-test.yml). The first real
+#      release bump is its first chance to fire on real input.
 - name: Assert the pinned ROCm package is not itself in the stale set
   ansible.builtin.assert:
     that:
