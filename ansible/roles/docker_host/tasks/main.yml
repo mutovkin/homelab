@@ -611,6 +611,7 @@
     # is deliberately a DIFFERENT predicate: it fails if a future edit widens the
     # find above beyond the core-* namespace, which the probe's when would not.
     - item.item.path.startswith('/opt/rocm/core-')
+
 - name: Ensure root is in render and video groups
   ansible.builtin.user:
     name: root
