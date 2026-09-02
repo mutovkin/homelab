@@ -544,6 +544,23 @@ Hard-won lessons — check here before debugging from scratch.
   before measuring, because afterwards the number looks like it settles the question.
   See [docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md](docs/solutions/conventions/experiment-must-discriminate-between-hypotheses.md).
 
+- **When the failing state cannot exist YET, prove the guard on a real input of the same
+  SHAPE — and grade every guard by the evidence that actually exists.** #247's ROCm
+  release-purge reconcile could not be exercised against a release bump (only 10.0 is
+  published), so the package half was driven through real apt/dpkg by an ARCH swap
+  (`gfx1150 → gfx1200 → gfx1150`), which produces the same input shape. Name where the
+  substitute differs: the arch swap leaves `rocm_home` untouched, and that untested half is
+  where the branch's worst defect hid (a `--check` of a real bump went red telling the
+  operator to fix correct pins). A comment claiming evidence you do not have is worse than
+  no comment — grade each guard live-red > offline-falsified-against-measured-input >
+  argued — and write the unproven half into a follow-up issue with the exact bump-day
+  commands (#252), not a PR paragraph. Two sub-traps measured: a `\N` regex backreference
+  is LOST inside an assert's `that:` while the identical expression renders fine in
+  `fail_msg`/`debug` (parse in a `set_fact`, assert the fact), and a safety check that
+  re-implements apt's dependency logic is both blind and fail-open — ask `apt-get -s -y
+  purge` and compare the answer as a set.
+  See [docs/solutions/conventions/prove-a-guard-whose-failing-state-cannot-exist-yet.md](docs/solutions/conventions/prove-a-guard-whose-failing-state-cannot-exist-yet.md).
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.
