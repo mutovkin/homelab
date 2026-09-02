@@ -405,6 +405,143 @@
     - gpu_sharing.enabled | default(false)
     - not (ansible_check_mode and (rocm_repo_file.changed or rocm_apt_key.changed))
 
+# --- Release/arch reconcile (#247) -------------------------------------------
+# The stable channel is designed for side-by-side releases and nothing upstream
+# retires an old one, so a rocm_release (or rocm_gfx_arch) edit would otherwise
+# leave the previous package set installed and its /opt/rocm/core-<old> tree on
+# disk, with every assert below still green because they follow the new pins.
+# Keyed on DURABLE state — what dpkg has installed and what is on disk versus
+# what is pinned — never on a one-shot `changed` (the #127/#240 lesson).
+#
+# Package naming, measured on the AMD repo (2026-09-01): the top-level
+# metapackage is amdrocm<rel>-<arch>; its closure is amdrocm-<component><rel>
+# (arch-independent) and amdrocm-<component><rel>-<arch>. A name belongs iff its
+# release token is rocm_release and its arch token, when present, is
+# rocm_gfx_arch. Everything else that dpkg still knows about (installed OR
+# config-files-only `rc`) is stale and gets purged.
+#
+# No autoremove: every ROCm name is covered by the regex below, and a host-wide
+# autoremove could take unrelated orphans on every run. Non-amdrocm libraries
+# orphaned by a purge are left to common's opt-in maintenance path.
+- name: List every amdrocm package dpkg knows about
+  ansible.builtin.command: dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'amdrocm*'
+  register: rocm_installed
+  changed_when: false
+  # rc 1 = "no packages found matching" (a fresh host before the first install
+  # can never reach here, but the bounded shape matches the other probes).
+  failed_when: rocm_installed.rc not in [0, 1]
+  check_mode: false
+  when: gpu_sharing.enabled | default(false)
+
+- name: Work out which amdrocm packages belong to another release or GPU architecture
+  ansible.builtin.set_fact:
+    rocm_stale_packages: >-
+      {{ rocm_installed.stdout_lines | default([])
+         | reject('match', '^.n')
+         | map('regex_replace', '^[^|]*\|', '')
+         | reject('match', '^amdrocm(-[a-z-]+)?' ~ (rocm_release | regex_escape)
+                            ~ '(-' ~ (rocm_gfx_arch | regex_escape) ~ ')?$')
+         | list }}
+  when: gpu_sharing.enabled | default(false)
+
+# apt-get remove takes DEPENDENTS with it, silently: purging a package the pinned
+# metapackage depends on would purge the metapackage too, and the assert at the
+# end would only report the wreckage. So before purging anything, prove the stale
+# set is disjoint from the pinned package's installed dependency closure.
+- name: Read the installed dependency closure of {{ rocm_package }}
+  ansible.builtin.command: >-
+    apt-cache depends --recurse --installed --important --no-conflicts --no-breaks
+    --no-replaces --no-enhances --no-suggests --no-recommends {{ rocm_package }}
+  register: rocm_closure
+  changed_when: false
+  check_mode: false
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_stale_packages | length > 0
+
+- name: Assert the stale ROCm packages are not part of {{ rocm_package }}'s closure
+  ansible.builtin.assert:
+    that:
+      - >-
+        rocm_stale_packages
+        | intersect(rocm_closure.stdout_lines | select('match', '^[^ ]') | list)
+        | length == 0
+    fail_msg: >-
+      Refusing to purge {{ rocm_stale_packages
+        | intersect(rocm_closure.stdout_lines | select('match', '^[^ ]') | list) }}:
+      {{ rocm_package }} depends on them, so apt would remove it too. rocm_release
+      ({{ rocm_release }}) / rocm_gfx_arch ({{ rocm_gfx_arch }}) and rocm_package
+      ({{ rocm_package }}) disagree — fix the pins, do not widen the purge.
+    quiet: true
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_stale_packages | length > 0
+
+- name: Purge ROCm packages from another release or GPU architecture
+  ansible.builtin.apt:
+    name: "{{ rocm_stale_packages }}"
+    state: absent
+    purge: true
+  when:
+    - gpu_sharing.enabled | default(false)
+    - rocm_stale_packages | length > 0
+
+# dpkg removes the files it owns; anything generated in place (caches, alternatives
+# residue) can keep /opt/rocm/core-<old> alive. Only DIRECTORIES: the compat
+# entries /opt/rocm/core and /opt/rocm/core-10 are alternatives SYMLINKS and
+# `find` classifies with lstat, so they are never returned — and `not item.islnk`
+# says so explicitly rather than relying on that.
+- name: Find /opt/rocm/core-* trees other than {{ rocm_home }}
+  ansible.builtin.find:
+    paths: /opt/rocm
+    patterns: "core-*"
+    file_type: directory
+    recurse: false
+  register: rocm_core_trees
+  when: gpu_sharing.enabled | default(false)
+
+- name: Probe whether any stray /opt/rocm/core-* tree is still owned by a package
+  ansible.builtin.command: dpkg-query -S {{ item.path }}
+  register: rocm_stray_tree_owner
+  changed_when: false
+  # rc 1 = "no path found matching pattern" (measured on CT 201 for core-9.9).
+  failed_when: rocm_stray_tree_owner.rc not in [0, 1]
+  check_mode: false
+  loop: "{{ rocm_core_trees.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when:
+    - gpu_sharing.enabled | default(false)
+    - not item.islnk
+    - item.path != rocm_home
+
+- name: Assert no stray /opt/rocm/core-* tree is still owned by an installed package
+  ansible.builtin.assert:
+    that:
+      - rocm_stray_tree_owner.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | list | length == 0
+    fail_msg: >-
+      Refusing to delete {{ rocm_stray_tree_owner.results | default([]) | selectattr('rc', 'defined')
+        | selectattr('rc', 'equalto', 0) | map(attribute='item.path') | list }}:
+      still owned by {{ rocm_stray_tree_owner.results | default([]) | selectattr('rc', 'defined')
+        | selectattr('rc', 'equalto', 0) | map(attribute='stdout') | list }}. A tree that is
+      not rocm_home ({{ rocm_home }}) but is owned by packages means the pins disagree with
+      what is installed — fix the pins; never delete a tree out from under dpkg.
+    quiet: true
+  when: gpu_sharing.enabled | default(false)
+
+- name: Remove stray /opt/rocm/core-* trees nothing owns
+  ansible.builtin.file:
+    path: "{{ item.item.path }}"
+    state: absent
+  loop: "{{ rocm_stray_tree_owner.results | default([]) | selectattr('rc', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when:
+    - gpu_sharing.enabled | default(false)
+    - item.rc == 1
+    # Belt with the loop above: never the live root, whatever the pins say.
+    - item.item.path != rocm_home
+
 - name: Ensure root is in render and video groups
   ansible.builtin.user:
     name: root
