@@ -382,6 +382,14 @@ Hard-won lessons — check here before debugging from scratch.
   archive proves nothing about the dump inside. See
   [docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md](docs/solutions/conventions/measure-the-baseline-then-verify-before-transforming.md).
 
+- **A knob set to its upstream default is not a mitigation.** #248 commented
+  `MACHINE_LEARNING_MODEL_TTL: 300` as "unload after 5 idle minutes instead of holding
+  VRAM forever" — 300 IS Immich's default, and the 5-minute window was the quirk itself.
+  Look up the default, state the delta vs. not setting the line, cite the check. A comment
+  that names the wrong REASON for a line (ML `/dev/dri  # VAAPI`) is the licence a future
+  reader uses to delete it. See
+  [docs/solutions/conventions/a-knob-set-to-its-default-is-not-a-mitigation.md](docs/solutions/conventions/a-knob-set-to-its-default-is-not-a-mitigation.md).
+
 - **A provisioned Grafana datasource is FROZEN unless its `version:` INCREASES — so a
   rotated credential never reaches it.** Grafana re-applies a provisioned datasource only
   when the file's `version` exceeds the stored one; pinned, `secureJsonData` is never
