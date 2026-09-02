@@ -459,7 +459,7 @@
     - gpu_sharing.enabled | default(false)
     - rocm_stale_packages | length > 0
 
-- name: Assert the stale ROCm packages are not part of {{ rocm_package }}'s closure
+- name: Assert no stale ROCm package is in the installed closure of {{ rocm_package }}
   ansible.builtin.assert:
     that:
       - >-
