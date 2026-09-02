@@ -254,6 +254,22 @@ reversed orderings, removals — cost nothing to add. This is the mirror image o
 dry-run: there a planted value proves a suppression fired, here planted state proves a
 report fires.
 
+### Shape-equivalent input
+A real, achievable change that presents a guard with the same inputs its unreachable
+target condition would, used to exercise it against the live system rather than a stub.
+
+Reach for it before a Drifted fixture: enumerate what the guard actually reads, then ask
+which achievable edit produces that same reading. A release-purge reconcile reads a set of
+installed package names outside the pinned release, not "a release bump" — so swapping the
+pinned GPU architecture drives the same selection, guards and purge through real apt and
+real dpkg, on a fleet where the second release does not exist. The strength over a fixture
+is that the tool runs, not one's model of it; the discipline it demands is naming where the
+shapes diverge, because that residue is untested and is where defects sit — the arch swap
+left the install root untouched, and the branch's worst defect lived in exactly that half.
+What the substitute cannot reach is then graded honestly and written into a follow-up with
+the commands to run on the day the real condition arrives, rather than left implied by a
+green run.
+
 ### Source-code canary
 A check that holds for every possible input by construction, kept and labelled as a
 regression detector for the code that computes it rather than presented as evidence

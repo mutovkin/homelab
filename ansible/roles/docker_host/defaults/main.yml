@@ -27,11 +27,13 @@ gpu_sharing:
 # ROCm >= 10 ships via stable.repo.amd.com with per-GPU-architecture packages;
 # the legacy amdgpu-install/repo.radeon.com stream ended at 7.2.4 and can never
 # deliver it. The major.minor lives in the PACKAGE NAME, so moving to 10.1 is a
-# deliberate edit here. Nothing retires the PREVIOUS release on such a bump — the
-# old package stays installed and its ~5 GB /opt/rocm/core-<old> tree stays on
-# disk, with every assert still green because they follow the new pins. That
-# reconcile is #247, deliberately deferred: with only one release in existence a
-# destructive purge loop cannot be exercised against the state it targets.
+# deliberate edit here. The reconcile in tasks/main.yml (#247) then retires
+# whatever the new pins do not name: every installed amdrocm* package outside
+# rocm_release/rocm_gfx_arch is purged, and any /opt/rocm/core-* tree that is not
+# rocm_home and that no package owns is removed. Both are keyed on durable state
+# (dpkg + the filesystem), never on a one-shot changed. Exercised on real input as
+# an arch round trip in #247; the first real release bump is still the first
+# observation of a full-release purge — see the follow-up issue linked there.
 # Point releases WITHIN 10.0.x do not arrive on their own: `state:
 # present` on an installed package is a no-op, and the AMD repo's
 # `Origin: AMD ROCm` is absent from unattended-upgrades' Origins-Pattern. They
