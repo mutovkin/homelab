@@ -1,0 +1,111 @@
+---
+# Retire a workbench CT (#254) — the teardown half of "declare, use, delete".
+#
+# Usage:
+#   task infra:guest:destroy -- --limit n5pro -e vmid=202 -e hostname=music-workbench
+#
+# Order of operations the operator must follow, enforced below:
+#   1. Delete the CT's block from proxmox_lxcs in host_vars/<node>/vars.yml and its
+#      entry from inventory/hosts.yml + host_vars/<name>/. This play REFUSES while
+#      the vmid is still declared, because the next `infra:hosts` run would
+#      simply recreate what this play destroyed.
+#   2. Run this play. Both the vmid and the hostname must be given and must match
+#      the live `pct config`, so a typo cannot destroy a neighbour.
+# Irreversible (pct destroy --purge): rootfs and any allocated volumes are gone;
+# host bind-mount sources (NFS shares) are untouched.
+
+- name: Destroy a retired LXC container
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: false
+
+  tasks:
+    # fresh_allocation_intent_dir is a proxmox_guests role default; read the same
+    # file rather than duplicating the path here.
+    - name: Load proxmox_guests defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/proxmox_guests/defaults/main.yml"
+
+    - name: Require an explicit --limit, vmid and hostname
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - vmid is defined
+          - hostname is defined
+          - vmid | string is match('^[0-9]+$')
+        fail_msg: >-
+          Run with --limit <proxmox node> -e vmid=<id> -e hostname=<name>. All three
+          are required: this play destroys data.
+
+    - name: Refuse while the container is still declared in host_vars
+      ansible.builtin.assert:
+        that:
+          - vmid | int not in (proxmox_lxcs | default([]) | map(attribute='vmid') | map('int') | list)
+        fail_msg: >-
+          CT {{ vmid }} is still declared in proxmox_lxcs for {{ inventory_hostname }}.
+          Delete its block first (and its inventory entry), or the next infra:hosts
+          run will recreate it.
+
+    - name: Read the live container config
+      ansible.builtin.command: "pct config {{ vmid }}"
+      register: destroy_config
+      changed_when: false
+      failed_when:
+        - destroy_config.rc != 0
+        - "'does not exist' not in destroy_config.stderr"
+      check_mode: false
+
+    - name: Report an already-absent container
+      ansible.builtin.debug:
+        msg: "CT {{ vmid }} does not exist on {{ inventory_hostname }} — nothing to destroy"
+      when: destroy_config.rc != 0
+
+    # Parsed in a set_fact, asserted as a fact: a `\1` backreference is lost inside
+    # an assert's own args (CLAUDE.md, #247), and here it took the fail_msg down
+    # with a NoneType error before the assert could even evaluate (measured
+    # 2026-09-02).
+    - name: Read the live hostname
+      ansible.builtin.set_fact:
+        destroy_live_hostname: "{{ destroy_config.stdout | regex_search('(?m)^hostname: (.*)$', '\\1') | default([], true) | join }}"
+      when: destroy_config.rc == 0
+
+    - name: Refuse unless the live hostname matches
+      ansible.builtin.assert:
+        that:
+          - destroy_live_hostname == hostname
+        fail_msg: >-
+          CT {{ vmid }} on {{ inventory_hostname }} is
+          "{{ destroy_live_hostname | default('<none>', true) }}", not "{{ hostname }}".
+          Refusing.
+      when: destroy_config.rc == 0
+
+    - name: Read container status
+      ansible.builtin.command: "pct status {{ vmid }}"
+      register: destroy_status
+      changed_when: false
+      check_mode: false
+      when: destroy_config.rc == 0
+
+    - name: Stop the container
+      ansible.builtin.command: "pct stop {{ vmid }}"
+      changed_when: true
+      when:
+        - destroy_config.rc == 0
+        - "'status: running' in destroy_status.stdout"
+
+    - name: Destroy the container and purge it from backup jobs
+      ansible.builtin.command: "pct destroy {{ vmid }} --purge"
+      changed_when: true
+      when: destroy_config.rc == 0
+
+    - name: Remove any fresh-allocation intent record for this vmid
+      ansible.builtin.file:
+        path: "{{ fresh_allocation_intent_dir }}/{{ vmid }}"
+        state: absent
+
+    - name: Remind about the inventory side
+      ansible.builtin.debug:
+        msg: >-
+          CT {{ vmid }} ({{ hostname }}) is gone from {{ inventory_hostname }}. Make sure
+          inventory/hosts.yml and inventory/host_vars/<name>/ no longer reference it,
+          and drop its line from ~/.ssh/known_hosts if you reuse the IP.

@@ -1,0 +1,16 @@
+---
+# music-workbench (CT 202 on n5pro, #254) — a workbench CT. The guest itself is
+# declared in host_vars/n5pro/vars.yml (proxmox_lxcs); this file only says what
+# to install inside it. A new workbench copies this file and swaps the list.
+#
+# ADDITIONS to common_packages, never a replacement (see roles/common/defaults).
+common_extra_packages:
+  - beets            # tagger/organiser with MusicBrainz lookup
+  - python3-mutagen  # mid3v2 / mutagen-inspect
+  - picard           # MusicBrainz Picard (CLI-usable: fingerprinting via fpcalc)
+  - libchromaprint-tools # fpcalc, AcoustID fingerprints
+  - ffmpeg
+  - flac
+  - mediainfo
+  - rsync
+  - tmux

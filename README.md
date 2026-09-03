@@ -43,7 +43,7 @@ task deploy:full
 
 # Or step by step:
 task infra:hosts      # 1. Configure Proxmox OS + provision VMs/LXCs
-task infra:guests     # 2. Configure Docker inside VMs/LXCs
+task infra:guests     # 2. Configure Docker (and workbench CTs) inside VMs/LXCs
 task deploy:services  # 3. Deploy compose stacks
 ```
 

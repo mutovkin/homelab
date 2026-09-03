@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Rendered from proxmox_nfs_mounts (roles/proxmox_host, #254).
+#
+# NOT enabled, on purpose. The NFS server may be a guest of this very host
+# (n5pro: TrueNAS is VM 200), so a boot-time mount can never succeed here.
+# /var/lib/vz/snippets/nfs-bind-prestart.sh starts this unit on demand before
+# any CT that bind-mounts a directory under Where= is allowed to start.
+[Unit]
+Description=NFS {{ m.name }} ({{ m.server }}:{{ m.export }})
+
+[Mount]
+What={{ m.server }}:{{ m.export }}
+Where={{ m.path }}
+Type=nfs
+Options={{ m.options }}

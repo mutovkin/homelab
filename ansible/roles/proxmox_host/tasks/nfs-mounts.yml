@@ -1,0 +1,130 @@
+---
+# Host-mounted NFS datasets for bind-mounting into unprivileged CTs (#254).
+# Included from main.yml only when proxmox_nfs_mounts is non-empty. See
+# defaults/main.yml for the model and files/nfs-bind-prestart.sh for why the
+# units are never enabled.
+
+- name: Assert every NFS mountpoint sits under /mnt/nfs/
+  ansible.builtin.assert:
+    that:
+      - item.path is match('^/mnt/nfs/[^/ ]+')
+      - item.path is not search(' ')
+    fail_msg: >-
+      proxmox_nfs_mounts entry {{ item.name }}: path "{{ item.path }}" must be a
+      space-free path under /mnt/nfs/ — that prefix is what the pre-start
+      hookscript gates on, so a mount elsewhere would be bound into CTs
+      ungated.
+  loop: "{{ proxmox_nfs_mounts }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Once the share is mounted, `item.path` IS the share root — a `file:` with a
+# `mode:` there chmods the NAS dataset, not the local placeholder (measured
+# 2026-09-02: the second apply after the hookscript had mounted it reported
+# "changed" and rewrote the dataset root's mode). So: probe first, and create the
+# placeholder only while nothing is mounted there, with no mode at all.
+- name: Probe whether NFS mountpoints are currently mounted
+  ansible.builtin.command:
+    argv:
+      - mountpoint
+      - -q
+      - "{{ item.path }}"
+  register: proxmox_nfs_mountpoint_probe
+  changed_when: false
+  failed_when: proxmox_nfs_mountpoint_probe.rc not in [0, 1, 32]
+  check_mode: false  # read-only probe
+  loop: "{{ proxmox_nfs_mounts }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Ensure NFS mountpoint placeholder directories exist (unmounted paths only)
+  ansible.builtin.file:
+    path: "{{ item.item.path }}"
+    state: directory
+    mode: "0755" # safe: this task never runs on a mounted path (see probe above)
+  loop: "{{ proxmox_nfs_mountpoint_probe.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when: item.rc != 0
+
+# The unit name is derived by systemd's own escaper, not re-implemented in Jinja:
+# `-` inside a path component escapes to \x2d, which a naive replace would get
+# wrong and the hookscript (which also calls systemd-escape) would then never
+# find the unit it was told to start.
+- name: Derive systemd unit names for NFS mountpoints
+  ansible.builtin.command:
+    argv:
+      - systemd-escape
+      - --path
+      - --suffix=mount
+      - "{{ item.path }}"
+  register: proxmox_nfs_unit_names
+  changed_when: false
+  check_mode: false  # read-only derivation; the template below needs it in --check too
+  loop: "{{ proxmox_nfs_mounts }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Render NFS mount units (never enabled — started on demand by the hookscript)
+  ansible.builtin.template:
+    src: nfs.mount.j2
+    dest: "/etc/systemd/system/{{ item.stdout }}"
+    mode: "0644"
+  vars:
+    m: "{{ item.item }}"
+  loop: "{{ proxmox_nfs_unit_names.results }}"
+  loop_control:
+    label: "{{ item.stdout }}"
+  notify: reload-systemd
+
+- name: Render the mountpoint list the hookscript reads
+  ansible.builtin.template:
+    src: proxmox-nfs-mounts.list.j2
+    dest: /etc/proxmox-nfs-mounts.list
+    mode: "0644"
+
+# Hookscripts live on a storage with `snippets` content. `local` ships as
+# iso,vztmpl,backup(,import) — add snippets WITHOUT dropping what is there.
+- name: Read local storage content types
+  ansible.builtin.command: pvesh get /storage/local --output-format json
+  register: proxmox_local_storage_json
+  changed_when: false
+  check_mode: false  # read-only probe; drift must show under --check
+
+# The apply is a `command`, which --check skips wholesale; say what it would do.
+- name: Report snippets content drift on local storage
+  ansible.builtin.debug:
+    msg: >-
+      local storage content =
+      {{ (proxmox_local_storage_json.stdout | from_json).content }}:
+      {{ 'snippets MISSING — a live run adds it (pvesm set local --content …)'
+         if 'snippets' not in (proxmox_local_storage_json.stdout | from_json).content.split(',')
+         else 'snippets present' }}
+
+- name: Enable snippets content on local storage
+  ansible.builtin.command: >-
+    pvesm set local --content
+    {{ ((proxmox_local_storage_json.stdout | from_json).content.split(',') + ['snippets'])
+       | unique | join(',') }}
+  changed_when: true
+  when: "'snippets' not in (proxmox_local_storage_json.stdout | from_json).content.split(',')"
+
+- name: Ensure the snippets directory exists
+  ansible.builtin.file:
+    path: /var/lib/vz/snippets
+    state: directory
+    mode: "0755"
+
+- name: Deploy the NFS bind-mount pre-start hookscript
+  ansible.builtin.copy:
+    src: nfs-bind-prestart.sh
+    dest: /var/lib/vz/snippets/nfs-bind-prestart.sh
+    mode: "0755"
+
+# The script is /bin/sh, which on PVE is dash; the Mac's `sh -n` is not the
+# interpreter that will run it (see CLAUDE.md: validate embedded interpreters ON
+# A HOST).
+- name: Syntax-check the hookscript with the host's own /bin/sh
+  ansible.builtin.command: /bin/sh -n /var/lib/vz/snippets/nfs-bind-prestart.sh
+  changed_when: false
+  when: not ansible_check_mode

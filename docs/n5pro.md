@@ -133,6 +133,19 @@ them there after any hardware re-seat that changes a path or IOMMU group.
 - Boots after TrueNAS (`startup: order=2`)
 - Will share centralized monitoring with EQ12
 
+### CT 202: music-workbench (workbench CT, #254)
+
+- Short-lived, **unprivileged** Ubuntu 26.04 box for music tag processing over
+  SSH (beets, picard/fpcalc, ffmpeg, flac, mediainfo)
+- 4 cores, 4 GB RAM, 16 GB root, `nesting=1` (**required**: systemd 259 in an
+  unprivileged CT without nesting fails every early unit with
+  `status=243/CREDENTIALS`, and the CT comes up with `eth0` DOWN)
+- net0: vmbr1 at 192.168.30.16, `onboot: false`
+- `/music/lossless` and `/music/compressed` are **host bind mounts** of the
+  TrueNAS music dataset — see [Workbench CTs](#workbench-cts) below
+- Configured by `common` only (group `workbench_hosts`); deliberately not a
+  vector/telegraf agent
+
 ### GPU Passthrough VM (TBD)
 
 - 32 GB GPU memory available via UMA
@@ -558,6 +571,51 @@ next guest in order*, so a delay on the LXC would do nothing useful. As a
 backstop for an unusually slow TrueNAS boot, the LXC also runs a
 `lms-nfs-heal.service` oneshot that waits for NFS then re-ups the lms stack (#36).
 
+## Workbench CTs
+
+A workbench is a throwaway, unprivileged CT you SSH into to run CLI tools
+against NAS data, then delete. The pattern (#254) is one host_vars block, one
+inventory line, a package list, and a teardown command.
+
+**NFS reaches the CT by host bind mount, not by mounting inside it.** An
+unprivileged CT cannot mount NFS, so the Proxmox host mounts the dataset
+(`proxmox_nfs_mounts` in `host_vars/n5pro/vars.yml` → `mnt-nfs-music.mount`)
+and the CT declares `bind_mounts` for subdirectories. Two consequences shape
+the design:
+
+- **Boot order is inverted here** — the NFS server is VM 200 on this host, so
+  the `.mount` unit is never enabled. A **pre-start hookscript**
+  (`local:snippets/nfs-bind-prestart.sh`, deployed by `proxmox_host`) starts it
+  on demand and refuses `pct start` while the share is not a live mountpoint or
+  a bind source is missing on it. LXC binds whatever is at the source when the
+  CT starts; an empty directory would stay empty for the CT's life. Measured
+  2026-09-02: NAS unreachable → `hookscript error … exit code 1`, CT stays
+  stopped; NAS back → mounts and starts.
+- **uid mapping is server-side.** CT root is host uid 100000; the library is
+  owned by uid/gid 3000. The TrueNAS share for the dataset root is exported to
+  the host's vmbr2 address with *Mapall* to the library owner, so every write
+  lands as 3000:3000 (verified from the lms container's view). Inside the CT the
+  files display as `nobody:nogroup` — that is the unmapped uid, not a fault.
+
+`bind_mounts` is a separate key from `mounts` on purpose: `mounts` is
+allocation-form and armed by the fresh-allocation restore gate, whose marker
+would otherwise be touched *inside the NAS share*. Bind mounts and hookscripts
+are `root@pam`-only in Proxmox, so the role applies them by `pct set` after
+creation and before first start.
+
+Recipe for a new workbench:
+
+1. Copy the CT 202 block in `host_vars/n5pro/vars.yml` (new vmid, hostname,
+   IP; keep `unprivileged: true`, `nesting: true`, the `hookscript`).
+2. Add it to `workbench_hosts` in `inventory/hosts.yml` and create
+   `host_vars/<name>/vars.yml` with `common_extra_packages`.
+3. `task infra:hosts -- --limit n5pro`, then `task infra:guests -- --limit <name>`.
+
+Retire it: delete the block and the inventory entry, then
+`task infra:guest:destroy -- --limit n5pro -e vmid=<id> -e hostname=<name>`.
+The playbook refuses while the block is still declared (the next `infra:hosts`
+would recreate it) and when the hostname does not match the live config.
+
 ## VM/LXC Definitions
 
 Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
@@ -566,3 +624,4 @@ Defined in `ansible/inventory/host_vars/n5pro/vars.yml`:
 | --- | ---- | ------------- | ----- | ----- | ------------------------ | ------------------------------------------------------ |
 | 200 | VM   | truenas       | 4     | 24 GB | 64 GB boot                | UEFI/q35, SATA+NVMe PCI passthrough, dual NIC, boot=1 |
 | 201 | CT   | n5pro-docker  | 8     | 24 GB | 64 GB root + 200 GB /data | Ubuntu 24.04, nesting, GPU, NFS, dual NIC, boot=2     |
+| 202 | CT   | music-workbench | 4   | 4 GB  | 16 GB root                | Ubuntu 26.04, unprivileged, NFS via host bind mounts, onboot=0 (#254) |

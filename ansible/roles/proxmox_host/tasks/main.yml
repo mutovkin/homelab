@@ -362,3 +362,9 @@
     # therefore real; a live run always asserts.
     - not ansible_check_mode or ('\n' ~ item.name ~ ' ') in ('\n' ~ proxmox_host_loaded_modules.stdout)
   tags: [hwmon]
+
+# --- Host-mounted NFS for unprivileged-CT bind mounts (#254) ------------------
+- name: Mount NFS datasets for bind-mounting into CTs
+  ansible.builtin.include_tasks: nfs-mounts.yml
+  when: proxmox_nfs_mounts | length > 0
+  tags: [nfs_mounts]

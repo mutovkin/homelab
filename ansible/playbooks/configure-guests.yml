@@ -30,3 +30,24 @@
   roles:
     - common
     - docker_host
+
+# Workbench CTs (#254): base OS only. Same boot-race guard as above — a fresh
+# workbench is seconds old when site.yml reaches this play.
+- name: Configure workbench hosts
+  hosts: workbench_hosts
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for freshly provisioned guests to accept SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 5
+      tags:
+        - always
+
+    - name: Gather facts once reachable
+      ansible.builtin.setup:
+      tags:
+        - always
+  roles:
+    - common

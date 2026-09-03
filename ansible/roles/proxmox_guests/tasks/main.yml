@@ -88,6 +88,8 @@
       - storage
       - root_disk_size
       - mounts
+      - bind_mounts
+      - hookscript
       - netif
       - net_bridge
       - nesting
@@ -842,6 +844,10 @@
 # skipped, which matches the provisioning module being skipped wholesale. A
 # LEFTOVER intent from a died run does surface in --check as pending marker
 # writes — drift made visible, which is the point.
+# `bind_mounts` (host-path binds, #254) is deliberately NOT in scope here or in
+# any task of this gate: a bind source is someone else's data (an NFS share the
+# host mounted), and the marker below would `touch .fresh-allocation` INSIDE it.
+# Nothing is allocated for a bind mount, so there is nothing to restore.
 - name: Assert every declared LXC mount carries exactly one mp= path
   ansible.builtin.assert:
     that:
@@ -971,12 +977,23 @@
     netif: "{{ item.netif | default({'net0': 'name=eth0,bridge=' + (item.net_bridge | default(proxmox_lxc_defaults.net_bridge)) + ',ip=dhcp,type=veth'}) }}"
     onboot: "{{ item.onboot | default(proxmox_lxc_defaults.onboot) }}"
     unprivileged: "{{ item.unprivileged | default(proxmox_lxc_defaults.unprivileged) }}"
+    # One key per LINE. The previous form joined with a Jinja '\n' inside a YAML
+    # folded scalar, which rendered as a LITERAL backslash-n: a fresh CT got a
+    # single authorized_keys line — the first file's key with the rest of the
+    # files glued into its comment — so it was reachable from exactly ONE operator
+    # platform (Critical Rule 2) until `common` repaired it, and `common` can only
+    # run from a platform that can log in. Measured on CT 202, 2026-09-02 (#254).
+    # The separator is a YAML double-quoted "\n" (a real newline) passed as a var;
+    # the glob is sorted so the file order is deterministic.
+    # (`q('file', <list>)` is not an option: ansible-core 2.19's lookup refuses a
+    # lazy list as a term.) Whitespace-trimmed tags, or the folded scalar's own
+    # indentation leaks into the first key line.
     pubkey: >-
-      {% set keys = [] %}
-      {% for keyfile in q('fileglob', inventory_dir + '/../files/ssh_keys/*.pub') %}
-      {%   set _ = keys.append(lookup('file', keyfile)) %}
-      {% endfor %}
-      {{ keys | join('\n') }}
+      {%- set ns = namespace(keys=[]) -%}
+      {%- for keyfile in q('fileglob', inventory_dir + '/../files/ssh_keys/*.pub') | sort -%}
+      {%-   set ns.keys = ns.keys + [lookup('file', keyfile)] -%}
+      {%- endfor -%}
+      {{ ns.keys | join(proxmox_pubkey_separator) }}
     features: >-
       {{ ['nesting=' ~ (item.nesting | default(proxmox_lxc_defaults.nesting)
       | ternary('1', '0'))] if (item.unprivileged
@@ -1015,6 +1032,9 @@
   # without a consumer (this role's own schema guards exist because of vars that
   # look like configuration and feed nothing).
   delegate_to: localhost
+  vars:
+    # A real newline (YAML double-quoted escape) — see the pubkey comment above.
+    proxmox_pubkey_separator: "\n"
   loop: "{{ proxmox_lxcs }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
@@ -1068,6 +1088,8 @@
     lxc_features_drift: []
     lxc_startup_drift: []
     lxc_resource_drift: []
+    lxc_bind_mount_drift: []
+    lxc_hookscript_drift: []
 
 # This task reported `changed` on every run for CT 201 while converging nothing,
 # for the whole life of the deployment (#86). Two independent bugs stacked:
@@ -1161,10 +1183,13 @@
     # rc first: a non-existent CT has no config to parse, and the compare must
     # never run against a stderr blob. (Same ordering rule as the computes below.)
     - item.rc == 0
-    # Privileged only — unchanged gate. Unprivileged CTs get `features` at CREATE
-    # time from the provisioning module and are not reconciled here; the
-    # `nfs_enabled` assert above enforces the matching half of that contract.
-    - not (item.item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
+    # Reconciled for privileged AND unprivileged CTs since #254. Unprivileged
+    # CTs also get `nesting` at CREATE time from the provisioning module, but a
+    # later flip in host_vars was silently inert — and nesting is not optional
+    # for them any more: an Ubuntu 26.04 guest (systemd 259) without it fails
+    # every early unit with status=243/CREDENTIALS, networkd included, so the CT
+    # boots with eth0 DOWN. The `nfs_enabled` assert above keeps `mount=nfs`
+    # privileged-only; for an unprivileged CT desired_features is `nesting=N`.
     - live_norm != desired_norm
 
 - name: Report LXC features drift
@@ -1245,7 +1270,8 @@
 # Same create-only gap as the VM tasks above: community.proxmox.proxmox
 # state=present never updates an existing container.
 #
-# RECONCILED: cores, memory. CREATE-TIME ONLY: swap, netif, mounts, rootfs,
+# RECONCILED: cores, memory (here); features, startup/onboot (above);
+# bind_mounts, hookscript (below, #254). CREATE-TIME ONLY: swap, netif, mounts, rootfs,
 # storage, unprivileged, ostemplate — changing those on a live container either
 # bounces its networking, moves its data mounts, or requires a recreate.
 #
@@ -1314,6 +1340,140 @@
 # section stayed confined, and with no match at all it appended into a snapshot
 # section. Those files are disqualified for lineinfile outright; see
 # docs/solutions/integration-issues/lineinfile-last-match-edits-lxc-snapshot-not-live-config.md
+# --- CT bind mounts + hookscript reconcile (#254) ---
+#
+# Both are `root@pam`-only in Proxmox: the API refuses a host-path bind mount and
+# a hookscript from a token (403), the same wall the privileged-CT `features`
+# task hit. So neither is passed to the provisioning module; they are applied by
+# `pct set` over SSH, after creation and BEFORE the first start below — a fresh
+# CT therefore boots with its binds and its pre-start gate already in place.
+#
+# `bind_mounts` is a separate key from `mounts` on purpose: `mounts` is
+# allocation-form, create-time-only and armed by the fresh-allocation restore
+# gate; a bind allocates nothing, is reconcilable, and must never be marked (the
+# marker would land inside the bound share — see the gate's assert above).
+#
+# Comparison basis: plain `pct config` (pending-merged), for the reason the
+# features task spells out — the question is "would re-issuing pct set change
+# anything". On a RUNNING CT a changed mountpoint takes effect at its next start;
+# the report says so rather than bouncing anything.
+- name: Assert bind_mounts entries are host-path binds with exactly one mp=
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^mp[0-9]+$')
+      - item.value is match('^/')
+      - (item.value.split(',') | select('match', 'mp=') | list | length) == 1
+      - item.key not in item.mounts
+    fail_msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}): bind_mounts.{{ item.key }} =
+      "{{ item.value }}" must be an mpN key, start with an absolute host path,
+      carry exactly one mp=, and not reuse a key declared under `mounts`.
+  vars:
+    lxc_bind_mounts_json: >-
+      {%- set out = [] -%}
+      {%- for ct in proxmox_lxcs | selectattr('bind_mounts', 'defined') -%}
+      {%- for k, v in ct.bind_mounts.items() -%}
+      {%- set _ = out.append({'vmid': ct.vmid, 'hostname': ct.hostname,
+      'key': k, 'value': v, 'mounts': (ct.mounts | default({})).keys() | list}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{- out | to_json -}}
+  loop: "{{ lxc_bind_mounts_json | from_json }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.key }}"
+
+# One target per (existing CT, bind_mounts key), carrying that CT's `pct config`
+# output so the compute below can read the live line without a second read.
+- name: Enumerate bind-mount reconcile targets
+  ansible.builtin.set_fact:
+    lxc_bind_targets: >-
+      {%- set out = [] -%}
+      {%- for r in lxc_config_raw.results | default([]) if r.rc == 0 and r.item.bind_mounts is defined -%}
+      {%- for k, v in r.item.bind_mounts.items() -%}
+      {%- set _ = out.append({'vmid': r.item.vmid, 'hostname': r.item.hostname,
+      'key': k, 'value': v, 'stdout': r.stdout}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{- out | to_json -}}
+
+- name: Compute LXC bind-mount drift
+  ansible.builtin.set_fact:
+    lxc_bind_mount_drift: "{{ lxc_bind_mount_drift + [drift_entry] }}"
+  vars:
+    live_value: >-
+      {{ item.stdout | regex_search('(?m)^' ~ item.key ~ ': (.*)$', '\1')
+         | default([], true) | join }}
+    # PVE may print the option list in its own order; compare as sorted sets.
+    live_norm: "{{ live_value | split(',') | reject('equalto', '') | sort | list }}"
+    desired_norm: "{{ item.value | split(',') | reject('equalto', '') | sort | list }}"
+    drift_entry:
+      vmid: "{{ item.vmid }}"
+      hostname: "{{ item.hostname }}"
+      key: "{{ item.key }}"
+      value: "{{ item.value }}"
+      human: "{{ item.key }} live={{ live_value | default('<unset>', true) }} desired={{ item.value }}"
+  loop: "{{ lxc_bind_targets | from_json }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.key }}"
+  when: live_norm != desired_norm
+
+- name: Report LXC bind-mount drift
+  ansible.builtin.debug:
+    msg: >-
+      CT {{ item.vmid }} ({{ item.hostname }}): {{ item.human }} — will apply via
+      pct set (a running CT picks it up at its next start)
+  loop: "{{ lxc_bind_mount_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.key }}"
+
+- name: Apply bind mounts to existing LXC containers
+  become: true
+  ansible.builtin.command:
+    argv:
+      - pct
+      - set
+      - "{{ item.vmid }}"
+      - "-{{ item.key }}"
+      - "{{ item.value }}"
+  changed_when: true
+  loop: "{{ lxc_bind_mount_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — {{ item.key }}"
+
+- name: Compute LXC hookscript drift
+  ansible.builtin.set_fact:
+    lxc_hookscript_drift: "{{ lxc_hookscript_drift + [drift_entry] }}"
+  vars:
+    live_hook: "{{ item.stdout | regex_search('(?m)^hookscript: (.*)$', '\\1') | default([], true) | join }}"
+    want_hook: "{{ item.item.hookscript | default('') }}"
+    drift_entry:
+      vmid: "{{ item.item.vmid }}"
+      hostname: "{{ item.item.hostname }}"
+      args: "{{ ['-delete', 'hookscript'] if want_hook | length == 0 else ['-hookscript', want_hook] }}"
+      human: "hookscript live={{ live_hook | default('<unset>', true) }} desired={{ want_hook | default('<unset>', true) }}"
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when:
+    - item.rc == 0
+    - live_hook != want_hook
+
+- name: Report LXC hookscript drift
+  ansible.builtin.debug:
+    msg: "CT {{ item.vmid }} ({{ item.hostname }}): {{ item.human }} — will apply via pct set"
+  loop: "{{ lxc_hookscript_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }})"
+
+- name: Apply hookscript to existing LXC containers
+  become: true
+  ansible.builtin.command:
+    argv: "{{ ['pct', 'set', item.vmid | string] + item.args }}"
+  changed_when: true
+  loop: "{{ lxc_hookscript_drift | default([]) }}"
+  loop_control:
+    label: "CT {{ item.vmid }} ({{ item.hostname }}) — hookscript"
+
 - name: Force AppArmor unconfined on privileged LXC containers (required for Docker)
   ansible.builtin.include_tasks: lxc-apparmor-unconfined.yml
   loop: "{{ proxmox_lxcs }}"
