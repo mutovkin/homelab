@@ -7,16 +7,25 @@
 - name: Assert every NFS mountpoint sits under /mnt/nfs/
   ansible.builtin.assert:
     that:
-      - item.path is match('^/mnt/nfs/[^/ ]+')
-      - item.path is not search(' ')
+      # Absolute, under /mnt/nfs/, no trailing slash, no spaces/glob chars: the
+      # hookscript word-splits and prefix-matches these strings verbatim.
+      - item.path is match('^/mnt/nfs/[^/ \t*?\[]+(/[^/ \t*?\[]+)*$')
     fail_msg: >-
-      proxmox_nfs_mounts entry {{ item.name }}: path "{{ item.path }}" must be a
-      space-free path under /mnt/nfs/ — that prefix is what the pre-start
-      hookscript gates on, so a mount elsewhere would be bound into CTs
-      ungated.
+      proxmox_nfs_mounts entry {{ item.name }}: path "{{ item.path }}" must be an
+      absolute path under /mnt/nfs/ with no trailing slash, spaces or glob
+      characters — that prefix is what the pre-start hookscript gates on, and a
+      trailing slash makes its prefix match fail (measured: "no entry covers it").
   loop: "{{ proxmox_nfs_mounts }}"
   loop_control:
     label: "{{ item.name }}"
+
+# The hookscript picks the LONGEST matching mountpoint for a bind source, so
+# nesting is supported — but only if both are declared here. State it once.
+- name: Assert no NFS mountpoint is declared twice
+  ansible.builtin.assert:
+    that:
+      - proxmox_nfs_mounts | map(attribute='path') | list | unique | length == proxmox_nfs_mounts | length
+    fail_msg: proxmox_nfs_mounts declares the same path more than once.
 
 # Once the share is mounted, `item.path` IS the share root — a `file:` with a
 # `mode:` there chmods the NAS dataset, not the local placeholder (measured
@@ -31,6 +40,8 @@
       - "{{ item.path }}"
   register: proxmox_nfs_mountpoint_probe
   changed_when: false
+  # util-linux 2.41 (measured on both hosts): 0 = mounted, 1 = path does not
+  # exist, 32 = exists but is not a mountpoint. Anything else is a real error.
   failed_when: proxmox_nfs_mountpoint_probe.rc not in [0, 1, 32]
   check_mode: false  # read-only probe
   loop: "{{ proxmox_nfs_mounts }}"
@@ -76,6 +87,12 @@
   loop_control:
     label: "{{ item.stdout }}"
   notify: reload-systemd
+
+# The hookscript may `systemctl start` these units LATER IN THIS SAME PLAY
+# (proxmox_guests starts CTs), and systemd starts the in-memory definition — so a
+# changed Options= would otherwise mount with stale options once, green.
+- name: Reload systemd now so the units the hookscript starts are current
+  ansible.builtin.meta: flush_handlers
 
 - name: Render the mountpoint list the hookscript reads
   ansible.builtin.template:

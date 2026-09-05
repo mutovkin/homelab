@@ -1055,10 +1055,11 @@
 # that file carries [pve:pending] and per-snapshot sections, each with its own copy
 # of the keys we match, and a line-anchored read cannot tell them apart (#86).
 #
-# ONE read feeds all three computes below (features, startup/onboot, cores/memory)
-# and is NOT re-read between their applies. That is safe by construction, not by
-# luck: the three touch disjoint field sets — `features`, `startup`/`onboot`,
-# `cores`/`memory` — so no apply can invalidate a later compute. Adding a fourth
+# ONE read feeds all five computes below (features, startup/onboot, cores/memory,
+# bind_mounts, hookscript) and is NOT re-read between their applies. That is safe
+# by construction, not by luck: they touch disjoint field sets — `features`,
+# `startup`/`onboot`, `cores`/`memory`, `mpN` host-path binds, `hookscript` — so no
+# apply can invalidate a later compute (#254 re-checked this). Adding a sixth
 # reconcile means checking that property again.
 - name: Read current LXC configuration
   become: true
@@ -1146,9 +1147,10 @@
       - not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
     fail_msg: >-
       CT {{ item.vmid }} ({{ item.hostname }}) sets nfs_enabled but is
-      unprivileged. nfs_enabled is only implemented for privileged CTs (the
-      features task is gated on privileged); either make the CT privileged or
-      drop nfs_enabled.
+      unprivileged. `mount=nfs` is only implemented for privileged CTs (an
+      unprivileged CT cannot mount NFS — give it a host bind mount via
+      `bind_mounts` instead, #254); either make the CT privileged or drop
+      nfs_enabled.
   loop: "{{ proxmox_lxcs | selectattr('nfs_enabled', 'defined') | selectattr('nfs_enabled') | list }}"
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — nfs_enabled"
@@ -1271,7 +1273,10 @@
 # state=present never updates an existing container.
 #
 # RECONCILED: cores, memory (here); features, startup/onboot (above);
-# bind_mounts, hookscript (below, #254). CREATE-TIME ONLY: swap, netif, mounts, rootfs,
+# bind_mounts, hookscript (below, #254 — bind_mounts converges ADDED/CHANGED keys
+# only, a key removed from host_vars stays live until removed by hand; an absent
+# `hookscript` means "none" and is deleted, unlike `startup` where absent means
+# "not managed"). CREATE-TIME ONLY: swap, netif, mounts, rootfs,
 # storage, unprivileged, ostemplate — changing those on a live container either
 # bounces its networking, moves its data mounts, or requires a recreate.
 #
@@ -1364,17 +1369,28 @@
       - item.value is match('^/')
       - (item.value.split(',') | select('match', 'mp=') | list | length) == 1
       - item.key not in item.mounts
+      # The hookscript word-splits and prefix-matches these strings verbatim, and
+      # `..` would defeat its /mnt/nfs/ prefix check.
+      - item.value is not search('[ \t*?\[]')
+      - item.value is not search('(^|/)\.\.(/|,|$)')
+      # A source under /mnt/nfs/ WITHOUT the gate is exactly the empty-bind trap
+      # the gate exists for; a copied block that drops the line must fail here.
+      - not (item.value is match('^/mnt/nfs/')) or item.hookscript == 'local:snippets/nfs-bind-prestart.sh'
     fail_msg: >-
       CT {{ item.vmid }} ({{ item.hostname }}): bind_mounts.{{ item.key }} =
       "{{ item.value }}" must be an mpN key, start with an absolute host path,
-      carry exactly one mp=, and not reuse a key declared under `mounts`.
+      carry exactly one mp=, contain no spaces, glob characters or `..`, and not
+      reuse a key declared under `mounts`; a source under /mnt/nfs/ also requires
+      `hookscript: local:snippets/nfs-bind-prestart.sh` on the CT (declared:
+      {{ item.hookscript | default('<none>', true) }}).
   vars:
     lxc_bind_mounts_json: >-
       {%- set out = [] -%}
       {%- for ct in proxmox_lxcs | selectattr('bind_mounts', 'defined') -%}
       {%- for k, v in ct.bind_mounts.items() -%}
       {%- set _ = out.append({'vmid': ct.vmid, 'hostname': ct.hostname,
-      'key': k, 'value': v, 'mounts': (ct.mounts | default({})).keys() | list}) -%}
+      'key': k, 'value': v, 'mounts': (ct.mounts | default({})).keys() | list,
+      'hookscript': ct.hookscript | default('')}) -%}
       {%- endfor -%}
       {%- endfor -%}
       {{- out | to_json -}}
@@ -1480,6 +1496,29 @@
   when: not (item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }}) — apparmor"
+
+# The start task below runs under `no_log`, which would censor the one
+# diagnostic a hookscript refusal produces. Run the gate FIRST, visibly, for every
+# CT that declares one and is about to be started: same script, same answer, but
+# its stderr reaches the operator. The mount it may raise is the gate's own side
+# effect — identical to what the start would trigger a moment later — so it is
+# not reported as a change.
+- name: Pre-flight the hookscript so a refusal is readable (no_log hides it below)
+  become: true
+  ansible.builtin.command:
+    argv:
+      - /var/lib/vz/snippets/{{ item.item.hookscript | regex_replace('^local:snippets/', '') }}
+      - "{{ item.item.vmid }}"
+      - pre-start
+  changed_when: false
+  loop: "{{ lxc_config_raw.results | default([]) }}"
+  loop_control:
+    label: "CT {{ item.item.vmid }} ({{ item.item.hostname }})"
+  when:
+    - item.rc == 0
+    - item.item.hookscript is defined
+    - item.item.hookscript is match('^local:snippets/')
+    - item.item.started | default(true)
 
 - name: Start LXC containers
   become: false

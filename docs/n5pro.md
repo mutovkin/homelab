@@ -606,7 +606,9 @@ creation and before first start.
 Recipe for a new workbench:
 
 1. Copy the CT 202 block in `host_vars/n5pro/vars.yml` (new vmid, hostname,
-   IP; keep `unprivileged: true`, `nesting: true`, the `hookscript`).
+   IP; keep `unprivileged: true`, `nesting: true`, the `hookscript` — the role
+   refuses a `/mnt/nfs/` bind without it, and refuses `..`, spaces or glob
+   characters in a bind value).
 2. Add it to `workbench_hosts` in `inventory/hosts.yml` and create
    `host_vars/<name>/vars.yml` with `common_extra_packages`.
 3. `task infra:hosts -- --limit n5pro`, then `task infra:guests -- --limit <name>`.

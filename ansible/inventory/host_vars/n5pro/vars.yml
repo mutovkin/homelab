@@ -314,7 +314,12 @@ proxmox_lxcs:
       mp0: "/mnt/nfs/music/lossless,mp=/music/lossless"
       mp1: "/mnt/nfs/music/compressed,mp=/music/compressed"
     hookscript: local:snippets/nfs-bind-prestart.sh
-    onboot: false # short-lived: started by the operator, not by the host's boot
+    onboot: false # short-lived: not started by the host's boot
+    # `started: true` means every infra:hosts run asks for it running, which invokes
+    # the NFS start gate: with TrueNAS unreachable the play waits NFS_BIND_WAIT
+    # (180 s) and then FAILS on this host — loudly, by design. Flip to `started:
+    # false` while the NAS is down or on a from-scratch rebuild before the TrueNAS
+    # share exists.
     started: true
     tags:
       - workbench

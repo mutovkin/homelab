@@ -51,8 +51,19 @@ The pre-existing subdirectory export for lms is untouched.
 - Dry-run delta vs master: only the new artefacts.
 - Live apply: CT created, binds + hookscript set before first start; second run
   `changed=0`; `configure-guests` second run `changed=0`.
-- Hookscript refused a start with the NAS blackholed and with a missing bind
-  source; started and mounted on demand once reachable.
+- Hookscript refused a start with the NAS blackholed, with a missing bind
+  source, with a failing `pct config` (bogus vmid) and with a symlink planted on
+  the share; started and mounted on demand once reachable.
+- Review round 1 (three agents) found and this branch fixed: hookscript exit 0 on
+  a failed `pct config` (fail-open), destroy playbook's "still declared" guard
+  vacuous (`include_vars` overwrote `proxmox_lxcs` — now namespaced, and seen to
+  refuse), inert tag on the dynamic include, handler-deferred `daemon-reload`,
+  last-match instead of longest-match mountpoint, no symlink/`..` defence, a
+  bind under `/mnt/nfs/` allowed without the hookscript, `hard` mount unmount at
+  shutdown (`ForceUnmount`/`LazyUnmount`), telegraf `inputs.disk` statfs on the
+  NFS mount (`ignore_fs` += nfs/nfs4), and the destroy play accepting a multi-node
+  `--limit`.
+- eq12 dry-run after widening the features reconcile: zero drift on CTs 101/102/104.
 - Writes from the CT arrive as 3000:3000 (seen from the lms container).
 - Destroy playbook: refused a wrong hostname, destroyed the real CT, recreate
   came up with both operator keys on separate lines.

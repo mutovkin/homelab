@@ -22,20 +22,28 @@
   tasks:
     # fresh_allocation_intent_dir is a proxmox_guests role default; read the same
     # file rather than duplicating the path here.
+    # NAMESPACED (`name:`), deliberately: a bare include_vars of that file also
+    # loads its `proxmox_lxcs: []`, and include_vars outranks host_vars — so the
+    # "still declared" guard below compared against an EMPTY list and could
+    # never fire (review of #254 measured it: [201, 202] before the include, []
+    # after). Read the one value we need through the namespace instead.
     - name: Load proxmox_guests defaults
       ansible.builtin.include_vars:
         file: "{{ playbook_dir }}/../roles/proxmox_guests/defaults/main.yml"
+        name: proxmox_guests_defaults
 
     - name: Require an explicit --limit, vmid and hostname
       ansible.builtin.assert:
         that:
           - ansible_limit is defined
+          - ansible_play_hosts | length == 1
           - vmid is defined
           - hostname is defined
           - vmid | string is match('^[0-9]+$')
         fail_msg: >-
-          Run with --limit <proxmox node> -e vmid=<id> -e hostname=<name>. All three
-          are required: this play destroys data.
+          Run with --limit <ONE proxmox node> -e vmid=<id> -e hostname=<name>. All
+          three are required and the limit must select exactly one node (vmids are
+          not unique across these standalone nodes): this play destroys data.
 
     - name: Refuse while the container is still declared in host_vars
       ansible.builtin.assert:
@@ -100,7 +108,7 @@
 
     - name: Remove any fresh-allocation intent record for this vmid
       ansible.builtin.file:
-        path: "{{ fresh_allocation_intent_dir }}/{{ vmid }}"
+        path: "{{ proxmox_guests_defaults.fresh_allocation_intent_dir }}/{{ vmid }}"
         state: absent
 
     - name: Remind about the inventory side
@@ -109,3 +117,4 @@
           CT {{ vmid }} ({{ hostname }}) is gone from {{ inventory_hostname }}. Make sure
           inventory/hosts.yml and inventory/host_vars/<name>/ no longer reference it,
           and drop its line from ~/.ssh/known_hosts if you reuse the IP.
+      when: destroy_config.rc == 0

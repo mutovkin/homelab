@@ -13,3 +13,11 @@ What={{ m.server }}:{{ m.export }}
 Where={{ m.path }}
 Type=nfs
 Options={{ m.options }}
+# Shutdown: the NFS server (VM 200) may already be stopped when this hard mount
+# is unmounted, which would otherwise block the reboot on a D-state umount.
+# Force + lazy detach instead. (Deliberately NOT ordered After=pve-guests.service:
+# the hookscript starts this unit from INSIDE pve-guests' own start for an
+# onboot CT, and that ordering would deadlock.) Argued from systemd semantics,
+# not measured — a host reboot with the mount live is the test.
+ForceUnmount=true
+LazyUnmount=true
