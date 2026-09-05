@@ -141,8 +141,9 @@ them there after any hardware re-seat that changes a path or IOMMU group.
   unprivileged CT without nesting fails every early unit with
   `status=243/CREDENTIALS`, and the CT comes up with `eth0` DOWN)
 - net0: vmbr1 at 192.168.30.16, `onboot: false`
-- `/music/lossless` and `/music/compressed` are **host bind mounts** of the
-  TrueNAS music dataset — see [Workbench CTs](#workbench-cts) below
+- `/music` is a **host bind mount** of the TrueNAS music dataset root (one bind, so
+  `mv` between `lossless/` and `compressed/` is a rename, #256) — see
+  [Workbench CTs](#workbench-cts) below
 - Configured by `common` only (group `workbench_hosts`); deliberately not a
   vector/telegraf agent
 
@@ -580,8 +581,10 @@ inventory line, a package list, and a teardown command.
 **NFS reaches the CT by host bind mount, not by mounting inside it.** An
 unprivileged CT cannot mount NFS, so the Proxmox host mounts the dataset
 (`proxmox_nfs_mounts` in `host_vars/n5pro/vars.yml` → `mnt-nfs-music.mount`)
-and the CT declares `bind_mounts` for subdirectories. Two consequences shape
-the design:
+and the CT declares `bind_mounts` for it. Bind the dataset root once rather than
+one subdirectory per bind: `rename()` cannot cross mount points, so two binds turn
+every `mv` between them into a copy+delete through the CT (#256). Two consequences
+shape the design:
 
 - **Boot order is inverted here** — the NFS server is VM 200 on this host, so
   the `.mount` unit is never enabled. A **pre-start hookscript**

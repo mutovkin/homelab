@@ -311,8 +311,13 @@ proxmox_lxcs:
       # and stale ARP entries on the LAN make the same IP time out for minutes.
       net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:5B:D0:22,ip=192.168.30.16/18,type=veth"
     bind_mounts:
-      mp0: "/mnt/nfs/music/lossless,mp=/music/lossless"
-      mp1: "/mnt/nfs/music/compressed,mp=/music/compressed"
+      # ONE bind of the dataset root, not one per subdirectory (#256): rename()
+      # cannot cross mount points, so with lossless and compressed as separate
+      # binds a `mv` between them was a copy+delete over the host-only bridge.
+      # Bound as a single tree, that mv is a rename on the NAS — instant.
+      # (mp1 from the two-bind era was removed by hand: the reconcile adds and
+      # changes keys but never deletes them.)
+      mp0: "/mnt/nfs/music,mp=/music"
     hookscript: local:snippets/nfs-bind-prestart.sh
     onboot: false # short-lived: not started by the host's boot
     # `started: true` means every infra:hosts run asks for it running, which invokes
@@ -326,8 +331,8 @@ proxmox_lxcs:
       - workbench
     description: >-
       Workbench CT (#254) — music tag processing over SSH.
-      /music/lossless and /music/compressed are host bind mounts of the
-      TrueNAS music dataset (pre-start hookscript gates on the NFS mount).
+      /music is a host bind mount of the TrueNAS music dataset root
+      (pre-start hookscript gates on the NFS mount).
       Throwaway: retire with task infra:guest:destroy.
 
 # --- telegraf_agent (#186) ---------------------------------------------------
