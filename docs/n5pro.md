@@ -588,9 +588,14 @@ the design:
   (`local:snippets/nfs-bind-prestart.sh`, deployed by `proxmox_host`) starts it
   on demand and refuses `pct start` while the share is not a live mountpoint or
   a bind source is missing on it. LXC binds whatever is at the source when the
-  CT starts; an empty directory would stay empty for the CT's life. Measured
-  2026-09-02: NAS unreachable → `hookscript error … exit code 1`, CT stays
-  stopped; NAS back → mounts and starts.
+  CT starts; an empty directory would stay empty for the CT's life. Refusals
+  measured 2026-09-02/04, each one seen to fire: NAS unreachable (`… is not
+  mounted after 12s`, with the unit's `systemctl status` echoed), bind source
+  missing on the share, `pct config` itself failing (a bogus vmid), and a symlink
+  planted on the share (`ln -s /` — any Mapall writer could plant one, and LXC
+  would bind host `/` through it). NAS back → mounts and starts. The role also
+  pre-flights the script visibly before `pct start`, because the start task runs
+  under `no_log` and would censor the refusal.
 - **uid mapping is server-side.** CT root is host uid 100000; the library is
   owned by uid/gid 3000. The TrueNAS share for the dataset root is exported to
   the host's vmbr2 address with *Mapall* to the library owner, so every write
