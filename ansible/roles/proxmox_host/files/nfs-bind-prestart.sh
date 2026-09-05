@@ -26,8 +26,18 @@
 #
 # Paths are word-split, so mountpoints and bind sources must not contain spaces
 # or glob characters (the role's asserts refuse them at declaration time).
+#
+# Every stat() of the NFS path (mountpoint, -L, realpath, -d) can block in
+# uninterruptible wait when the share is ALREADY mounted `hard` and the NAS then
+# goes away — the deadline below only bounds `systemctl start`. So each such call
+# runs under `timeout -s KILL` (hard-NFS waits are TASK_KILLABLE; SIGTERM would
+# not interrupt them) and rc 124/137 reads as "not live — refusing".
 set -eu
 set -f  # no glob expansion while word-splitting $sources
+
+stat_timeout="${NFS_STAT_TIMEOUT:-30}"
+# Run a stat-ish test under a killable timeout; success only on a clean rc 0.
+probe() { timeout -s KILL "$stat_timeout" "$@"; }
 
 vmid="$1"
 phase="$2"
@@ -50,7 +60,7 @@ sources=$(printf '%s\n' "$cfg" | sed -n 's|^mp[0-9]*: \(/[^,]*\),.*mp=.*|\1|p')
 
 for src in $sources; do
     case "$src" in
-        /mnt/nfs/*) ;;
+        /mnt/nfs|/mnt/nfs/*) ;;   # bare /mnt/nfs is gated too: it then matches no entry and refuses
         *) continue ;;
     esac
 
@@ -76,9 +86,9 @@ for src in $sources; do
     unit=$(systemd-escape -p --suffix=mount "$mnt")
     deadline=$(( $(date +%s) + wait_s ))
     start_err=""
-    until start_err=$(systemctl start "$unit" 2>&1 >/dev/null) && mountpoint -q "$mnt"; do
+    until start_err=$(systemctl start "$unit" 2>&1 >/dev/null) && probe mountpoint -q "$mnt"; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "$tag: $unit ($mnt) is not mounted after ${wait_s}s — refusing to start with an empty $src" >&2
+            echo "$tag: $unit ($mnt) is not mounted (or not answering) after ${wait_s}s — refusing to start with an empty $src" >&2
             [ -n "$start_err" ] && echo "$tag: last systemctl start error: $start_err" >&2
             systemctl status "$unit" --no-pager -l 2>&1 | sed "s/^/$tag:   /" >&2 || true
             exit 1
@@ -86,20 +96,20 @@ for src in $sources; do
         sleep 5
     done
 
-    if [ -L "$src" ]; then
+    if probe test -L "$src"; then
         echo "$tag: $src is a symlink on the share — refusing to bind through it" >&2
         exit 1
     fi
-    real=$(realpath -e -- "$src") || {
-        echo "$tag: $mnt is mounted but $src does not exist on the share — refusing to bind a path that does not exist" >&2
+    real=$(probe realpath -e -- "$src") || {
+        echo "$tag: $mnt is mounted but $src does not exist on the share (or the NAS stopped answering) — refusing" >&2
         exit 1
     }
     if [ "$real" != "$src" ]; then
         echo "$tag: $src resolves to $real, not to itself — refusing to bind a path that is not what it claims" >&2
         exit 1
     fi
-    if [ ! -d "$src" ]; then
-        echo "$tag: $src is not a directory on the share — refusing" >&2
+    if ! probe test -d "$src"; then
+        echo "$tag: $src is not a directory on the share (or the NAS stopped answering) — refusing" >&2
         exit 1
     fi
     echo "$tag: $src is live on $unit"

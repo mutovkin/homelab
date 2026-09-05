@@ -35,13 +35,20 @@
 - name: Probe whether NFS mountpoints are currently mounted
   ansible.builtin.command:
     argv:
+      # Under a killable timeout: on an already-mounted hard NFS path with the NAS
+      # down, mountpoint's stat() blocks forever and would hang the whole play.
+      - timeout
+      - -s
+      - KILL
+      - "30"
       - mountpoint
       - -q
       - "{{ item.path }}"
   register: proxmox_nfs_mountpoint_probe
   changed_when: false
   # util-linux 2.41 (measured on both hosts): 0 = mounted, 1 = path does not
-  # exist, 32 = exists but is not a mountpoint. Anything else is a real error.
+  # exist, 32 = exists but is not a mountpoint. 124/137 = timed out (NAS not
+  # answering) — a real failure, named as such. Anything else is a real error.
   failed_when: proxmox_nfs_mountpoint_probe.rc not in [0, 1, 32]
   check_mode: false  # read-only probe
   loop: "{{ proxmox_nfs_mounts }}"

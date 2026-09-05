@@ -1377,7 +1377,7 @@
       - item.value is not search('(^|/)\.\.(/|,|$)')
       # A source under /mnt/nfs/ WITHOUT the gate is exactly the empty-bind trap
       # the gate exists for; a copied block that drops the line must fail here.
-      - not (item.value is match('^/mnt/nfs/')) or item.hookscript == 'local:snippets/nfs-bind-prestart.sh'
+      - not (item.value is match('^/mnt/nfs(/|,)')) or item.hookscript == 'local:snippets/nfs-bind-prestart.sh'
     fail_msg: >-
       CT {{ item.vmid }} ({{ item.hostname }}): bind_mounts.{{ item.key }} =
       "{{ item.value }}" must be an mpN key, start with an absolute host path,

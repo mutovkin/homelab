@@ -18,6 +18,8 @@ Options={{ m.options }}
 # Force + lazy detach instead. (Deliberately NOT ordered After=pve-guests.service:
 # the hookscript starts this unit from INSIDE pve-guests' own start for an
 # onboot CT, and that ordering would deadlock.) Argued from systemd semantics,
-# not measured — a host reboot with the mount live is the test.
+# not measured — a host reboot with the mount live is the test. It also relies on
+# a bind-mounting CT carrying NO `startup:` order: PVE's stopall tears unordered
+# guests down first, so the CT releases the share before the NAS VM stops.
 ForceUnmount=true
 LazyUnmount=true

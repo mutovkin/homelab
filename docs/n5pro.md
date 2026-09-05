@@ -136,7 +136,7 @@ them there after any hardware re-seat that changes a path or IOMMU group.
 ### CT 202: music-workbench (workbench CT, #254)
 
 - Short-lived, **unprivileged** Ubuntu 26.04 box for music tag processing over
-  SSH (beets, picard/fpcalc, ffmpeg, flac, mediainfo)
+  SSH (beets, fpcalc, ffmpeg, flac, mediainfo)
 - 4 cores, 4 GB RAM, 16 GB root, `nesting=1` (**required**: systemd 259 in an
   unprivileged CT without nesting fails every early unit with
   `status=243/CREDENTIALS`, and the CT comes up with `eth0` DOWN)

@@ -316,10 +316,11 @@ proxmox_lxcs:
     hookscript: local:snippets/nfs-bind-prestart.sh
     onboot: false # short-lived: not started by the host's boot
     # `started: true` means every infra:hosts run asks for it running, which invokes
-    # the NFS start gate: with TrueNAS unreachable the play waits NFS_BIND_WAIT
-    # (180 s) and then FAILS on this host — loudly, by design. Flip to `started:
-    # false` while the NAS is down or on a from-scratch rebuild before the TrueNAS
-    # share exists.
+    # the NFS start gate: with TrueNAS unreachable the play waits up to NFS_BIND_WAIT
+    # (180 s, or ~30 s per stat if the share was already mounted) and then FAILS on
+    # this host — loudly, by design. Flip to `started: false` while the NAS is down
+    # or on a from-scratch rebuild before the TrueNAS share exists.
+    # No `startup:` order, deliberately — see templates/nfs.mount.j2.
     started: true
     tags:
       - workbench
