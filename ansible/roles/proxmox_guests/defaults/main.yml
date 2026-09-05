@@ -26,6 +26,7 @@ truenas_iso_sha256: "8a6ad50e5ad56092bd017621d45c4e442d24b5d0e3eecf916e0295c8172
 # LXC definitions use `os: ubuntu-24.04` — the role resolves the latest
 # matching template and downloads it automatically.
 proxmox_templates:
+  ubuntu-26.04: "ubuntu-26.04-standard"
   debian-13: "debian-13-standard"
   debian-12: "debian-12-standard"
   ubuntu-24.04: "ubuntu-24.04-standard"

@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+# Rendered from proxmox_nfs_mounts (roles/proxmox_host, #254).
+#
+# NOT enabled, on purpose. The NFS server may be a guest of this very host
+# (n5pro: TrueNAS is VM 200), so a boot-time mount can never succeed here.
+# /var/lib/vz/snippets/nfs-bind-prestart.sh starts this unit on demand before
+# any CT that bind-mounts a directory under Where= is allowed to start.
+[Unit]
+Description=NFS {{ m.name }} ({{ m.server }}:{{ m.export }})
+
+[Mount]
+What={{ m.server }}:{{ m.export }}
+Where={{ m.path }}
+Type=nfs
+Options={{ m.options }}
+# Shutdown: the NFS server (VM 200) may already be stopped when this hard mount
+# is unmounted, which would otherwise block the reboot on a D-state umount.
+# Force + lazy detach instead. (Deliberately NOT ordered After=pve-guests.service:
+# the hookscript starts this unit from INSIDE pve-guests' own start for an
+# onboot CT, and that ordering would deadlock.) Argued from systemd semantics,
+# not measured — a host reboot with the mount live is the test. It also relies on
+# a bind-mounting CT carrying NO `startup:` order: PVE's stopall tears unordered
+# guests down first, so the CT releases the share before the NAS VM stops.
+ForceUnmount=true
+LazyUnmount=true

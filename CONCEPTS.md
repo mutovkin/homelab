@@ -38,6 +38,47 @@ manage host-only kernel facilities: every Compose service must opt out of AppArm
 (`security_opt: apparmor:unconfined`) and the LXC's own AppArmor service is masked
 before Docker starts.
 
+### Workbench guest
+A short-lived, unprivileged Guest configured with the base OS only — no Docker, no
+metrics or log agent — that an operator logs into to run command-line tools against
+NAS data and then deletes.
+
+Its lifecycle is declare, use, delete: it exists exactly as long as its inventory
+declaration does, and teardown refuses to run while that declaration still stands,
+because the next provisioning run would rebuild what was just destroyed. NAS access
+reaches it through a Host bind mount rather than a mount of its own, since an
+unprivileged guest cannot mount network filesystems. Nesting is not optional for a
+workbench on a current template: the guest's own init system needs it to start its
+early services, and without it the guest reports running while its network never
+comes up.
+
+### Host bind mount
+A directory the Proxmox host has mounted from the NAS and hands into a Guest as a
+mount point, so the guest sees the share without holding a network mount itself.
+
+The host takes the mount, not the guest, which inverts the Host-only NFS bridge's
+ordering rule: the provider is a guest of the same host, so the host can never mount
+at boot and the mount must be raised on demand. What the guest binds is whatever sits
+at the source path at start time — an unmounted placeholder binds as an empty
+directory and stays empty for the guest's life — which is why a Bind-source start gate
+guards every start. Ownership is settled on the NAS side by mapping every writer to
+the share's owner, so identity inside the guest is irrelevant to what lands on disk;
+the guest displays the owner as unknown, and that is expected. A bind mount allocates
+nothing, so unlike an allocated mount point it is reconciled (additions and changes;
+removals are manual) rather than create-time-only, and must never be treated as a
+fresh volume awaiting restore.
+
+### Bind-source start gate
+A pre-start hook on the Proxmox host that raises the network mounts a Guest's Host
+bind mounts depend on and refuses the start while any bind source is not a live,
+present directory on the mounted share.
+
+The gate exists because a start that proceeds past an absent mount does not fail — it
+succeeds with an empty directory in the share's place, the quietest possible wrong
+outcome. Refusing is therefore the fail-safe direction, and the gate counts as proven
+only once it has been seen to refuse: with the provider unreachable, and with a
+source directory missing from a mounted share.
+
 ### Monitor-only container
 A service whose image updates are watched and reported but never applied
 automatically, reserving the upgrade decision for an operator — used for anything
@@ -366,7 +407,8 @@ than a frozen past copy, though both are sections in the same file.
 A Guest attribute the role sets when it creates the guest and then never reconciles,
 because converging it on a live guest would be destructive, guest-visible, or both.
 
-The category is a deliberate boundary, not an omission: disks, mount points, network
+The category is a deliberate boundary, not an omission: disks, allocated mount points
+(a Host bind mount is not one — it allocates nothing and is reconciled), network
 interface definitions, firmware and machine type are declared in inventory so a guest
 can be rebuilt from scratch, while the running guest is left alone. The cost is that
 inventory and live state may legitimately disagree for these fields — so a declared
