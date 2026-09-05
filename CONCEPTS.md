@@ -64,8 +64,9 @@ directory and stays empty for the guest's life — which is why a Bind-source st
 guards every start. Ownership is settled on the NAS side by mapping every writer to
 the share's owner, so identity inside the guest is irrelevant to what lands on disk;
 the guest displays the owner as unknown, and that is expected. A bind mount allocates
-nothing, so unlike an allocated mount point it is reconciled rather than
-create-time-only, and must never be treated as a fresh volume awaiting restore.
+nothing, so unlike an allocated mount point it is reconciled (additions and changes;
+removals are manual) rather than create-time-only, and must never be treated as a
+fresh volume awaiting restore.
 
 ### Bind-source start gate
 A pre-start hook on the Proxmox host that raises the network mounts a Guest's Host

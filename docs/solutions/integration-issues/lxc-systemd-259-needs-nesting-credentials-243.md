@@ -76,13 +76,14 @@ $ systemctl is-active systemd-networkd
 failed
 
 $ systemctl --failed
-# 19 units, every one of them:
-#   (code=exited, status=243/CREDENTIALS)
-# systemd-networkd, systemd-resolved, systemd-journald, systemd-journal-flush,
-# systemd-sysctl, systemd-sysusers, systemd-tmpfiles-setup,
-# systemd-tmpfiles-setup-dev, systemd-tmpfiles-setup-dev-early,
-# systemd-network-generator, systemd-udev-load-credentials, systemd-firstboot,
-# plus their .socket units
+# 19 units, every service among them (code=exited, status=243/CREDENTIALS).
+# 12 services: systemd-firstboot, systemd-journal-flush, systemd-journald,
+#   systemd-network-generator, systemd-networkd, systemd-resolved, systemd-sysctl,
+#   systemd-sysusers, systemd-tmpfiles-setup-dev-early, systemd-tmpfiles-setup-dev,
+#   systemd-tmpfiles-setup, systemd-udev-load-credentials
+# 7 sockets: systemd-journald-dev-log, systemd-journald, systemd-networkd,
+#   systemd-networkd-resolve-hook, systemd-networkd-varlink,
+#   systemd-resolved-monitor, systemd-resolved-varlink
 ```
 
 On the host:
@@ -121,9 +122,10 @@ sysusers were equally dead.
 
 ## Solution
 
-Two changes on branch `feat/254-workbench-lxc` (#254, pending merge as of this writing).
+Two changes on branch `feat/254-workbench-lxc` for #254 (unmerged as of this writing).
 
-**1. Declare nesting for the CT** — `ansible/inventory/host_vars/n5pro/vars.yml:292-307`:
+**1. Declare nesting for the CT** — `ansible/inventory/host_vars/n5pro/vars.yml:292-307`
+(the "before" is the block's initial draft, never committed):
 
 ```yaml
 # before
@@ -147,7 +149,7 @@ Two changes on branch `feat/254-workbench-lxc` (#254, pending merge as of this w
 ```
 
 **2. Reconcile features for unprivileged CTs too** — "Compute LXC features drift",
-`ansible/roles/proxmox_guests/tasks/main.yml:1156-1193`:
+`ansible/roles/proxmox_guests/tasks/main.yml:1160-1197`:
 
 ```yaml
 # before (master, main.yml:1160-1168)
@@ -158,14 +160,14 @@ Two changes on branch `feat/254-workbench-lxc` (#254, pending merge as of this w
     - not (item.item.unprivileged | default(proxmox_lxc_defaults.unprivileged))
     - live_norm != desired_norm
 
-# after (feat/254-workbench-lxc, main.yml:1182-1193)
+# after (feat/254-workbench-lxc, main.yml:1186-1197)
   when:
     - item.rc == 0
     # Reconciled for privileged AND unprivileged CTs since #254. …
     - live_norm != desired_norm
 ```
 
-`desired_features` (main.yml:1166-1169) still adds `mount=nfs` only when `nfs_enabled`
+`desired_features` (main.yml:1170-1173) still adds `mount=nfs` only when `nfs_enabled`
 is set, and the existing `nfs_enabled` assert keeps that privileged-only — so for an
 unprivileged CT the reconciled string is exactly `nesting=N`.
 
@@ -216,7 +218,9 @@ one feature that *is* a privilege boundary.
 ## Prevention
 
 - **Treat `nesting: true` as required for any unprivileged CT on a modern-systemd
-  template** — Ubuntu 24.04+/26.04, Debian 13 and later. The role default stays `false`
+  template.** Measured on Ubuntu 26.04 (systemd 259) only; expect the same on any
+  template whose systemd is recent enough to earn Proxmox's warning, and verify from
+  inside on first boot. The role default stays `false`
   (`ansible/roles/proxmox_guests/defaults/main.yml:90`), so the declaration is per-CT; write the reason beside it, as
   CT 202's block does.
 - **Read the task log WARN lines.** `vzcreate` and `vzstart` logs under
@@ -231,7 +235,7 @@ one feature that *is* a privilege boundary.
 
   `pct status` and a listening sshd both survive a broken early boot.
 - **A host_vars flip must converge.** The role now reconciles `features` for unprivileged
-  CTs (`ansible/roles/proxmox_guests/tasks/main.yml:1182-1193`); a changed `nesting` value shows as drift in `--check`
+  CTs (`ansible/roles/proxmox_guests/tasks/main.yml:1186-1197`); a changed `nesting` value shows as drift in `--check`
   and is applied via `pct set`. Remember the apply is *pending* on a running CT — the
   role reports it, the operator schedules the restart.
 - **`243/CREDENTIALS` across many unrelated units is a container-capability symptom**, not
@@ -240,7 +244,7 @@ one feature that *is* a privilege boundary.
 ## Related Issues
 
 - #254 — workbench LXC pattern + CT 202 `music-workbench`; carries both fixes above
-  (branch `feat/254-workbench-lxc`, pending merge).
+  (branch `feat/254-workbench-lxc`, unmerged as of this writing).
 - [docs/solutions/integration-issues/lxc-features-nfs-invalid-key-silent-green.md](lxc-features-nfs-invalid-key-silent-green.md)
   — the previous time a `features` value never reached the CT while the run stayed green;
   same `pct set` path, same "compare against `pct config`, not the raw conf" rule, and

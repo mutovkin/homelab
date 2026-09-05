@@ -1138,9 +1138,11 @@
 #   actually in force"; the role deliberately does not bounce the CT that hosts
 #   the docker fleet to close that gap.
 
-# The features task only runs for PRIVILEGED containers, so `nfs_enabled` on an
-# unprivileged one would be silently inert — a var that looks like configuration
-# and does nothing, which is the failure mode this whole issue is about.
+# `mount=nfs` is only meaningful for PRIVILEGED containers (an unprivileged CT
+# cannot mount NFS), so `nfs_enabled` on an unprivileged one would be silently
+# inert — a var that looks like configuration and does nothing, which is the
+# failure mode this whole issue is about. (The features task itself reconciles
+# both kinds since #254; this assert is what keeps `mount=nfs` privileged-only.)
 - name: Assert nfs_enabled is only set on privileged containers
   ansible.builtin.assert:
     that:
