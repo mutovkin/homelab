@@ -18,3 +18,8 @@
   ansible.builtin.command: proxmox-boot-tool refresh
   changed_when: true
   listen: refresh-boot
+
+- name: Reload systemd units
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: reload-systemd

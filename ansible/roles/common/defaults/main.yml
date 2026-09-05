@@ -20,6 +20,11 @@ unattended_upgrades_remove_unused_dependencies: true
 # Ansible does not merge — so add packages here rather than in group_vars. The
 # role's own dependencies are held separately in vars/main.yml, out of reach of
 # any inventory override.
+# Per-host ADDITIONS on top of common_packages (#254). Override this in host_vars,
+# not common_packages: an inventory override REPLACES a list, so a workbench that
+# set common_packages would silently lose curl/vim/jq and friends.
+common_extra_packages: []
+
 common_packages:
   - curl
   - wget

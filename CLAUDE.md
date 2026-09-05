@@ -561,6 +561,24 @@ Hard-won lessons — check here before debugging from scratch.
   purge` and compare the answer as a set.
   See [docs/solutions/conventions/prove-a-guard-whose-failing-state-cannot-exist-yet.md](docs/solutions/conventions/prove-a-guard-whose-failing-state-cannot-exist-yet.md).
 
+- **Unprivileged CTs: `bind_mounts` ≠ `mounts`, nesting is not optional on modern
+  systemd, and a host-mounted NFS path is NAS data the moment it is mounted.** The
+  workbench pattern (#254) gives an unprivileged CT NAS access by having the Proxmox host
+  mount the dataset and bind subdirectories in. Three traps, all measured. (1) A bind
+  declared under `mounts` would be armed by the fresh-allocation gate, which then
+  `touch`es `.fresh-allocation` INSIDE the NAS share — hence the separate `bind_mounts`
+  key, reconciled by `pct set` (bind mounts and hookscripts are `root@pam`-only; the API
+  token 403s). (2) Ubuntu 26.04's systemd 259 in an unprivileged CT without `nesting=1`
+  fails every early unit with `status=243/CREDENTIALS` — networkd included — so `pct`
+  reports "running" while `eth0` is DOWN; Proxmox even prints the warning at create. The
+  features reconcile now covers unprivileged CTs too. (3) A `file: mode:` on the mountpoint
+  chmods the DATASET ROOT once the share is mounted (it rewrote `/mnt/vault/media/music`
+  to 755) — probe `mountpoint -q` and create placeholders only on unmounted paths. Also
+  from that change: the LXC create step joined SSH key files with a literal `\n`, so every
+  fresh CT was reachable from ONE operator platform until `common` repaired it; and the
+  hookscript start gate must be seen to REFUSE (NAS unreachable, missing bind source)
+  before it counts. See [docs/n5pro.md — Workbench CTs](docs/n5pro.md#workbench-cts).
+
 ## Conventions
 
 - **Ansible is the only IaC** — no Pulumi/Terraform.

@@ -72,7 +72,9 @@
   report_active = false
 
 [[inputs.disk]]
-  ignore_fs = ["tmpfs", "devtmpfs", "devfs", "iso9660", "overlay", "aufs", "squashfs"]
+  # nfs/nfs4: n5pro host-mounts a hard NFS share for CT bind mounts (#254); with the
+  # NAS down a statfs() on it blocks uninterruptibly and would wedge this gather.
+  ignore_fs = ["tmpfs", "devtmpfs", "devfs", "iso9660", "overlay", "aufs", "squashfs", "nfs", "nfs4"]
 
 # Meaningful on physical hosts (the container config disables it for LXC reasons
 # that do not apply here): real NVMe queue/latency/throughput per device.

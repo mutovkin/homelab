@@ -16,3 +16,22 @@ kernel_cmdline_extra: []
 #            Without it, a module that loads but binds NOTHING reports success.
 # Empty = touch no modules. See docs/eq12.md for why eq12 needs force_id.
 proxmox_host_hwmon_modules: []
+
+# NFS datasets this Proxmox HOST mounts so they can be bind-mounted into
+# unprivileged CTs (#254). Each entry:
+#   name:    short label (unit Description only)
+#   server:  NFS server address
+#   export:  exported path on the server
+#   path:    mountpoint on this host — MUST sit under /mnt/nfs/, the prefix the
+#            pre-start hookscript gates on
+#   options: mount options. `retry=0` so a down server fails one attempt fast and
+#            the hookscript's own 5-second loop does the retrying; `hard` because
+#            the consumers WRITE (a soft mount silently corrupts on timeout).
+# The rendered .mount units are deliberately NEVER enabled: on n5pro the NFS
+# server is VM 200 on this same host, so nothing is there to mount at boot. The
+# hookscript deployed alongside (files/nfs-bind-prestart.sh) starts them on
+# demand, right before a bind-mounting CT starts, and refuses the start if the
+# mount is not live — the fail-safe direction, since a bind mount taken from an
+# empty directory stays empty for the CT's whole life.
+# Empty = touch nothing (eq12).
+proxmox_nfs_mounts: []

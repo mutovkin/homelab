@@ -15,7 +15,7 @@
 
 - name: Install common packages
   ansible.builtin.apt:
-    name: "{{ (common_role_required_packages + common_packages) | unique }}"
+    name: "{{ (common_role_required_packages + common_packages + common_extra_packages) | unique }}"
     state: present
 
 # --- Role dependency guard ---

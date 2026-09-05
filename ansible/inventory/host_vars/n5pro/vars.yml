@@ -122,6 +122,26 @@ hostonly_bridge: vmbr2
 hostonly_host_ip: "10.99.99.1"
 hostonly_host_netmask: "255.255.255.0"
 
+# TrueNAS on vmbr2. Canonical copy for the HOST; host_vars/n5pro_docker carries
+# the same value for the docker guest's compose volumes (two hosts, two files —
+# Ansible host_vars do not cross hosts).
+truenas_hostonly_ip: "10.99.99.2"
+
+# NFS datasets this Proxmox host mounts for bind-mounting into unprivileged
+# workbench CTs (#254; model in roles/proxmox_host/defaults). The TrueNAS share
+# for the dataset ROOT is exported to this host's vmbr2 address (10.99.99.1) with
+# Mapall to the library owner (uid/gid 3000), so every write from any CT lands
+# with the library's own ownership. `lossless`/`compressed` are plain
+# directories inside the dataset, not datasets — one mount covers both.
+# The .mount unit is never enabled (TrueNAS is VM 200 on this host); the
+# pre-start hookscript mounts it on demand.
+proxmox_nfs_mounts:
+  - name: music
+    server: "{{ truenas_hostonly_ip }}"
+    export: /mnt/vault/media/music
+    path: /mnt/nfs/music
+    options: "nfsvers=4,hard,_netdev,noatime,retry=0"
+
 # === VM/LXC Definitions (managed by proxmox_guests role) ===
 # Ported from infrastructure/machines/n5pro.ts
 
@@ -248,6 +268,67 @@ proxmox_lxcs:
       (Immich/Frigate/NextCloud/PostgreSQL planned).
       net0: vmbr1 (LAN), net1: vmbr2 (host-only NFS).
       Boots after TrueNAS (order=2).
+
+  # --- Workbench CT (#254) ----------------------------------------------------
+  # A short-lived, unprivileged general-purpose box: SSH in, run CLI tools, throw
+  # it away. To make another one: copy this block (new vmid/hostname/IP), add the
+  # host to `workbench_hosts` in inventory/hosts.yml with a host_vars file
+  # carrying its `common_extra_packages`, run `task infra:hosts -- --limit n5pro`
+  # then `task infra:guests -- --limit <name>`. To retire it: delete this block
+  # and the inventory entry, then `task infra:guest:destroy -- --limit n5pro
+  # -e vmid=<id> -e hostname=<name>` (the playbook refuses while the block is
+  # still declared, so a later infra:hosts run cannot resurrect it).
+  #
+  # NFS access is by HOST bind mount: the Proxmox host mounts the dataset
+  # (proxmox_nfs_mounts above) and `bind_mounts` hands subdirectories in. Unlike
+  # `mounts`, `bind_mounts` is reconciled (pct set, root@pam-only so not via the
+  # API token) and is NOT armed by the fresh-allocation restore gate — nothing
+  # is allocated, and the marker would land inside the share. The hookscript is
+  # the start gate: `pct start` refuses while /mnt/nfs/music is not a live NFS
+  # mountpoint or a bind source is missing on the share.
+  # Inside the CT the library shows as nobody:nogroup (uid 3000 is unmapped in
+  # the unprivileged userns); reads and writes work because TrueNAS Mapall
+  # answers the permission check server-side.
+  - vmid: 202
+    hostname: music-workbench
+    os: ubuntu-26.04
+    cores: 4
+    memory: 4096
+    root_disk_size: 16
+    storage: local-zfs
+    unprivileged: true
+    # REQUIRED for this template, not a nicety: Ubuntu 26.04 ships systemd 259,
+    # which in an unprivileged CT without nesting fails every early unit with
+    # status=243/CREDENTIALS (networkd, journald, sysctl, tmpfiles…) — measured
+    # 2026-09-02: the CT booted with eth0 DOWN and sshd unreachable while `pct`
+    # reported it running. Proxmox warns "Systemd 259 detected. You may need to
+    # enable nesting." at create and start. Nesting on an unprivileged CT is
+    # not a privilege escalation (it is the userns-confined kind).
+    nesting: true
+    netif:
+      # hwaddr pinned to the live MAC (pct config 202, 2026-09-02) so a rebuild
+      # keeps its ARP/DHCP identity — a recreate without the pin gets a new MAC
+      # and stale ARP entries on the LAN make the same IP time out for minutes.
+      net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:5B:D0:22,ip=192.168.30.16/18,type=veth"
+    bind_mounts:
+      mp0: "/mnt/nfs/music/lossless,mp=/music/lossless"
+      mp1: "/mnt/nfs/music/compressed,mp=/music/compressed"
+    hookscript: local:snippets/nfs-bind-prestart.sh
+    onboot: false # short-lived: not started by the host's boot
+    # `started: true` means every infra:hosts run asks for it running, which invokes
+    # the NFS start gate: with TrueNAS unreachable the play waits up to NFS_BIND_WAIT
+    # (180 s, or ~30 s per stat if the share was already mounted) and then FAILS on
+    # this host — loudly, by design. Flip to `started: false` while the NAS is down
+    # or on a from-scratch rebuild before the TrueNAS share exists.
+    # No `startup:` order, deliberately — see templates/nfs.mount.j2.
+    started: true
+    tags:
+      - workbench
+    description: >-
+      Workbench CT (#254) — music tag processing over SSH.
+      /music/lossless and /music/compressed are host bind mounts of the
+      TrueNAS music dataset (pre-start hookscript gates on the NFS mount).
+      Throwaway: retire with task infra:guest:destroy.
 
 # --- telegraf_agent (#186) ---------------------------------------------------
 # No ACPI fan objects on this board at all (measured 2026-08-24) — there is no

@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# One mountpoint per line, from proxmox_nfs_mounts (roles/proxmox_host, #254).
+# Read by /var/lib/vz/snippets/nfs-bind-prestart.sh: a CT bind mount whose
+# source lies under one of these paths is started only once that path is a live
+# NFS mountpoint.
+{% for m in proxmox_nfs_mounts %}
+{{ m.path }}
+{% endfor %}

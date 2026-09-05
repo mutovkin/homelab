@@ -362,3 +362,14 @@
     # therefore real; a live run always asserts.
     - not ansible_check_mode or ('\n' ~ item.name ~ ' ') in ('\n' ~ proxmox_host_loaded_modules.stdout)
   tags: [hwmon]
+
+# --- Host-mounted NFS for unprivileged-CT bind mounts (#254) ------------------
+# `apply:` because a tag on a dynamic include tags only the include statement;
+# the included tasks would be skipped under `--tags nfs_mounts` (measured).
+- name: Mount NFS datasets for bind-mounting into CTs
+  ansible.builtin.include_tasks:
+    file: nfs-mounts.yml
+    apply:
+      tags: [nfs_mounts]
+  when: proxmox_nfs_mounts | length > 0
+  tags: [nfs_mounts]

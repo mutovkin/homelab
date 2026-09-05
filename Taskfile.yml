@@ -20,6 +20,12 @@ tasks:
     cmds:
       - ansible-playbook playbooks/proxmox-hosts.yml --check --diff {{.CLI_ARGS}}
 
+  infra:guest:destroy:
+    desc: 'Retire a workbench CT after removing it from host_vars (usage: task infra:guest:destroy -- --limit n5pro -e vmid=202 -e hostname=music-workbench)'
+    dir: '{{.ANSIBLE_DIR}}'
+    cmds:
+      - ansible-playbook playbooks/destroy-guest.yml {{.CLI_ARGS}}
+
   # === Infrastructure: Guest Configuration (Ansible) ===
   infra:guests:
     desc: Configure Docker and base packages inside VMs/LXCs
