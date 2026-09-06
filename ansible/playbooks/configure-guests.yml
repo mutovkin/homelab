@@ -123,12 +123,17 @@
       ansible.builtin.assert:
         that:
           - item.key is match('^[A-Za-z_][A-Za-z0-9_]*$')
-          - workbench_env_value | string | trim | length > 0
-          - "\"'\" not in (workbench_env_value | string)"
+          # `is string` first: a YAML null renders as the 4-char string "None"
+          # and `true` as "True", so a length check alone passes both
+          # (measured in review) and the file would carry KEY='' or 'True'.
+          - workbench_env_value is string
+          - workbench_env_value | trim | length > 0
+          - "\"'\" not in workbench_env_value"
         fail_msg: >-
-          {{ item.path }}: {{ item.key }} is not a sh identifier, is empty, or
-          contains a single quote (the file is sourced with values
-          single-quoted) — fix it in host_vars (vault key for secrets).
+          {{ item.path }}: {{ item.key }} is not a sh identifier, is not a
+          quoted string (null/true/123 are rejected), is empty, or contains a
+          single quote (the file is sourced with values single-quoted) — fix
+          it in host_vars (vault key for secrets).
         quiet: true
       vars:
         workbench_env_value: "{{ workbench_env_files[item.i].vars[item.key] }}"
