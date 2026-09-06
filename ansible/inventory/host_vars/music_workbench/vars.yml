@@ -24,6 +24,18 @@ linuxbrew_packages:
   - cuetools
   - media-info
   - chromaprint # fpcalc, AcoustID fingerprints
+# One entry per binary the ledger records, asserted to resolve to the brew
+# prefix from a non-login session (roles/linuxbrew). Keep in step with the
+# list above — the role refuses packages without a verify list.
+linuxbrew_verify_commands:
+  - uv --version
+  - flac --version
+  - ffmpeg -version
+  - sox --version
+  - shntool -v
+  - cuebreakpoints --version
+  - mediainfo --Version
+  - fpcalc -version
 # The apt packages the list above replaces — purged, so one ffmpeg on the box.
 linuxbrew_replaces_apt_packages:
   - ffmpeg

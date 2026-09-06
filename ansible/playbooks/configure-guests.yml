@@ -55,13 +55,17 @@
     - linuxbrew
   post_tasks:
     # Directories on the bound NAS share (`workbench_share_dirs`, host_vars).
-    # Gated on the share being a LIVE mountpoint: the hookscript refuses to
+    # Gated on the parent being a LIVE NFS mount: the hookscript refuses to
     # start the CT without it, but a `file:` on an unmounted path would create
     # the directory on the CT's rootfs, where the next start hides it under
-    # the bind — silently, and forever (#258).
-    - name: Probe that each share directory's mount is live
+    # the bind — silently, and forever (#258). `mountpoint -q` would not do:
+    # a local volume declared under `mounts` is a mountpoint too, and it stats
+    # a hard NFS path with no timeout (the hookscript wraps every such stat in
+    # `timeout -s KILL` for the same reason). findmnt --target walks up to the
+    # containing mount, so nested paths work; rc 124/137 is a hung NAS.
+    - name: Probe that each share directory's parent is a live NFS mount
       ansible.builtin.command:
-        argv: [mountpoint, -q, "{{ item.path | dirname }}"]
+        argv: [timeout, -s, KILL, "30", findmnt, -n, -o, "FSTYPE,SOURCE", --target, "{{ item.path | dirname }}"]
       loop: "{{ workbench_share_dirs | default([]) }}"
       loop_control:
         label: "{{ item.path }}"
@@ -70,14 +74,17 @@
       failed_when: false
       check_mode: false
 
-    - name: Refuse to create a share directory on an unmounted path
+    - name: Refuse to create a share directory outside a live NFS mount
       ansible.builtin.assert:
-        that: item.rc == 0
+        that:
+          - item.rc == 0
+          - (item.stdout.split() | first | default('')) in ['nfs', 'nfs4']
         fail_msg: >-
-          {{ item.item.path | dirname }} is not a mountpoint on
-          {{ inventory_hostname }} — creating {{ item.item.path }} now would land
-          on the rootfs, not the NAS. Is the bind mount (host_vars/<node>
-          bind_mounts) in place and the CT started through the hookscript?
+          {{ item.item.path | dirname }} on {{ inventory_hostname }} is not a
+          live NFS mount (findmnt rc={{ item.rc }}, "{{ item.stdout }}") —
+          creating {{ item.item.path }} now would land on local storage, not
+          the NAS. Is the bind mount (host_vars/<node> bind_mounts) in place
+          and the CT started through the hookscript?
         quiet: true
       loop: "{{ workbench_share_mounts.results }}"
       loop_control:

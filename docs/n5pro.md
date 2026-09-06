@@ -619,22 +619,33 @@ versions of the encoders it ran, so it wants upstream-current releases; on
 source) under a non-root `linuxbrew` user, installs the host's
 `linuxbrew_packages`, purges the apt packages they replace
 (`linuxbrew_replaces_apt_packages`, so there is ONE `ffmpeg` on the box), and
-puts the prefix first on PATH in `/etc/environment` — not only `profile.d`,
-because `ssh host cmd`, rsync-over-ssh and Ansible tasks are non-login sessions
-that never read `profile.d`. The role's verify step resolves `uv`, `ffmpeg`
-and `flac` from a fresh non-login shell and asserts each is the brew binary.
-brew refuses to run as root; `/usr/local/bin/brew` is a wrapper that delegates
-to the `linuxbrew` user, so `brew list --versions` works from a root shell.
-Versions are deliberately unpinned (brew checks bottle sha256s itself):
-`brew update && brew upgrade` is the operator's deliberate bump.
+puts the prefix on PATH in `/etc/environment` — not only `profile.d`, because
+`ssh host cmd`, rsync-over-ssh and Ansible tasks are non-login sessions that
+never read `profile.d`. The order is load-bearing: `/usr/local/bin` first, so
+the root `brew` wrapper there shadows the prefix's own `brew` (Homebrew refuses
+to run as root), then the prefix, then `/usr/bin`, so a brew tool beats a
+forgotten apt copy. Two side effects of that order: brew's `python@3` becomes
+`python3` on PATH, so `group_vars/workbench_hosts.yml` pins Ansible's
+interpreter to `/usr/bin/python3` (measured: discovery moved between two runs of
+the same play); and sudo's `secure_path` omits the prefix, so a non-root user
+who sudoes loses the tools (workbenches connect as root). The role's verify step
+resolves every binary in `linuxbrew_verify_commands` from the session PATH and
+asserts each is the brew binary, and asserts `brew list --formula --versions`
+exits 0 through the wrapper — that command is the version record. Versions are
+deliberately unpinned (brew checks bottle sha256s itself) and a deploy never
+moves them (`HOMEBREW_NO_INSTALL_UPGRADE`): `brew update && brew upgrade` is the
+operator's deliberate bump. The purge of replaced apt packages is bounded by
+`apt-get -s purge`: the set apt would remove must equal the declared list.
 
 **Directories on the share are created from the CT** (`workbench_share_dirs`
 in the workbench's host_vars, applied as post_tasks of the workbench play).
 `lossless`, `compressed` and `originals` are plain directories inside the ONE
 exported dataset, not datasets — a child dataset would be a separate
 filesystem, need its own export and bind, and turn every move into a copy
-(#256). Creation is gated on `mountpoint -q` of the parent: a `file:` on an
-unmounted path lands on the rootfs, which the next start hides under the bind.
+(#256). Creation is gated on `findmnt` reporting the parent as a live `nfs`/`nfs4`
+mount (under `timeout -s KILL`, as a hung hard mount would otherwise hang the
+play): a `file:` on an unmounted path lands on the rootfs, which the next start
+hides under the bind, and a local volume under `mounts` is a mountpoint too.
 TrueNAS Mapall stamps them 3000:3000 regardless of who created them.
 
 Recipe for a new workbench:
