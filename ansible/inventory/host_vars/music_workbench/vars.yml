@@ -83,3 +83,4 @@ workbench_env_files:
       MCL_LMS_START_CMD: "mcl-lms start"
       MCL_LMS_STATUS_CMD: "mcl-lms status"
       MCL_LMS_CLI: "192.168.30.15:9090" # LMS CLI, network_mode: host on CT 201; rescan goes here directly
+      MCL_ORIGINALS_ROOT: "/music/originals" # archival rips (workbench_share_dirs below); same dataset as lossless/compressed
