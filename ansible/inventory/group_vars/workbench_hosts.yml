@@ -1,0 +1,15 @@
+---
+# Workbench CTs (#254, #258).
+#
+# Pin the interpreter. Ubuntu 26.04 is not in ansible-core's distro map, so
+# `interpreter_python: auto` resolves a bare `python3` from PATH. Measured
+# 2026-09-05 while the linuxbrew role still put its prefix ahead of /usr/bin:
+# discovery moved from /usr/bin/python3 to
+# /home/linuxbrew/.linuxbrew/bin/python3.14 between two runs of the same play,
+# an interpreter with no python3-apt bindings. The prefix now sits after
+# an interpreter with no python3-apt bindings. The prefix now sits after
+# /usr/bin; the pin makes the interpreter independent of PATH order anyway.
+# A literal path is right here: every workbench is a Linux CT
+# (CLAUDE.md's "never a literal path" is about ansible_connection: local plays
+# on the two operator platforms).
+ansible_python_interpreter: /usr/bin/python3

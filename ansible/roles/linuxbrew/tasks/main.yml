@@ -1,0 +1,279 @@
+---
+# Homebrew on Linux for workbench CTs (#258). Runs after `common`.
+#
+# brew refuses to run as root, so every brew invocation goes through
+# `runuser -u linuxbrew`. That is deliberate over `become_user`: becoming an
+# unprivileged user from a root connection makes Ansible juggle world-readable
+# tmp files / setfacl, and the CT has no `acl` package — a plain `command` has
+# no such dependency.
+
+- name: Assert the verify list covers the package list
+  ansible.builtin.assert:
+    that:
+      - linuxbrew_verify_commands | length >= linuxbrew_packages | length
+    fail_msg: >-
+      linuxbrew_packages has {{ linuxbrew_packages | length }} formulae but
+      linuxbrew_verify_commands only {{ linuxbrew_verify_commands | length }}
+      entries — the role would install tools and prove nothing about which
+      binary a non-login session runs for the rest. Declare one verify entry
+      per formula beside the packages.
+
+- name: Install Homebrew's Linux prerequisites
+  ansible.builtin.apt:
+    name:
+      - build-essential # brew's documented requirement; only used if a formula lacks a bottle
+      - procps
+      - curl
+      - file
+      - git
+    state: present
+
+# --- Bounded purge of the apt packages brew replaces ------------------------
+# apt's answer, not a re-implementation of its dependency logic (CLAUDE.md,
+# #247): simulate, then refuse unless the set apt would remove is exactly the
+# declared list. An undeclared reverse-dependent (something `common` just
+# installed that Depends on a purged name) would otherwise enter an
+# install→purge loop every run. On a converged host apt removes nothing and
+# the empty set passes. No `autoremove`: it sweeps every auto-installed orphan
+# box-wide, and unattended-upgrades already does that nightly on guests
+# (Unattended-Upgrade::Remove-Unused-Dependencies is true here).
+- name: Simulate the purge of replaced apt packages
+  ansible.builtin.command:
+    argv: "{{ ['apt-get', '-s', '-y', 'purge'] + linuxbrew_replaces_apt_packages }}"
+  register: linuxbrew_purge_sim
+  changed_when: false
+  check_mode: false
+  when: linuxbrew_replaces_apt_packages | length > 0
+
+- name: Refuse a purge that would remove an undeclared package
+  ansible.builtin.assert:
+    that:
+      - (linuxbrew_purge_would_remove | difference(linuxbrew_replaces_apt_packages)) | length == 0
+    fail_msg: >-
+      apt would also remove {{ linuxbrew_purge_would_remove | difference(linuxbrew_replaces_apt_packages) | join(', ') }}
+      when purging {{ linuxbrew_replaces_apt_packages | join(', ') }} — a
+      reverse-dependent this host still declares. Add it to
+      linuxbrew_replaces_apt_packages deliberately or drop the package it
+      depends on.
+    quiet: true
+  vars:
+    # `Purg <name> [<version>]` lines; strip an arch qualifier so `foo:amd64`
+    # compares equal to the declared `foo`.
+    linuxbrew_purge_would_remove: >-
+      {{ linuxbrew_purge_sim.stdout_lines | select('match', '^Purg ')
+         | map('regex_replace', '^Purg ([^ :]+).*$', '\1') | list }}
+  when: linuxbrew_replaces_apt_packages | length > 0
+
+- name: Purge apt packages the brew formulae replace
+  ansible.builtin.apt:
+    name: "{{ linuxbrew_replaces_apt_packages }}"
+    state: absent
+    purge: true
+  when: linuxbrew_replaces_apt_packages | length > 0
+
+# --- Homebrew itself ---------------------------------------------------------
+# 0755 on the home, not Ubuntu's 0750 default: the prefix lives under it and
+# /etc/environment puts the prefix on PATH for EVERY user, so a 0750 parent
+# makes each brew tool "command not found" for any non-root user (root
+# bypasses the traverse check, which is why a root-only test never sees it).
+- name: Create the linuxbrew user
+  ansible.builtin.user:
+    name: "{{ linuxbrew_user }}"
+    home: "/home/{{ linuxbrew_user }}"
+    shell: /bin/bash
+    system: false
+    create_home: true
+
+- name: Make the linuxbrew home traversable
+  ansible.builtin.file:
+    path: "/home/{{ linuxbrew_user }}"
+    state: directory
+    mode: "0755"
+
+# The skeleton the official installer creates, minus its sudo prompts and
+# "press RETURN". `Caskroom` is not optional even though casks are macOS-only:
+# `brew list --versions` stats it and exits 1 when it is missing (measured).
+- name: Create the Homebrew prefix skeleton owned by the linuxbrew user
+  ansible.builtin.file:
+    path: "{{ linuxbrew_prefix }}/{{ item }}"
+    state: directory
+    owner: "{{ linuxbrew_user }}"
+    group: "{{ linuxbrew_user }}"
+    mode: "0755"
+  loop:
+    - ""
+    - bin
+    - Caskroom
+    - Cellar
+  loop_control:
+    label: "{{ linuxbrew_prefix }}/{{ item }}"
+
+# Full clone, not --depth=1: `brew update` refuses to work on a shallow clone.
+- name: Clone Homebrew into the prefix
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ linuxbrew_user }}"
+      - --
+      - git
+      - clone
+      - "{{ linuxbrew_repo }}"
+      - "{{ linuxbrew_prefix }}/Homebrew"
+    creates: "{{ linuxbrew_prefix }}/Homebrew/bin/brew"
+
+- name: Symlink bin/brew to the clone
+  ansible.builtin.file:
+    src: ../Homebrew/bin/brew
+    dest: "{{ linuxbrew_prefix }}/bin/brew"
+    state: link
+    owner: "{{ linuxbrew_user }}"
+    group: "{{ linuxbrew_user }}"
+    # The clone above is skipped under --check, so the target does not exist
+    # yet on a fresh host; force lets the dry-run predict the link anyway.
+    force: true
+
+# PATH for EVERY session type. profile.d only reaches login/interactive shells;
+# `ssh host cmd`, rsync-over-ssh and Ansible's own tasks get their PATH from
+# pam_env's /etc/environment. The workbench tool is run exactly that way, so
+# this line is the one that matters (order: see linuxbrew_path in defaults).
+# No `brew shellenv` anywhere — it would re-prepend the prefix.
+- name: Put the brew prefix on PATH for all sessions (/etc/environment)
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: '^PATH='
+    line: >-
+      PATH="{{ linuxbrew_path }}"
+
+- name: Brew environment for interactive shells
+  ansible.builtin.copy:
+    dest: /etc/profile.d/linuxbrew.sh
+    mode: "0644"
+    content: |
+      # Managed by Ansible (roles/linuxbrew, #258). PATH itself comes from
+      # /etc/environment (pam_env) so non-login sessions see the same order.
+      {% for k, v in linuxbrew_env.items() %}
+      export {{ k }}={{ v }}
+      {% endfor %}
+
+- name: Root-safe brew wrapper
+  ansible.builtin.template:
+    src: brew.j2
+    dest: /usr/local/bin/brew
+    mode: "0755"
+
+# --- Formulae ----------------------------------------------------------------
+# changed_when from the formula list before vs after, not from brew's chatter:
+# `Pouring` is printed for bottles only, a from-source build of a dependency-
+# free formula prints neither `Pouring` nor `Installing`, and an upgrade prints
+# `Upgrading`. The list diff is the ground truth and the report prints it.
+- name: Record installed formulae before
+  ansible.builtin.command:
+    argv: [/usr/local/bin/brew, list, --formula, --versions]
+  register: linuxbrew_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# One `brew install` for the whole list: brew resolves the shared dependency
+# tree once. A failed formula makes brew exit 1, so a partial install fails
+# the task. brew refuses to start unless its cwd is readable by the brew user;
+# the connection user's $HOME (/root, 0700) is not — measured on the first
+# apply — hence chdir.
+- name: Install brew formulae
+  ansible.builtin.command:
+    argv: "{{ ['runuser', '-u', linuxbrew_user, '--', 'env']
+              + (linuxbrew_brew_install_env | dict2items | map(attribute='key') | zip(linuxbrew_brew_install_env.values()) | map('join', '=') | list)
+              + [linuxbrew_prefix ~ '/bin/brew', 'install', '--quiet'] + linuxbrew_packages }}"
+    chdir: "{{ linuxbrew_prefix }}"
+  register: linuxbrew_install
+  # The change is reported ONCE, by the after-snapshot below, from the list
+  # diff; brew's own output is not the evidence.
+  changed_when: false
+  when: linuxbrew_packages | length > 0
+  vars:
+    linuxbrew_brew_install_env: "{{ linuxbrew_env | combine(linuxbrew_install_env) }}"
+
+- name: Record installed formulae after (reports the install's change)
+  ansible.builtin.command:
+    argv: [/usr/local/bin/brew, list, --formula, --versions]
+  register: linuxbrew_after
+  changed_when: linuxbrew_after.stdout != linuxbrew_before.stdout
+  failed_when: false
+  check_mode: false
+
+- name: Report formulae the install added or changed
+  ansible.builtin.debug:
+    msg: "{{ linuxbrew_after.stdout_lines | difference(linuxbrew_before.stdout_lines) }}"
+  when: linuxbrew_after.stdout != linuxbrew_before.stdout
+
+# --- Verify --------------------------------------------------------------------
+# Runs on a converged host under --check too (drift such as a reinstalled apt
+# ffmpeg or a lost /etc/environment line must show in a dry-run); only a
+# fresh host, where the clone has not happened yet, skips it.
+- name: Stat the brew binary (verify gate)
+  ansible.builtin.stat:
+    path: "{{ linuxbrew_prefix }}/bin/brew"
+  register: linuxbrew_brew_stat
+  check_mode: false
+
+- name: Assert the version record command works through the root wrapper
+  ansible.builtin.assert:
+    that:
+      - linuxbrew_after.rc == 0
+      - linuxbrew_after.stdout_lines | length >= linuxbrew_packages | length
+    fail_msg: >-
+      `brew list --formula --versions` via /usr/local/bin/brew: rc={{ linuxbrew_after.rc }},
+      {{ linuxbrew_after.stdout_lines | length }} formulae listed,
+      stderr: {{ linuxbrew_after.stderr | default('') }}
+    quiet: true
+  when: linuxbrew_brew_stat.stat.exists
+
+# The task runs in Ansible's multiplexed ssh connection (ControlMaster), not a
+# fresh session; it still gets pam_env's /etc/environment PATH because the
+# connection user is root and Ansible skips sudo for become_user == the
+# connecting user. A workbench connecting as a non-root user would instead get
+# sudo's secure_path and go red here — loudly, which is the intended outcome.
+# With the prefix AFTER /usr/bin, a reinstalled apt copy of a tool wins the
+# lookup and fails the prefix assert below: that clause is reachable. Measured
+# 2026-09-05 with a verify list of `python3 --version` padded to the package
+# count with `uv --version` entries (the count assert at the top of this role
+# rejects a shorter list before this task is reached — a falsification must
+# reach its guard): python3 resolved to /usr/bin/python3 and the assert fired.
+# No `head`: under pipefail a chatty `-version` can SIGPIPE it into rc 141.
+- name: Resolve each verified tool from the session PATH
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      bin="$(command -v {{ item.split(' ') | first }})"
+      out="$({{ item }} 2>&1)"
+      printf '%s\n%s\n' "$bin" "${out%%$'\n'*}"
+    executable: /bin/bash
+  loop: "{{ linuxbrew_verify_commands }}"
+  register: linuxbrew_verify
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: linuxbrew_brew_stat.stat.exists
+
+- name: Assert every verified tool is the brew one
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout_lines[0] is match('^' ~ (linuxbrew_prefix | regex_escape) ~ '/bin/')
+    fail_msg: >-
+      {{ item.item }}: rc={{ item.rc }}, resolved to
+      "{{ item.stdout_lines[0] | default('<nothing>') }}" — expected a binary
+      under {{ linuxbrew_prefix }}/bin. A different prefix means an apt copy
+      shadows the brew one (add it to linuxbrew_replaces_apt_packages) or PATH
+      is not reaching non-login sessions (/etc/environment).
+    quiet: true
+  loop: "{{ linuxbrew_verify.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: linuxbrew_brew_stat.stat.exists
+
+- name: Report tool versions
+  ansible.builtin.debug:
+    msg: "{{ linuxbrew_verify.results | map(attribute='stdout_lines') | map('last') | list }}"
+  when: linuxbrew_brew_stat.stat.exists and linuxbrew_verify_commands | length > 0

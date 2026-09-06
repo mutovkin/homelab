@@ -1,0 +1,18 @@
+#!/bin/sh
+# Managed by Ansible (roles/linuxbrew, #258). Root wrapper for brew: Homebrew
+# refuses to run as root, and the workbench is used as root; this delegates to
+# the {{ linuxbrew_user }} user so `brew list --formula --versions` and
+# `brew upgrade` work from a root shell. It lives in /usr/local/bin, which
+# /etc/environment puts BEFORE the brew prefix for exactly this reason. Any
+# other user falls through to the real brew.
+set -eu
+BREW={{ linuxbrew_prefix }}/bin/brew
+{% for k, v in linuxbrew_env.items() %}
+export {{ k }}={{ v }}
+{% endfor %}
+if [ "$(id -u)" -eq 0 ]; then
+  # brew refuses a cwd the brew user cannot read (root's /root is 0700).
+  cd / || exit 1
+  exec runuser -u {{ linuxbrew_user }} -- "$BREW" "$@"
+fi
+exec "$BREW" "$@"

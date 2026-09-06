@@ -144,7 +144,7 @@ them there after any hardware re-seat that changes a path or IOMMU group.
 - `/music` is a **host bind mount** of the TrueNAS music dataset root (one bind, so
   `mv` between `lossless/` and `compressed/` is a rename, #256) — see
   [Workbench CTs](#workbench-cts) below
-- Configured by `common` only (group `workbench_hosts`); deliberately not a
+- Configured by `common` + `linuxbrew` (group `workbench_hosts`); deliberately not a
   vector/telegraf agent
 
 ### GPU Passthrough VM (TBD)
@@ -611,6 +611,44 @@ would otherwise be touched *inside the NAS share*. Bind mounts and hookscripts
 are `root@pam`-only in Proxmox, so the role applies them by `pct set` after
 creation and before first start.
 
+**Tools come from Homebrew, not only apt (#258).** A workbench records the
+versions of the encoders it ran, so it wants upstream-current releases; on
+2026-09-05 the 26.04 archive lagged ffmpeg by a major release (8.0.1 vs 9.0.1).
+`roles/linuxbrew` installs Homebrew on Linux at its default prefix
+(`/home/linuxbrew/.linuxbrew`, bottles only — any other prefix builds from
+source) under a non-root `linuxbrew` user, installs the host's
+`linuxbrew_packages`, purges the apt packages they replace
+(`linuxbrew_replaces_apt_packages`, so there is ONE `ffmpeg` on the box), and
+puts the prefix on PATH in `/etc/environment` — not only `profile.d`, because
+`ssh host cmd`, rsync-over-ssh and Ansible tasks are non-login sessions that
+never read `profile.d`. The prefix goes AFTER the system directories: its
+dependency tree links 135 binaries that would otherwise shadow `mount`,
+`findmnt`, `curl`, `python3` and friends (measured with the prefix first, when
+Ansible's discovered interpreter silently moved to brew's python — so
+`group_vars/workbench_hosts.yml` pins it to `/usr/bin/python3` regardless).
+"A brew tool wins" comes from the purge of the apt duplicates instead, and the
+role's verify step is the detector: every binary in `linuxbrew_verify_commands`
+must resolve to the brew prefix from the session PATH, and
+`brew list --formula --versions` must exit 0 through the root wrapper — that
+command is the version record. Sudo's `secure_path` omits the prefix, so a
+non-root user who sudoes loses the tools (workbenches connect as root).
+Versions are deliberately unpinned (brew checks bottle sha256s itself) and a
+deploy never moves them (`HOMEBREW_NO_INSTALL_UPGRADE`, on the role's install
+only): `brew update && brew upgrade` is the operator's deliberate bump. The
+purge of replaced apt packages is bounded by `apt-get -s purge`: anything apt
+would remove outside the declared list refuses the run.
+
+**Directories on the share are created from the CT** (`workbench_share_dirs`
+in the workbench's host_vars, applied as post_tasks of the workbench play).
+`lossless`, `compressed` and `originals` are plain directories inside the ONE
+exported dataset, not datasets — a child dataset would be a separate
+filesystem, need its own export and bind, and turn every move into a copy
+(#256). Creation is gated on `findmnt` reporting the parent as a live `nfs`/`nfs4`
+mount (under `timeout -s KILL`, as a hung hard mount would otherwise hang the
+play): a `file:` on an unmounted path lands on the rootfs, which the next start
+hides under the bind, and a local volume under `mounts` is a mountpoint too.
+TrueNAS Mapall stamps them 3000:3000 regardless of who created them.
+
 Recipe for a new workbench:
 
 1. Copy the CT 202 block in `host_vars/n5pro/vars.yml` (new vmid, hostname,
@@ -618,7 +656,9 @@ Recipe for a new workbench:
    refuses a `/mnt/nfs/` bind without it, and refuses `..`, spaces or glob
    characters in a bind value).
 2. Add it to `workbench_hosts` in `inventory/hosts.yml` and create
-   `host_vars/<name>/vars.yml` with `common_extra_packages`.
+   `host_vars/<name>/vars.yml` with `common_extra_packages`, `linuxbrew_packages`,
+   `linuxbrew_verify_commands` (one per formula — the role refuses fewer),
+   `linuxbrew_replaces_apt_packages` and `workbench_share_dirs`.
 3. `task infra:hosts -- --limit n5pro`, then `task infra:guests -- --limit <name>`.
 
 Retire it: delete the block and the inventory entry, then
