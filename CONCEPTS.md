@@ -39,9 +39,11 @@ manage host-only kernel facilities: every Compose service must opt out of AppArm
 before Docker starts.
 
 ### Workbench guest
-A short-lived, unprivileged Guest configured with the base OS only — no Docker, no
-metrics or log agent — that an operator logs into to run command-line tools against
-NAS data and then deletes.
+A short-lived, unprivileged Guest configured with the base OS and a Homebrew
+toolchain — no Docker, no metrics or log agent — that an operator logs into to run
+command-line tools against NAS data and then deletes. Its encoders come from
+Homebrew rather than the distro so the versions it records are upstream-current,
+and a routine deploy never moves them; the operator bumps them deliberately.
 
 Its lifecycle is declare, use, delete: it exists exactly as long as its inventory
 declaration does, and teardown refuses to run while that declaration still stands,
