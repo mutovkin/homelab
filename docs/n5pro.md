@@ -649,6 +649,13 @@ play): a `file:` on an unmounted path lands on the rootfs, which the next start
 hides under the bind, and a local volume under `mounts` is a mountpoint too.
 TrueNAS Mapall stamps them 3000:3000 regardless of who created them.
 
+**Tool secrets are sourced env files** (`workbench_env_files` in the workbench's
+host_vars, #260): values come from the host's encrypted `vault.yml`, the play
+asserts each one non-empty and quote-free BY NAME, writes the file root:root
+0600 with `diff: false`, single-quotes every value (the file is sourced by sh,
+so spaces, parentheses and `$` survive), and proves it by sourcing it and
+checking every key round-trips non-empty — rc only, the value never logs.
+
 Recipe for a new workbench:
 
 1. Copy the CT 202 block in `host_vars/n5pro/vars.yml` (new vmid, hostname,

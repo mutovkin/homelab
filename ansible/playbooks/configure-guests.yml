@@ -110,3 +110,81 @@
       loop: "{{ workbench_share_dirs | default([]) }}"
       loop_control:
         label: "{{ item.path }}"
+
+    # Sourced env files (`workbench_env_files`, host_vars, #260). Values are
+    # asserted non-empty and quote-free BY NAME first: an undefined vault key
+    # would otherwise fail inside the write task, whose diff is suppressed, and
+    # a value containing `'` would break the single-quoting below at source
+    # time. The assert names the variable, never prints the value.
+    - name: Assert every env value is set, non-empty and free of single quotes
+      ansible.builtin.assert:
+        that:
+          - item.1.value is defined
+          - item.1.value | string | trim | length > 0
+          - "\"'\" not in (item.1.value | string)"
+        fail_msg: >-
+          {{ item.0.path }}: {{ item.1.key }} is undefined, empty or contains a
+          single quote — set it (vault key for secrets) in host_vars.
+        quiet: true
+      loop: "{{ workbench_env_pairs | from_json }}"
+      loop_control:
+        label: "{{ item.0.path }}:{{ item.1.key }}"
+      vars:
+        workbench_env_pairs: >-
+          {%- set out = [] -%}
+          {%- for f in workbench_env_files | default([]) -%}
+          {%- for k, v in (f.vars | default({})).items() -%}
+          {%- set _ = out.append([{'path': f.path}, {'key': k, 'value': v}]) -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{- out | to_json -}}
+
+    - name: Create env file directories
+      ansible.builtin.file:
+        path: "{{ item.path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ workbench_env_files | default([]) }}"
+      loop_control:
+        label: "{{ item.path | dirname }}"
+
+    # diff:false, not no_log: the content (a vault secret) never renders, but a
+    # failure stays readable (#88).
+    - name: Write env files
+      ansible.builtin.copy:
+        dest: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          # Managed by Ansible (workbench_env_files, #260). Source with: set -a; . {{ item.path }}
+          {% for k, v in item.vars.items() %}
+          {{ k }}='{{ v }}'
+          {% endfor %}
+      loop: "{{ workbench_env_files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      diff: false
+
+    # Prove the file SOURCES the way its consumer will and every key round-trips
+    # non-empty — rc only, so the secret never reaches the log. Skipped under
+    # --check on a host where the file has not been written yet.
+    - name: Verify each env file sources cleanly with every key non-empty
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          set -a; . '{{ item.path }}'; set +a
+          {% for k in item.vars.keys() %}
+          [ -n "${{ k }}" ] || { echo '{{ k }} empty after sourcing'; exit 3; }
+          {% endfor %}
+          echo ok
+        executable: /bin/sh
+      loop: "{{ workbench_env_files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: workbench_env_verify
+      changed_when: false
+      failed_when: workbench_env_verify.rc != 0 and not ansible_check_mode
+      check_mode: false
