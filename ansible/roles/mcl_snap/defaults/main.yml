@@ -20,3 +20,13 @@ mcl_snap_env_key_var: TRUENAS_MCL_SNAP_API_KEY
 mcl_snap_client_repo: https://github.com/truenas/api_client.git
 mcl_snap_client_sha: 8d7e37383717aea15ce46167cfcd92325acbcd8a
 mcl_snap_venv: /opt/mcl-snap
+
+# The malformed id the deploy feeds `mcl-snap destroy` to prove the regex
+# refuses BEFORE any API call. Overridable so the guard can be falsified:
+# `-e mcl_snap_refuse_probe=aaaa` is well-formed, reaches the API and is
+# refused as "not an existing" — the task must then go RED.
+mcl_snap_refuse_probe: "../other@evil"
+# Write-path drill: `-e mcl_snap_drill=<issue#>` creates and destroys
+# vault/media/music@mcl-drill<issue#> once. The routine deploy proves READ only
+# (`list`), which went green while create was EACCES on the appliance
+# (measured 2026-09-06); only this round-trip proves WRITE+DELETE.

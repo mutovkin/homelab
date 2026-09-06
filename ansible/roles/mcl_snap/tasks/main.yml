@@ -38,10 +38,14 @@
     dest: /usr/local/bin/mcl-snap
     mode: "0755"
 
-# --- Verify: the wrapper reaches the appliance with the scoped key ----------
-# `list` is read-only and exercises env parsing, the venv, login and the
-# snapshot query. Skipped only when the env file is not written yet (fresh
-# host under --check); on a converged host a dry-run runs it for real.
+# --- Verify --------------------------------------------------------------------
+# `list` exercises env parsing, the venv, login and the snapshot query — the
+# READ path only. It went green on 2026-09-06 while `create` was EACCES on the
+# appliance (the privilege lacked SNAPSHOT_WRITE), and `[]` cannot tell "no
+# snapshots" from a mistyped dataset (the key may not query datasets). The
+# write path is proven by the `-e mcl_snap_drill=<n>` round-trip below.
+# Skipped only when the wrapper is not written yet (fresh host under --check);
+# on a converged host a dry-run runs it for real.
 - name: Stat the wrapper and env file (verify gate)
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -66,14 +70,34 @@
   check_mode: false
   when: mcl_snap_verifiable
 
+# Both refusal paths exit 3, so rc alone cannot prove the regex fired: the
+# message is asserted too ("must match" is the pre-API path; "is not an
+# existing" means the id was well-formed and the API was queried). Falsified
+# with `-e mcl_snap_refuse_probe=aaaa`: red, stderr "is not an existing".
 - name: Verify mcl-snap refuses a malformed batch id without touching the API
   ansible.builtin.command:
-    argv: [/usr/local/bin/mcl-snap, destroy, "../other@evil"]
+    argv: [/usr/local/bin/mcl-snap, destroy, "{{ mcl_snap_refuse_probe }}"]
   register: mcl_snap_refuse
   changed_when: false
-  failed_when: mcl_snap_refuse.rc != 3
+  failed_when: mcl_snap_refuse.rc != 3 or 'must match' not in mcl_snap_refuse.stderr
   check_mode: false
   when: mcl_snap_verifiable
+
+# --- Write-path drill (operator-invoked) ---------------------------------------
+- name: Drill — create the self-identifying snapshot
+  ansible.builtin.command:
+    argv: [/usr/local/bin/mcl-snap, create, "drill{{ mcl_snap_drill }}"]
+  register: mcl_snap_drill_create
+  changed_when: true
+  when: mcl_snap_drill is defined and mcl_snap_verifiable and not ansible_check_mode
+
+- name: Drill — destroy it and assert it is gone
+  ansible.builtin.command:
+    argv: [/usr/local/bin/mcl-snap, destroy, "drill{{ mcl_snap_drill }}"]
+  register: mcl_snap_drill_destroy
+  changed_when: true
+  failed_when: mcl_snap_drill_destroy.rc != 0 or 'destroyed' not in mcl_snap_drill_destroy.stdout
+  when: mcl_snap_drill_create is not skipped
 
 - name: Report existing mcl snapshots
   ansible.builtin.debug:

@@ -1,13 +1,10 @@
 ---
 # Sourced env files for workbench tools (#260, moved from play post_tasks in #262
-# so tool roles that read the file can run after it).
-# may carry a value: `loop_control.label` only rewrites the `(item=…)`
-# prefix, while Ansible still dumps the full `item` on any failure and for
-# every ok/changed result at -v (measured: a value-bearing item printed the
-# secret four times on a happy-path `-v` run). So the loops here carry
-# indices and key NAMES, and each task reaches its value through task
-# `vars:`, which are not part of the result. An undefined vault key fails
-# while the loop list is templated — by name, value-free.
+# so tool roles that read the file can run after it). NO loop item may carry
+# a value: `loop_control.label` only rewrites the `(item=…)` prefix, while
+# Ansible still dumps the full `item` on any failure and for every result at
+# -v — so the loops carry indices and key NAMES and each task reaches its value
+# through task `vars:`, which never enter the result.
 - name: Assert every env value is non-empty and free of single quotes, and keys are sh identifiers
   ansible.builtin.assert:
     that:

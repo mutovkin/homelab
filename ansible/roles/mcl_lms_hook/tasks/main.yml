@@ -62,16 +62,27 @@
 # `restrict` alone disables everything (pty, forwarding, agent, X11, user-rc);
 # the explicit no-* options are kept so the intent reads without knowing
 # `restrict`'s expansion, and an old sshd that lacks `restrict` still gets them.
-- name: Authorize each client key for the forced command only
+# ONE exclusive write: the file IS the client list, so a client removed from
+# `mcl_lms_hook_clients` loses its key on the next run. `from=` pins each key
+# to its client's address — a key copied off the workbench is useless from
+# anywhere else. Under --check a fresh client has no key yet; the task then
+# skips rather than write a file that would drop the other clients.
+- name: Authorize exactly the client keys, forced command only, source-pinned
   ansible.posix.authorized_key:
     user: "{{ mcl_lms_hook_user }}"
-    key: "{{ item.content | b64decode | trim }}"
-    key_options: 'restrict,command="{{ mcl_lms_hook_script }}",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc'
+    key: "{{ mcl_lms_hook_authorized | join('\n') }}"
+    exclusive: true
     state: present
-  loop: "{{ mcl_lms_hook_pubkeys.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  when: item.content is defined
+  vars:
+    mcl_lms_hook_authorized: >-
+      {%- set out = [] -%}
+      {%- for r in mcl_lms_hook_pubkeys.results if r.content is defined -%}
+      {%- set _ = out.append('restrict,command="' ~ mcl_lms_hook_script ~ '",from="'
+          ~ hostvars[r.item].ansible_host ~ '",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc '
+          ~ (r.content | b64decode | trim)) -%}
+      {%- endfor -%}
+      {{- out -}}
+  when: mcl_lms_hook_pubkeys.results | selectattr('content', 'defined') | list | length == mcl_lms_hook_clients | length
 
 - name: Pin this host's key in each client's known_hosts
   ansible.builtin.known_hosts:

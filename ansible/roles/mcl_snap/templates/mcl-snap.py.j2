@@ -63,14 +63,24 @@ def main(argv):
 
     url, key = read_env()
     from truenas_api_client import Client  # noqa: E402 — after arg checks
+    from truenas_api_client.exc import ClientException  # noqa: E402
 
+    step = "connect"
+
+    def call(method, *args):
+        nonlocal step
+        step = method
+        return c.call(method, *args)
+
+    # Only what the client and the socket raise; anything else is a bug in this
+    # file and must traceback (still rc 1) rather than masquerade as an API error.
     try:
         with Client(url, verify_ssl=False) as c:
-            if not c.call("auth.login_with_api_key", key):
-                die(1, "API key login failed")
+            if not call("auth.login_with_api_key", key):
+                die(1, f"API key login failed — check {KEY_VAR} in {ENV_FILE} (revoked or rotated key?)")
             ours = [
                 s["name"]
-                for s in c.call(
+                for s in call(
                     "pool.snapshot.query",
                     [["name", "^", f"{DATASET}@{PREFIX}"]],
                     {"select": ["name"]},
@@ -83,19 +93,17 @@ def main(argv):
             if cmd == "create":
                 if name in ours:
                     die(3, f"refused: {name} already exists")
-                c.call("pool.snapshot.create", {"dataset": DATASET, "name": name.split("@", 1)[1]})
+                call("pool.snapshot.create", {"dataset": DATASET, "name": name.split("@", 1)[1]})
                 print(name)
                 return 0
             # destroy: only a name this wrapper could have created, and one that exists
             if name not in ours:
                 die(3, f"refused: {name} is not an existing {DATASET}@{PREFIX}* snapshot")
-            c.call("pool.snapshot.delete", name)
+            call("pool.snapshot.delete", name)
             print(f"destroyed {name}")
             return 0
-    except SystemExit:
-        raise
-    except Exception as exc:  # API/transport errors: loud, non-zero
-        die(1, f"API error: {exc}")
+    except (ClientException, OSError) as exc:
+        die(1, f"API error during {step}: {exc}")
 
 
 if __name__ == "__main__":
