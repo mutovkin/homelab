@@ -251,7 +251,13 @@ Hard-won lessons — check here before debugging from scratch.
   *args* (`proxmox_guests` precedent); no_log also censors failure output, which would
   blind a fail-loudly assert (#88 asserts VM/VL/Grafana creds non-empty BY NAME, with
   compose `${VAR:?}` as backstop). Fleet-wide
-  quoting sweep: #117. **Sibling trap in `compose.yaml` itself:** an unquoted YAML scalar
+  quoting sweep: #117. **`loop_control.label` hides NOTHING from a failure dump or a
+  `-v` run** — Ansible prints the full `item` there, so a loop over entries that contain a
+  vault value logs the secret on every failure and on every ok result at `-v` (#260
+  measured four prints on a happy-path `-v` apply, with `diff: false` set). Loop over
+  indices/key names and reach values via task `vars:`, which never enter the result. See
+  [docs/solutions/security-issues/loop-control-label-does-not-hide-a-secret-bearing-loop-item.md](docs/solutions/security-issues/loop-control-label-does-not-hide-a-secret-bearing-loop-item.md).
+  **Sibling trap in `compose.yaml` itself:** an unquoted YAML scalar
   ends at a ` #`, so `GF_SMTP_USER: ${VAR:?required - see #139}` reaches compose as
   `${VAR:?required - see` and fails the parse of the WHOLE file with "invalid
   interpolation format". A `#` after a non-space survives (`(#143)` does) — quote the
