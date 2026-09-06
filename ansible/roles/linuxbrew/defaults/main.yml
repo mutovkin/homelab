@@ -1,0 +1,42 @@
+---
+# linuxbrew — Homebrew on Linux for workbench CTs (#258).
+#
+# Why Homebrew rather than the Ubuntu archive: a workbench records the versions
+# of the encoders it ran (the music-cleanup ledger), so it wants upstream-current
+# releases. On 2026-09-05 the 26.04 archive lagged ffmpeg by a major release
+# (8.0.1 vs 9.0.1); flac, sox, shntool and cuetools were already at their latest
+# upstream release, so for those this buys nothing beyond one source of truth.
+# Homebrew verifies every bottle against the formula's sha256, so the download
+# integrity pinning the ISO gotcha demands is done by brew itself. Versions are
+# NOT pinned: the point is "current at deploy time, visible afterwards" —
+# `brew list --versions` is the record.
+#
+# Default prefix on purpose: bottles are built for it; any other prefix falls
+# back to building from source (ffmpeg's tree would take hours in a 4-core CT).
+linuxbrew_user: linuxbrew
+linuxbrew_prefix: /home/linuxbrew/.linuxbrew
+linuxbrew_repo: https://github.com/Homebrew/brew
+
+# Formulae to install, set per host in host_vars (empty here on purpose — a
+# workbench declares what it is for).
+linuxbrew_packages: []
+
+# apt packages the brew formulae above REPLACE. Purged so the host carries one
+# binary per tool: with both installed, which `ffmpeg` runs depends on whether
+# the caller's PATH came from /etc/environment or a bare sshd default, and the
+# version a tool records would be a coin toss.
+linuxbrew_replaces_apt_packages: []
+
+# Formula binary → expected version-flag, asserted after install. Each must
+# resolve to the brew prefix from a NON-LOGIN shell (the one `ssh host cmd`,
+# rsync and Ansible get), because that is the shell the workbench tool runs in.
+linuxbrew_verify_commands:
+  - uv --version
+  - ffmpeg -version
+  - flac --version
+
+# The /etc/environment PATH, written whole rather than edited in place so the
+# result is deterministic on every host: Ubuntu's stock line with the brew
+# prefix spliced in after /usr/local/bin (see tasks/main.yml for the order).
+linuxbrew_path: >-
+  /usr/local/sbin:/usr/local/bin:{{ linuxbrew_prefix }}/bin:{{ linuxbrew_prefix }}/sbin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin

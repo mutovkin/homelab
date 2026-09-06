@@ -1,15 +1,45 @@
 ---
 # music-workbench (CT 202 on n5pro, #254) — a workbench CT. The guest itself is
 # declared in host_vars/n5pro/vars.yml (proxmox_lxcs); this file only says what
-# to install inside it. A new workbench copies this file and swaps the list.
+# to install inside it. A new workbench copies this file and swaps the lists.
 #
 # ADDITIONS to common_packages, never a replacement (see roles/common/defaults).
+# Encoders and analysers come from Homebrew (below), not apt: the music-cleanup
+# tool records the versions it encoded with and wants upstream-current ones
+# (#258 — the 26.04 archive lagged ffmpeg by a major release).
 common_extra_packages:
   - beets            # tagger/organiser with MusicBrainz lookup
   - python3-mutagen  # mid3v2 / mutagen-inspect
-  - libchromaprint-tools # fpcalc, AcoustID fingerprints (picard is a Qt GUI — not here)
+  - rsync
+  - tmux
+
+# roles/linuxbrew (#258). Formula names, not apt names: mediainfo is
+# `media-info`, fpcalc ships in `chromaprint`.
+linuxbrew_packages:
+  - uv          # the music-cleanup tool is a uv project run as `uv run mcl`
+  - flac
+  - ffmpeg
+  - sox
+  - shntool
+  - cuetools
+  - media-info
+  - chromaprint # fpcalc, AcoustID fingerprints
+# The apt packages the list above replaces — purged, so one ffmpeg on the box.
+linuxbrew_replaces_apt_packages:
   - ffmpeg
   - flac
   - mediainfo
-  - rsync
-  - tmux
+  - libchromaprint-tools
+  # Not a brew replacement: the first #254 apply (2026-09-02) installed picard
+  # before this list dropped it, and `common` never removes anything. Listed so
+  # the purge is declared, not a side effect of libchromaprint-tools going.
+  - picard
+
+# Directories the workbench needs on the bound NFS share (#258). Siblings of
+# lossless/compressed inside the ONE exported dataset — plain directories, not
+# datasets, so a move between any two of them stays a rename (#256). Created
+# from the CT: Mapall on the TrueNAS export stamps them 3000:3000 like their
+# siblings, which read 777 (stat, 2026-09-05).
+workbench_share_dirs:
+  - path: /music/originals # archival single-file rips; LMS never reads it
+    mode: "0777"

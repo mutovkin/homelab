@@ -1,0 +1,166 @@
+---
+# Homebrew on Linux for workbench CTs (#258). Runs after `common`.
+#
+# brew refuses to run as root, so every brew invocation goes through
+# `runuser -u linuxbrew`. That is deliberate over `become_user`: becoming an
+# unprivileged user from a root connection makes Ansible juggle world-readable
+# tmp files / setfacl, and the CT has no `acl` package — a plain `command` has
+# no such dependency.
+
+- name: Install Homebrew's Linux prerequisites
+  ansible.builtin.apt:
+    name:
+      - build-essential # brew's documented requirement; only used if a formula lacks a bottle
+      - procps
+      - curl
+      - file
+      - git
+    state: present
+
+- name: Purge apt packages the brew formulae replace
+  ansible.builtin.apt:
+    name: "{{ linuxbrew_replaces_apt_packages }}"
+    state: absent
+    purge: true
+    autoremove: true
+  when: linuxbrew_replaces_apt_packages | length > 0
+
+- name: Create the linuxbrew user
+  ansible.builtin.user:
+    name: "{{ linuxbrew_user }}"
+    home: "/home/{{ linuxbrew_user }}"
+    shell: /bin/bash
+    system: false
+    create_home: true
+
+- name: Create the Homebrew prefix owned by the linuxbrew user
+  ansible.builtin.file:
+    path: "{{ linuxbrew_prefix }}"
+    state: directory
+    owner: "{{ linuxbrew_user }}"
+    group: "{{ linuxbrew_user }}"
+    mode: "0755"
+
+# Full clone, not --depth=1: `brew update` refuses to work on a shallow clone.
+# The same layout the official installer produces (prefix/Homebrew + bin/brew
+# symlink), minus the installer's sudo prompts and its "press RETURN".
+- name: Clone Homebrew into the prefix
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ linuxbrew_user }}"
+      - --
+      - git
+      - clone
+      - "{{ linuxbrew_repo }}"
+      - "{{ linuxbrew_prefix }}/Homebrew"
+    creates: "{{ linuxbrew_prefix }}/Homebrew/bin/brew"
+
+- name: Link bin/brew
+  ansible.builtin.file:
+    path: "{{ linuxbrew_prefix }}/bin"
+    state: directory
+    owner: "{{ linuxbrew_user }}"
+    group: "{{ linuxbrew_user }}"
+    mode: "0755"
+
+- name: Link bin/brew (symlink)
+  ansible.builtin.file:
+    src: ../Homebrew/bin/brew
+    dest: "{{ linuxbrew_prefix }}/bin/brew"
+    state: link
+    owner: "{{ linuxbrew_user }}"
+    group: "{{ linuxbrew_user }}"
+    # The clone above is skipped under --check, so the target does not exist
+    # yet on a fresh host; force lets the dry-run predict the link anyway.
+    force: true
+
+# PATH for EVERY session type. profile.d only reaches login/interactive shells;
+# `ssh host cmd`, rsync-over-ssh and Ansible's own tasks get their PATH from
+# pam_env's /etc/environment. The workbench tool is run exactly that way, so
+# this line is the one that matters. The prefix goes AFTER /usr/local/bin and
+# BEFORE /usr/bin: ahead of the distro so a brew tool always wins over a
+# forgotten apt copy, behind /usr/local/bin so the root wrapper below shadows
+# the prefix's own `brew` (measured: with the prefix first, root's `brew`
+# reached Homebrew's binary and got "Running Homebrew as root is … not
+# supported"). No `brew shellenv` anywhere — it would re-prepend the prefix.
+- name: Put the brew prefix on PATH for all sessions (/etc/environment)
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: '^PATH='
+    line: >-
+      PATH="{{ linuxbrew_path }}"
+
+- name: Brew environment for interactive shells
+  ansible.builtin.copy:
+    dest: /etc/profile.d/linuxbrew.sh
+    mode: "0644"
+    content: |
+      # Managed by Ansible (roles/linuxbrew, #258). PATH itself comes from
+      # /etc/environment (pam_env) so non-login sessions see the same order.
+      export HOMEBREW_NO_ANALYTICS=1
+      export HOMEBREW_NO_AUTO_UPDATE=1
+      export HOMEBREW_NO_ENV_HINTS=1
+
+- name: Root-safe brew wrapper
+  ansible.builtin.copy:
+    src: brew
+    dest: /usr/local/bin/brew
+    mode: "0755"
+
+# One `brew install` for the whole list: brew resolves the shared dependency
+# tree once, and an already-installed formula is a no-op it reports as
+# "already installed" — hence the changed_when on its own output. Auto-update is
+# off so a deploy never moves the formula index as a side effect; the operator
+# moves it deliberately with `brew update && brew upgrade`.
+- name: Install brew formulae
+  ansible.builtin.command:
+    argv: "{{ ['runuser', '-u', linuxbrew_user, '--', 'env',
+              'HOMEBREW_NO_ANALYTICS=1', 'HOMEBREW_NO_AUTO_UPDATE=1', 'HOMEBREW_NO_ENV_HINTS=1',
+              linuxbrew_prefix ~ '/bin/brew', 'install', '--quiet'] + linuxbrew_packages }}"
+    # brew refuses to start unless its cwd is readable by the brew user; the
+    # connection user's $HOME (/root, 0700) is not. Measured on the first apply.
+    chdir: "{{ linuxbrew_prefix }}"
+  register: linuxbrew_install
+  changed_when: "'Pouring' in linuxbrew_install.stdout or 'Installing' in linuxbrew_install.stdout"
+  when: linuxbrew_packages | length > 0
+
+# --- Verify: the versions the workbench will record resolve to brew --------
+# Probed through a fresh `ssh` session rather than in-process, so the PATH under
+# test is the one pam_env hands a non-login command, not this play's. Any
+# leftover apt binary earlier on PATH fails the prefix check, not just the
+# version. A missing tool fails the rc check.
+- name: Resolve each verified tool from a non-login shell
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      command -v {{ item.split(' ') | first }} && {{ item }} 2>&1 | head -1
+    executable: /bin/bash
+  loop: "{{ linuxbrew_verify_commands }}"
+  register: linuxbrew_verify
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert every verified tool is the brew one
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - item.stdout_lines[0] is match('^' ~ linuxbrew_prefix ~ '/bin/')
+    fail_msg: >-
+      {{ item.item }}: rc={{ item.rc }}, resolved to
+      "{{ item.stdout_lines[0] | default('<nothing>') }}" — expected a binary
+      under {{ linuxbrew_prefix }}/bin. A different prefix means an apt copy
+      shadows the brew one (add it to linuxbrew_replaces_apt_packages) or PATH
+      is not reaching non-login sessions (/etc/environment).
+    quiet: true
+  loop: "{{ linuxbrew_verify.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not ansible_check_mode
+
+- name: Report tool versions
+  ansible.builtin.debug:
+    msg: "{{ linuxbrew_verify.results | map(attribute='stdout_lines') | map('last') | list }}"
+  when: not ansible_check_mode

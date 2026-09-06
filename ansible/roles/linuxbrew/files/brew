@@ -1,0 +1,15 @@
+#!/bin/sh
+# Root wrapper for brew (#258). Homebrew refuses to run as root, and the
+# workbench is used as root; this delegates to the linuxbrew user so
+# `brew list --versions` / `brew upgrade` work from a root shell. It lives in
+# /usr/local/bin, which /etc/environment puts BEFORE the brew prefix for
+# exactly this reason. Any other user falls through to the real brew.
+set -eu
+BREW=/home/linuxbrew/.linuxbrew/bin/brew
+export HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
+if [ "$(id -u)" -eq 0 ]; then
+  # brew refuses a cwd the linuxbrew user cannot read (root's /root is 0700).
+  cd / || exit 1
+  exec runuser -u linuxbrew -- "$BREW" "$@"
+fi
+exec "$BREW" "$@"
