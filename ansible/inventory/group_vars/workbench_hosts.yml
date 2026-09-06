@@ -7,7 +7,9 @@
 # discovery moved from /usr/bin/python3 to
 # /home/linuxbrew/.linuxbrew/bin/python3.14 between two runs of the same play,
 # an interpreter with no python3-apt bindings. The prefix now sits after
-# /usr/bin; the pin makes the interpreter independent of PATH order anyway. A literal path is right here: every workbench is a Linux CT
+# an interpreter with no python3-apt bindings. The prefix now sits after
+# /usr/bin; the pin makes the interpreter independent of PATH order anyway.
+# A literal path is right here: every workbench is a Linux CT
 # (CLAUDE.md's "never a literal path" is about ansible_connection: local plays
 # on the two operator platforms).
 ansible_python_interpreter: /usr/bin/python3

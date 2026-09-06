@@ -38,9 +38,10 @@ tags:
 
 #258 gave the music workbench (CT 202, unprivileged Ubuntu 26.04) upstream-current
 audio tools through Homebrew on Linux (`roles/linuxbrew`). To make a brew tool win
-over a forgotten apt copy for every session type, the role writes the prefix into
-`/etc/environment`'s `PATH` ahead of `/usr/bin`. Several brew formulae depend on
-`python@3`, so after the first apply `python3` on PATH was brew's 3.14.7.
+over a forgotten apt copy for every session type, the role's FIRST revision wrote
+the prefix into `/etc/environment`'s `PATH` ahead of `/usr/bin`. Several brew
+formulae depend on `python@3`, so after the first apply `python3` on PATH was
+brew's 3.14.7.
 
 Ubuntu 26.04 is not in this ansible-core's distro→interpreter map, so
 `interpreter_python: auto` falls back to resolving a bare `python3` from PATH. The
@@ -70,8 +71,9 @@ by discovery" into the review brief. The reviewer measured it false.
   `/etc/environment` reaches them. And `shellenv` re-prepends the prefix, which
   defeats the wrapper ordering below.
 - **Prefix FIRST on PATH.** Root's `brew` then resolves to the prefix's own binary,
-  which refuses to run as root. The order that works is `/usr/local/bin` (root
-  wrapper) → prefix → `/usr/bin`.
+  which refuses to run as root — and, as above, 135 system binaries move to brew.
+  The order that works is `/usr/local/bin` (root wrapper) → system directories →
+  prefix; "a brew tool wins" comes from the purge, not from PATH order.
 - **`mountpoint -q` as the "is this the NAS" gate** for creating a directory on a
   bind-mounted share. A local volume declared under `mounts` is a mountpoint too,
   and `mountpoint` stats a hard NFS path with no timeout — the pre-start hookscript
@@ -107,9 +109,12 @@ All in `roles/linuxbrew` and `ansible/inventory/group_vars/workbench_hosts.yml` 
    `/home/linuxbrew` at 0755 — Ubuntu's 0750 default makes every brew tool
    "command not found" for any non-root user, invisible to a root-only test.
 4. **Deploy never moves versions**: `HOMEBREW_NO_INSTALL_UPGRADE=1` and
-   `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1` beside `HOMEBREW_NO_AUTO_UPDATE=1`,
-   in the install task, `profile.d` and the wrapper. `changed_when` comes from a
-   `brew list --formula --versions` snapshot before vs after.
+   `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1` in the role's install task ONLY
+   (`linuxbrew_install_env`); `profile.d` and the wrapper carry just
+   `NO_ANALYTICS`/`NO_AUTO_UPDATE`/`NO_ENV_HINTS`, because the dependents-check
+   var would also make the operator's own `brew upgrade` skip outdated dependents.
+   `changed_when` comes from a `brew list --formula --versions` snapshot before vs
+   after.
 5. **Bounded purge** of the apt packages brew replaces: `apt-get -s -y purge <list>`
    first, assert the `Purg` set is a SUBSET of the declared list (a declared package
    already gone removes nothing), no `autoremove` (nightly
@@ -117,12 +122,16 @@ All in `roles/linuxbrew` and `ansible/inventory/group_vars/workbench_hosts.yml` 
    fire: `-e linuxbrew_replaces_apt_packages=[python3-mutagen]` → "apt would also
    remove beets, python3-mediafile".
 6. **NFS gate** for share directories (`ansible/playbooks/configure-guests.yml` post_tasks):
-   `timeout -s KILL 30 findmnt -n -o FSTYPE,SOURCE --target <parent>` and assert the
-   fstype is `nfs`/`nfs4`. Measured to fire on a local zfs mount, `changed=0`.
+   `timeout -s KILL 30 /usr/bin/findmnt -n -o FSTYPE,SOURCE --target <parent>`
+   (absolute: brew's util-linux ships a `findmnt` too) and assert the fstype is
+   `nfs`/`nfs4`; the refusal names which of hung / missing parent / local
+   filesystem it saw. `findmnt --target` walks up only for a path that exists, so
+   a nested entry needs its parent declared first. Measured to fire on a local zfs
+   mount and on a missing parent, `changed=0`.
 7. **Verify from the session PATH**, gated on a `stat` of `<prefix>/bin/brew` rather
    than on check mode, so drift shows in a dry-run on a converged host: every
    binary in `linuxbrew_verify_commands` must resolve under the prefix, and a
-   non-empty package list without a verify list fails the role.
+   verify list shorter than the package list fails the role.
 
 ## Why This Works
 

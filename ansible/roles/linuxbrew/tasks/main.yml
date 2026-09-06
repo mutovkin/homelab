@@ -235,9 +235,11 @@
 # connecting user. A workbench connecting as a non-root user would instead get
 # sudo's secure_path and go red here — loudly, which is the intended outcome.
 # With the prefix AFTER /usr/bin, a reinstalled apt copy of a tool wins the
-# lookup and fails the prefix assert below: that clause is reachable (measured
-# 2026-09-05 with `-e linuxbrew_verify_commands=["python3 --version"]`, which
-# resolved to /usr/bin/python3 and fired).
+# lookup and fails the prefix assert below: that clause is reachable. Measured
+# 2026-09-05 with a verify list of `python3 --version` padded to the package
+# count with `uv --version` entries (the count assert at the top of this role
+# rejects a shorter list before this task is reached — a falsification must
+# reach its guard): python3 resolved to /usr/bin/python3 and the assert fired.
 # No `head`: under pipefail a chatty `-version` can SIGPIPE it into rc 141.
 - name: Resolve each verified tool from the session PATH
   ansible.builtin.shell:

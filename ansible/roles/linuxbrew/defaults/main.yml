@@ -74,8 +74,8 @@ linuxbrew_env:
 # without them an operator's `brew update` would arm the next routine deploy
 # to move the encoder versions the ledger records. Deliberately NOT in the
 # wrapper or profile.d: NO_INSTALLED_DEPENDENTS_CHECK also makes the
-# operator's `brew upgrade` skip outdated dependents and broken linkage, and
-# NO_ENV_HINTS would hide brew's warning about that.
+# operator's `brew upgrade` skip outdated dependents and broken linkage (and
+# NO_ENV_HINTS above would hide the hint that says the check was disabled).
 linuxbrew_install_env:
   HOMEBREW_NO_INSTALL_UPGRADE: "1"
   HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
