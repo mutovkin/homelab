@@ -31,8 +31,9 @@
     - common
     - docker_host
 
-# Workbench CTs (#254): base OS only. Same boot-race guard as above — a fresh
-# workbench is seconds old when site.yml reaches this play.
+# Workbench CTs (#254): base OS plus Homebrew-sourced tools (#258). Same
+# boot-race guard as above — a fresh workbench is seconds old when site.yml
+# reaches this play.
 - name: Configure workbench hosts
   hosts: workbench_hosts
   become: true
@@ -51,3 +52,61 @@
         - always
   roles:
     - common
+    - linuxbrew
+  post_tasks:
+    # Directories on the bound NAS share (`workbench_share_dirs`, host_vars).
+    # Gated on the parent being a LIVE NFS mount: the hookscript refuses to
+    # start the CT without it, but a `file:` on an unmounted path would create
+    # the directory on the CT's rootfs, where the next start hides it under
+    # the bind — silently, and forever (#258). `mountpoint -q` would not do:
+    # a local volume declared under `mounts` is a mountpoint too, and it stats
+    # a hard NFS path with no timeout (the hookscript wraps every such stat in
+    # `timeout -s KILL` for the same reason). findmnt --target walks up to the
+    # containing mount for a path that EXISTS; a nested entry whose parent is
+    # not created yet gets rc=1 (measured), so declare parents before children
+    # and only one level at a time. rc 124/137 is a hung NAS. /usr/bin/findmnt
+    # by absolute path: brew's util-linux ships a findmnt too.
+    - name: Probe that each share directory's parent is a live NFS mount
+      ansible.builtin.command:
+        argv: [timeout, -s, KILL, "30", /usr/bin/findmnt, -n, -o, "FSTYPE,SOURCE", --target, "{{ item.path | dirname }}"]
+      loop: "{{ workbench_share_dirs | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: workbench_share_mounts
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Refuse to create a share directory outside a live NFS mount
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - (item.stdout.split() | first | default('')) in ['nfs', 'nfs4']
+        fail_msg: >-
+          Refusing to create {{ item.item.path }} on {{ inventory_hostname }}:
+          {% if item.rc in [124, 137] %}findmnt hung on {{ item.item.path | dirname }} —
+          the NAS is not answering (hard mount).
+          {% elif item.rc != 0 %}{{ item.item.path | dirname }} does not exist
+          (findmnt rc={{ item.rc }}) — declare the parent directory first.
+          {% else %}{{ item.item.path | dirname }} is on "{{ item.stdout }}",
+          not an NFS mount — the directory would land on local storage. Is the
+          bind mount (host_vars/<node> bind_mounts) in place and the CT
+          started through the hookscript?{% endif %}
+        quiet: true
+      loop: "{{ workbench_share_mounts.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+
+    # No owner/group: the CT's root is unmapped on the export and TrueNAS Mapall
+    # rewrites the owner server-side (reads back as nobody:nogroup in the CT —
+    # that is the unmapped uid 3000, not a fault). Mode is on a SUBdirectory,
+    # not the mountpoint; a mode on the mountpoint itself chmods the dataset
+    # root (docs/solutions/integration-issues/ansible-file-mode-on-nfs-mountpoint-…).
+    - name: Create share directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop: "{{ workbench_share_dirs | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"

@@ -578,6 +578,17 @@ Hard-won lessons — check here before debugging from scratch.
   fresh CT was reachable from ONE operator platform until `common` repaired it; and the
   hookscript start gate must be seen to REFUSE (NAS unreachable, missing bind source)
   before it counts. See [docs/n5pro.md — Workbench CTs](docs/n5pro.md#workbench-cts).
+- **Reordering PATH on a managed host can move Ansible's interpreter.** Ubuntu 26.04 is
+  not in ansible-core's distro map, so discovery resolves a bare `python3` from PATH; the
+  `linuxbrew` role's first revision (#258) put its prefix ahead of `/usr/bin` and discovery
+  moved on the NEXT run (green, warning only) to brew's python, with no apt bindings — one
+  of 135 system binaries the formulae's dependency tree shadowed. The prefix now sits
+  after `/usr/bin` and `ansible_python_interpreter` is pinned in
+  `group_vars/workbench_hosts.yml`; after any PATH change read
+  `discovered_interpreter_python` from `ansible <host> -m ping` on the run AFTER the
+  change. Sibling traps (Caskroom, `HOMEBREW_NO_INSTALL_UPGRADE`, cwd, bounded
+  apt purge, `findmnt` not `mountpoint`):
+  [docs/solutions/integration-issues/homebrew-prefix-on-path-moves-ansible-interpreter-and-other-linuxbrew-traps.md](docs/solutions/integration-issues/homebrew-prefix-on-path-moves-ansible-interpreter-and-other-linuxbrew-traps.md).
 
 ## Conventions
 
