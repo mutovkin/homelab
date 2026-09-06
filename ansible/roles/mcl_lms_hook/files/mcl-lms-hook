@@ -1,0 +1,16 @@
+#!/bin/sh
+# Managed by Ansible (roles/mcl_lms_hook, #262). SSH forced command: the ONLY
+# thing the mcl-hook user can run. The verb arrives in SSH_ORIGINAL_COMMAND;
+# anything but the three verbs below is refused, including an empty command
+# (an interactive login attempt). sudoers grants exactly the three docker
+# invocations used here and nothing else.
+set -eu
+CONTAINER=__CONTAINER__
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  stop)   exec sudo -n /usr/bin/docker stop "$CONTAINER" ;;
+  start)  exec sudo -n /usr/bin/docker start "$CONTAINER" ;;
+  status) exec sudo -n /usr/bin/docker inspect -f '{{.State.Status}}' "$CONTAINER" ;;
+  *)
+    echo "mcl-lms-hook: refused: '${SSH_ORIGINAL_COMMAND:-}' (allowed: stop|start|status)" >&2
+    exit 3 ;;
+esac

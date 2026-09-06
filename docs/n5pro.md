@@ -658,6 +658,27 @@ checking every key round-trips non-empty, rc only. No loop item carries a
 value — `loop_control.label` hides nothing from a failure dump or a `-v` run —
 so the tasks loop over indices and key names and read values via task `vars:`.
 
+**Snapshots and the LMS hook (#262)** — what the music-cleanup tool on CT 202
+may call before and after a write batch, and where the trust boundaries are:
+
+- `mcl-snap create|list|destroy <batch-id>` (roles/mcl_snap): a wrapper over the
+  TrueNAS JSON-RPC API with a key scoped to `SNAPSHOT_READ/WRITE/DELETE`
+  (operator-created user, group, privilege `mcl-snap`, key `mcl-snap-ct202`;
+  the key lives in `/etc/mcl/env` from the host's vault). Those roles are
+  NAS-wide — measured: the key can query any snapshot and nothing else — so the
+  wrapper is the scope: it only ever names `vault/media/music@mcl-<id>`, refuses
+  malformed ids, duplicate creates and destroys of anything it did not create.
+  Deploy verifies `list` and a refusal; a create/destroy round-trip was proven
+  once by hand (`probe262`), not on every deploy.
+- `mcl-lms stop|start|status` (roles/mcl_lms_hook): an SSH forced command as
+  user `mcl-hook` on CT 201, sudoers holding exactly the three docker argv
+  lines. CT 202 holds its own ed25519 key with CT 201's host key pinned in
+  `/etc/mcl/known_hosts`; `restrict,command=` on the authorized key, so an
+  empty command, `id`, or `"stop; id"` are all refused with rc 3 (the whole
+  string is one verb). Rescan is not part of the hook: LMS runs
+  `network_mode: host`, so its CLI on 192.168.30.15:9090 is reachable from
+  CT 202 directly, unauthenticated as LMS ships it.
+
 Recipe for a new workbench:
 
 1. Copy the CT 202 block in `host_vars/n5pro/vars.yml` (new vmid, hostname,

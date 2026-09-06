@@ -1,0 +1,12 @@
+#!/bin/sh
+# Managed by Ansible (roles/mcl_lms_hook, #262). Client wrapper:
+#   mcl-lms stop | start | status
+# Talks to the forced-command user on {{ mcl_lms_hook_host_addr }} with a
+# dedicated key and a pinned host key; BatchMode so it can never prompt.
+set -eu
+[ $# -eq 1 ] || { echo "usage: mcl-lms stop|start|status" >&2; exit 2; }
+exec ssh -i {{ mcl_lms_hook_client_key }} \
+  -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o UserKnownHostsFile={{ mcl_lms_hook_client_known_hosts }} -o StrictHostKeyChecking=yes \
+  -o ConnectTimeout=10 \
+  {{ mcl_lms_hook_user }}@{{ mcl_lms_hook_host_addr }} "$1"

@@ -1,0 +1,15 @@
+---
+# mcl_lms_hook (#262): lets a workbench CT stop/start/status ONE container on
+# this docker host through an SSH forced command — no shell, no other command.
+# Applied to the docker host; client-side pieces are delegated to each client.
+mcl_lms_hook_user: mcl-hook
+mcl_lms_hook_container: lms
+mcl_lms_hook_script: /usr/local/bin/mcl-lms-hook
+# Workbench inventory hostnames allowed to call the hook. Each gets its own
+# ed25519 key generated ON the client (private key never leaves it), pinned to
+# the forced command in this user's authorized_keys.
+mcl_lms_hook_clients: []
+# Client-side paths.
+mcl_lms_hook_client_key: /root/.ssh/mcl-hook_ed25519
+mcl_lms_hook_client_known_hosts: /etc/mcl/known_hosts
+mcl_lms_hook_client_wrapper: /usr/local/bin/mcl-lms

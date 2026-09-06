@@ -97,3 +97,11 @@ portainer_firewall:
   ports:
     9000:
       - 192.168.48.0/24 # operator workstation subnet — the only source that needs this UI
+
+# --- mcl_lms_hook (#262) ------------------------------------------------------
+# Workbench CTs allowed to stop/start/status the `lms` container through the
+# forced-command user `mcl-hook` (roles/mcl_lms_hook). Rescan is NOT part of the
+# hook: LMS runs network_mode: host, so its CLI on this host's :9090 is reachable
+# from the workbench directly (unauthenticated, as LMS ships it).
+mcl_lms_hook_clients:
+  - music_workbench
