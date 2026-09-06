@@ -111,80 +111,90 @@
       loop_control:
         label: "{{ item.path }}"
 
-    # Sourced env files (`workbench_env_files`, host_vars, #260). Values are
-    # asserted non-empty and quote-free BY NAME first: an undefined vault key
-    # would otherwise fail inside the write task, whose diff is suppressed, and
-    # a value containing `'` would break the single-quoting below at source
-    # time. The assert names the variable, never prints the value.
-    - name: Assert every env value is set, non-empty and free of single quotes
+    # Sourced env files (`workbench_env_files`, host_vars, #260). NO loop item
+    # may carry a value: `loop_control.label` only rewrites the `(item=…)`
+    # prefix, while Ansible still dumps the full `item` on any failure and for
+    # every ok/changed result at -v (measured: a value-bearing item printed the
+    # secret four times on a happy-path `-v` run). So the loops here carry
+    # indices and key NAMES, and each task reaches its value through task
+    # `vars:`, which are not part of the result. An undefined vault key fails
+    # while the loop list is templated — by name, value-free.
+    - name: Assert every env value is non-empty and free of single quotes, and keys are sh identifiers
       ansible.builtin.assert:
         that:
-          - item.1.value is defined
-          - item.1.value | string | trim | length > 0
-          - "\"'\" not in (item.1.value | string)"
+          - item.key is match('^[A-Za-z_][A-Za-z0-9_]*$')
+          - workbench_env_value | string | trim | length > 0
+          - "\"'\" not in (workbench_env_value | string)"
         fail_msg: >-
-          {{ item.0.path }}: {{ item.1.key }} is undefined, empty or contains a
-          single quote — set it (vault key for secrets) in host_vars.
+          {{ item.path }}: {{ item.key }} is not a sh identifier, is empty, or
+          contains a single quote (the file is sourced with values
+          single-quoted) — fix it in host_vars (vault key for secrets).
         quiet: true
-      loop: "{{ workbench_env_pairs | from_json }}"
-      loop_control:
-        label: "{{ item.0.path }}:{{ item.1.key }}"
       vars:
-        workbench_env_pairs: >-
+        workbench_env_value: "{{ workbench_env_files[item.i].vars[item.key] }}"
+        workbench_env_keys: >-
           {%- set out = [] -%}
           {%- for f in workbench_env_files | default([]) -%}
-          {%- for k, v in (f.vars | default({})).items() -%}
-          {%- set _ = out.append([{'path': f.path}, {'key': k, 'value': v}]) -%}
+          {%- set fi = loop.index0 -%}
+          {%- for k in f.vars.keys() -%}
+          {%- set _ = out.append({'i': fi, 'path': f.path, 'key': k}) -%}
           {%- endfor -%}
           {%- endfor -%}
           {{- out | to_json -}}
+      loop: "{{ workbench_env_keys | from_json }}"
+      loop_control:
+        label: "{{ item.path }}:{{ item.key }}"
 
     - name: Create env file directories
       ansible.builtin.file:
-        path: "{{ item.path | dirname }}"
+        path: "{{ item | dirname }}"
         state: directory
         owner: root
         group: root
         mode: "0755"
-      loop: "{{ workbench_env_files | default([]) }}"
-      loop_control:
-        label: "{{ item.path | dirname }}"
+      loop: "{{ workbench_env_files | default([]) | map(attribute='path') | list }}"
 
     # diff:false, not no_log: the content (a vault secret) never renders, but a
     # failure stays readable (#88).
     - name: Write env files
       ansible.builtin.copy:
-        dest: "{{ item.path }}"
+        dest: "{{ workbench_env_file.path }}"
         owner: root
         group: root
         mode: "0600"
         content: |
-          # Managed by Ansible (workbench_env_files, #260). Source with: set -a; . {{ item.path }}
-          {% for k, v in item.vars.items() %}
+          # Managed by Ansible (workbench_env_files, #260). Source with: set -a; . {{ workbench_env_file.path }}
+          {% for k, v in workbench_env_file.vars.items() %}
           {{ k }}='{{ v }}'
           {% endfor %}
-      loop: "{{ workbench_env_files | default([]) }}"
+      vars:
+        workbench_env_file: "{{ workbench_env_files[item] }}"
+      loop: "{{ range(workbench_env_files | default([]) | length) | list }}"
       loop_control:
-        label: "{{ item.path }}"
+        label: "{{ workbench_env_file.path }}"
+      register: workbench_env_write
       diff: false
 
     # Prove the file SOURCES the way its consumer will and every key round-trips
-    # non-empty — rc only, so the secret never reaches the log. Skipped under
-    # --check on a host where the file has not been written yet.
+    # non-empty — rc only, so the secret never reaches the log. Runs under
+    # --check on a converged host (drift must go red in a dry-run); skipped,
+    # visibly, only for a file the dry-run could not write yet.
     - name: Verify each env file sources cleanly with every key non-empty
       ansible.builtin.shell:
         cmd: |
           set -eu
-          set -a; . '{{ item.path }}'; set +a
-          {% for k in item.vars.keys() %}
+          set -a; . '{{ workbench_env_file.path }}'; set +a
+          {% for k in workbench_env_file.vars.keys() %}
           [ -n "${{ k }}" ] || { echo '{{ k }} empty after sourcing'; exit 3; }
           {% endfor %}
           echo ok
         executable: /bin/sh
-      loop: "{{ workbench_env_files | default([]) }}"
+      vars:
+        workbench_env_file: "{{ workbench_env_files[item] }}"
+      loop: "{{ range(workbench_env_files | default([]) | length) | list }}"
       loop_control:
-        label: "{{ item.path }}"
+        label: "{{ workbench_env_file.path }}"
       register: workbench_env_verify
       changed_when: false
-      failed_when: workbench_env_verify.rc != 0 and not ansible_check_mode
       check_mode: false
+      when: not (ansible_check_mode and workbench_env_write.results[item].changed)

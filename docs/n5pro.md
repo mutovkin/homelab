@@ -654,7 +654,9 @@ host_vars, #260): values come from the host's encrypted `vault.yml`, the play
 asserts each one non-empty and quote-free BY NAME, writes the file root:root
 0600 with `diff: false`, single-quotes every value (the file is sourced by sh,
 so spaces, parentheses and `$` survive), and proves it by sourcing it and
-checking every key round-trips non-empty — rc only, the value never logs.
+checking every key round-trips non-empty, rc only. No loop item carries a
+value — `loop_control.label` hides nothing from a failure dump or a `-v` run —
+so the tasks loop over indices and key names and read values via task `vars:`.
 
 Recipe for a new workbench:
 
