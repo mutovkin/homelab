@@ -73,3 +73,13 @@ workbench_env_files:
       # `mcl-snap`, key `mcl-snap-ct202`). The API-only NAS posture: no SSH.
       TRUENAS_API_URL: "wss://192.168.30.20/api/current"
       TRUENAS_MCL_SNAP_API_KEY: "{{ vault_truenas_mcl_snap_api_key }}"
+      # Hook command strings the music-cleanup tool splits with shell rules and
+      # appends ONE argument to (the snapshot id). They name the #262 wrappers;
+      # changing a wrapper's CLI means changing these in the same PR.
+      MCL_SNAPSHOT_CMD: "mcl-snap create"
+      MCL_SNAPSHOT_LIST_CMD: "mcl-snap list"
+      MCL_SNAPSHOT_RELEASE_CMD: "mcl-snap destroy"
+      MCL_LMS_STOP_CMD: "mcl-lms stop"
+      MCL_LMS_START_CMD: "mcl-lms start"
+      MCL_LMS_STATUS_CMD: "mcl-lms status"
+      MCL_LMS_CLI: "192.168.30.15:9090" # LMS CLI, network_mode: host on CT 201; rescan goes here directly
