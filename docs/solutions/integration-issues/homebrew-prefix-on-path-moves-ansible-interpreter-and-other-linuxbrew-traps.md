@@ -92,9 +92,13 @@ All in `roles/linuxbrew` and `ansible/inventory/group_vars/workbench_hosts.yml` 
    `ansible_python_interpreter: /usr/bin/python3`. A literal path is right here —
    every workbench is a Linux CT; CLAUDE.md's "never a literal path" rule is about
    `ansible_connection: local` plays on the two operator platforms.
-2. **PATH order** written whole into `/etc/environment`:
-   `/usr/local/sbin:/usr/local/bin:<prefix>/bin:<prefix>/sbin:/usr/sbin:/usr/bin:…`.
-   The root wrapper `/usr/local/bin/brew` (templated) does `cd /` then
+2. **PATH order** written whole into `/etc/environment`, prefix AFTER the system
+   directories: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:<prefix>/bin:…`.
+   With the prefix first, the formulae's dependency tree (util-linux, curl,
+   openssl, python@3) shadowed 135 system binaries — `mount`, `findmnt`, `curl`,
+   `python3` — and the interpreter move above was one symptom of that. "A brew
+   tool wins" is guaranteed by the purge (5) instead, which makes the verify
+   step (7) a real detector of a reinstalled apt copy. The root wrapper `/usr/local/bin/brew` (templated) does `cd /` then
    `runuser -u linuxbrew -- <prefix>/bin/brew "$@"`, because brew refuses a cwd the
    brew user cannot read (root's `/root` is 0700) — the install task sets
    `chdir: "{{ linuxbrew_prefix }}"` for the same reason.
@@ -107,7 +111,8 @@ All in `roles/linuxbrew` and `ansible/inventory/group_vars/workbench_hosts.yml` 
    in the install task, `profile.d` and the wrapper. `changed_when` comes from a
    `brew list --formula --versions` snapshot before vs after.
 5. **Bounded purge** of the apt packages brew replaces: `apt-get -s -y purge <list>`
-   first, assert the `Purg` set equals the declared list, no `autoremove` (nightly
+   first, assert the `Purg` set is a SUBSET of the declared list (a declared package
+   already gone removes nothing), no `autoremove` (nightly
    unattended-upgrades already removes unused dependencies on guests). Measured to
    fire: `-e linuxbrew_replaces_apt_packages=[python3-mutagen]` → "apt would also
    remove beets, python3-mediafile".
@@ -135,7 +140,9 @@ simulation, `findmnt`'s fstype — instead of re-implementing its logic.
 
 - After ANY change that reorders PATH on a managed host, run `ansible <host> -m
   ping` and read `discovered_interpreter_python` — on the run after the change, not
-  the one that made it.
+  the one that made it. And count what a prefix shadows before putting it ahead of
+  `/usr/bin` (`comm -12 <(ls <prefix>/bin) <(ls /usr/bin)`): a toolchain's
+  dependency tree is not just the tools you asked for.
 - A role that names its own evidence command ("`brew list --formula --versions` is
   the record") asserts that command's rc in the same role.
 - Grade guards live-red: the purge bound and the NFS gate each have a one-line

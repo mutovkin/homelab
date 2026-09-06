@@ -7,14 +7,16 @@
 # tmp files / setfacl, and the CT has no `acl` package — a plain `command` has
 # no such dependency.
 
-- name: Assert a package list comes with a verify list
+- name: Assert the verify list covers the package list
   ansible.builtin.assert:
     that:
-      - (linuxbrew_packages | length == 0) or (linuxbrew_verify_commands | length > 0)
+      - linuxbrew_verify_commands | length >= linuxbrew_packages | length
     fail_msg: >-
-      linuxbrew_packages is set but linuxbrew_verify_commands is empty — the
-      role would install tools and prove nothing about which binary a
-      non-login session runs. Declare the verify list beside the packages.
+      linuxbrew_packages has {{ linuxbrew_packages | length }} formulae but
+      linuxbrew_verify_commands only {{ linuxbrew_verify_commands | length }}
+      entries — the role would install tools and prove nothing about which
+      binary a non-login session runs for the rest. Declare one verify entry
+      per formula beside the packages.
 
 - name: Install Homebrew's Linux prerequisites
   ansible.builtin.apt:
@@ -181,7 +183,7 @@
 - name: Install brew formulae
   ansible.builtin.command:
     argv: "{{ ['runuser', '-u', linuxbrew_user, '--', 'env']
-              + (linuxbrew_env | dict2items | map(attribute='key') | zip(linuxbrew_env.values()) | map('join', '=') | list)
+              + (linuxbrew_brew_install_env | dict2items | map(attribute='key') | zip(linuxbrew_brew_install_env.values()) | map('join', '=') | list)
               + [linuxbrew_prefix ~ '/bin/brew', 'install', '--quiet'] + linuxbrew_packages }}"
     chdir: "{{ linuxbrew_prefix }}"
   register: linuxbrew_install
@@ -189,6 +191,8 @@
   # diff; brew's own output is not the evidence.
   changed_when: false
   when: linuxbrew_packages | length > 0
+  vars:
+    linuxbrew_brew_install_env: "{{ linuxbrew_env | combine(linuxbrew_install_env) }}"
 
 - name: Record installed formulae after (reports the install's change)
   ansible.builtin.command:
@@ -230,6 +234,10 @@
 # connection user is root and Ansible skips sudo for become_user == the
 # connecting user. A workbench connecting as a non-root user would instead get
 # sudo's secure_path and go red here — loudly, which is the intended outcome.
+# With the prefix AFTER /usr/bin, a reinstalled apt copy of a tool wins the
+# lookup and fails the prefix assert below: that clause is reachable (measured
+# 2026-09-05 with `-e linuxbrew_verify_commands=["python3 --version"]`, which
+# resolved to /usr/bin/python3 and fired).
 # No `head`: under pipefail a chatty `-version` can SIGPIPE it into rc 141.
 - name: Resolve each verified tool from the session PATH
   ansible.builtin.shell:

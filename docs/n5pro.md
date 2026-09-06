@@ -621,21 +621,22 @@ source) under a non-root `linuxbrew` user, installs the host's
 (`linuxbrew_replaces_apt_packages`, so there is ONE `ffmpeg` on the box), and
 puts the prefix on PATH in `/etc/environment` — not only `profile.d`, because
 `ssh host cmd`, rsync-over-ssh and Ansible tasks are non-login sessions that
-never read `profile.d`. The order is load-bearing: `/usr/local/bin` first, so
-the root `brew` wrapper there shadows the prefix's own `brew` (Homebrew refuses
-to run as root), then the prefix, then `/usr/bin`, so a brew tool beats a
-forgotten apt copy. Two side effects of that order: brew's `python@3` becomes
-`python3` on PATH, so `group_vars/workbench_hosts.yml` pins Ansible's
-interpreter to `/usr/bin/python3` (measured: discovery moved between two runs of
-the same play); and sudo's `secure_path` omits the prefix, so a non-root user
-who sudoes loses the tools (workbenches connect as root). The role's verify step
-resolves every binary in `linuxbrew_verify_commands` from the session PATH and
-asserts each is the brew binary, and asserts `brew list --formula --versions`
-exits 0 through the wrapper — that command is the version record. Versions are
-deliberately unpinned (brew checks bottle sha256s itself) and a deploy never
-moves them (`HOMEBREW_NO_INSTALL_UPGRADE`): `brew update && brew upgrade` is the
-operator's deliberate bump. The purge of replaced apt packages is bounded by
-`apt-get -s purge`: the set apt would remove must equal the declared list.
+never read `profile.d`. The prefix goes AFTER the system directories: its
+dependency tree links 135 binaries that would otherwise shadow `mount`,
+`findmnt`, `curl`, `python3` and friends (measured with the prefix first, when
+Ansible's discovered interpreter silently moved to brew's python — so
+`group_vars/workbench_hosts.yml` pins it to `/usr/bin/python3` regardless).
+"A brew tool wins" comes from the purge of the apt duplicates instead, and the
+role's verify step is the detector: every binary in `linuxbrew_verify_commands`
+must resolve to the brew prefix from the session PATH, and
+`brew list --formula --versions` must exit 0 through the root wrapper — that
+command is the version record. Sudo's `secure_path` omits the prefix, so a
+non-root user who sudoes loses the tools (workbenches connect as root).
+Versions are deliberately unpinned (brew checks bottle sha256s itself) and a
+deploy never moves them (`HOMEBREW_NO_INSTALL_UPGRADE`, on the role's install
+only): `brew update && brew upgrade` is the operator's deliberate bump. The
+purge of replaced apt packages is bounded by `apt-get -s purge`: anything apt
+would remove outside the declared list refuses the run.
 
 **Directories on the share are created from the CT** (`workbench_share_dirs`
 in the workbench's host_vars, applied as post_tasks of the workbench play).
@@ -655,8 +656,9 @@ Recipe for a new workbench:
    refuses a `/mnt/nfs/` bind without it, and refuses `..`, spaces or glob
    characters in a bind value).
 2. Add it to `workbench_hosts` in `inventory/hosts.yml` and create
-   `host_vars/<name>/vars.yml` with `common_extra_packages`, `linuxbrew_packages`
-   (+ `linuxbrew_replaces_apt_packages`) and `workbench_share_dirs`.
+   `host_vars/<name>/vars.yml` with `common_extra_packages`, `linuxbrew_packages`,
+   `linuxbrew_verify_commands` (one per formula — the role refuses fewer),
+   `linuxbrew_replaces_apt_packages` and `workbench_share_dirs`.
 3. `task infra:hosts -- --limit n5pro`, then `task infra:guests -- --limit <name>`.
 
 Retire it: delete the block and the inventory entry, then

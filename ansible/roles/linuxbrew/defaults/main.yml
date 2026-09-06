@@ -29,41 +29,53 @@ linuxbrew_packages: []
 # binary per tool: with both installed, which `ffmpeg` runs depends on whether
 # the caller's PATH came from /etc/environment or a bare sshd default, and the
 # version a tool records would be a coin toss. The purge is bounded: the role
-# asks `apt-get -s purge` what would go and refuses if that set is not exactly
-# this list (a reverse-dependent you forgot to declare fails the run).
+# asks `apt-get -s purge` what would go and refuses if that set contains
+# anything outside this list — a SUBSET check, since a declared package that
+# is already gone removes nothing (a reverse-dependent you forgot to declare
+# fails the run).
 linuxbrew_replaces_apt_packages: []
 
 # Binaries the workbench records versions of, each asserted after install to
 # resolve to the brew prefix from the PATH a non-login session gets — the
 # shell `ssh host cmd`, rsync-over-ssh and Ansible tasks run in. Set per host
 # NEXT TO linuxbrew_packages: the role refuses a non-empty package list with
-# an empty verify list, so the two cannot drift apart silently. Entries are
-# `<binary> <version flag>`; the first output line is what the report prints.
+# a shorter verify list (one entry per formula is the floor; a library-only
+# formula needs a second binary entry to keep the count — say so beside it).
+# Entries are `<binary> <version flag>`; the first output line is what the
+# report prints.
 linuxbrew_verify_commands: []
 
 # The /etc/environment PATH, written whole rather than edited in place so the
 # result is deterministic on every host: Ubuntu's stock line with the brew
-# prefix spliced in AFTER /usr/local/bin and BEFORE /usr/bin. Ahead of the
-# distro so a brew tool always wins over a forgotten apt copy; behind
-# /usr/local/bin so the root `brew` wrapper there shadows the prefix's own
-# `brew` (measured: with the prefix first, root's `brew` reached Homebrew's
-# binary and got "Running Homebrew as root is … no longer supported").
-# Side effect to know: brew's python@3 lands ahead of /usr/bin/python3 for
-# every PATH lookup — hence the interpreter pin in group_vars/workbench_hosts.
+# prefix spliced in AFTER the system directories. The prefix does NOT go ahead
+# of /usr/bin: the formulae's dependency tree (util-linux, curl, openssl,
+# python@3, …) links 135 binaries that shadow system ones — measured 2026-09-05
+# with the prefix first: `mount`, `findmnt`, `python3`, `curl` and 130 more
+# resolved to brew, and Ansible's discovered interpreter moved to brew's python.
+# "A brew tool wins" is guaranteed by the PURGE of the apt duplicates instead,
+# and the verify step below is the detector for a reinstalled apt copy. The
+# root `brew` wrapper in /usr/local/bin therefore also precedes the prefix's
+# own `brew`, which refuses to run as root.
 # Not covered: sudo's `secure_path` in /etc/sudoers omits the prefix, so a
 # non-root user who sudoes loses every brew tool (workbenches connect as root).
 linuxbrew_path: >-
-  /usr/local/sbin:/usr/local/bin:{{ linuxbrew_prefix }}/bin:{{ linuxbrew_prefix }}/sbin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+  /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:{{ linuxbrew_prefix }}/bin:{{ linuxbrew_prefix }}/sbin:/usr/games:/usr/local/games:/snap/bin
 
-# Environment for every brew invocation the role (and the root wrapper) makes.
-# NO_AUTO_UPDATE freezes the formula index; NO_INSTALL_UPGRADE and
-# NO_INSTALLED_DEPENDENTS_CHECK stop `brew install` from upgrading formulae
-# that are already installed but outdated (its documented default) — without
-# them an operator's `brew update` would arm the next routine deploy to move
-# the encoder versions the ledger records.
+# Environment for every brew invocation: the role's, the root wrapper's and an
+# interactive shell's. NO_AUTO_UPDATE freezes the formula index so nothing
+# moves it as a side effect.
 linuxbrew_env:
   HOMEBREW_NO_ANALYTICS: "1"
   HOMEBREW_NO_AUTO_UPDATE: "1"
   HOMEBREW_NO_ENV_HINTS: "1"
+
+# Added ONLY to the role's own `brew install`: these stop it from upgrading
+# formulae that are already installed but outdated (its documented default) —
+# without them an operator's `brew update` would arm the next routine deploy
+# to move the encoder versions the ledger records. Deliberately NOT in the
+# wrapper or profile.d: NO_INSTALLED_DEPENDENTS_CHECK also makes the
+# operator's `brew upgrade` skip outdated dependents and broken linkage, and
+# NO_ENV_HINTS would hide brew's warning about that.
+linuxbrew_install_env:
   HOMEBREW_NO_INSTALL_UPGRADE: "1"
   HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"

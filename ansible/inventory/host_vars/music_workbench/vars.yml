@@ -33,8 +33,8 @@ linuxbrew_verify_commands:
   - ffmpeg -version
   - sox --version
   - shntool -v
-  - cuebreakpoints --version
-  - mediainfo --Version
+  - cuebreakpoints --version # prints 1.4.0 for formula 1.4.1 — upstream's string, not a wrong pin
+  - mediainfo --Version      # line 1 is "MediaInfo Command line, "; the version is on line 2
   - fpcalc -version
 # The apt packages the list above replaces — purged, so one ffmpeg on the box.
 linuxbrew_replaces_apt_packages:
