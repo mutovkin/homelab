@@ -1,0 +1,102 @@
+#!{{ mcl_snap_venv }}/bin/python
+"""mcl-snap — managed by Ansible (roles/mcl_snap, #262).
+
+Create, list and destroy snapshots of exactly one dataset under exactly one
+name prefix, over the TrueNAS JSON-RPC API. The API key's roles are NAS-wide,
+so THIS FILE is the scope: it never sends a dataset or snapshot name it did
+not build itself from the constants below.
+
+  mcl-snap create  <batch-id>   -> prints the snapshot name
+  mcl-snap list                 -> one snapshot name per line
+  mcl-snap destroy <batch-id>   -> destroys {{ mcl_snap_dataset }}@{{ mcl_snap_prefix }}<batch-id>
+
+Exit: 0 ok, 1 API error, 2 usage, 3 refused (bad name / not ours / absent).
+"""
+import os
+import re
+import sys
+
+DATASET = "{{ mcl_snap_dataset }}"
+PREFIX = "{{ mcl_snap_prefix }}"
+ENV_FILE = "{{ mcl_snap_env_file }}"
+URL_VAR = "{{ mcl_snap_env_url_var }}"
+KEY_VAR = "{{ mcl_snap_env_key_var }}"
+BATCH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def die(code, msg):
+    print(f"mcl-snap: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def read_env():
+    env = {}
+    try:
+        with open(ENV_FILE) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k] = v.strip().strip("'")
+    except OSError as exc:
+        die(1, f"cannot read {ENV_FILE}: {exc}")
+    for var in (URL_VAR, KEY_VAR):
+        if not env.get(var):
+            die(1, f"{var} missing or empty in {ENV_FILE}")
+    return env[URL_VAR], env[KEY_VAR]
+
+
+def full_name(batch_id):
+    if not BATCH_ID.match(batch_id):
+        die(3, f"refused: batch id {batch_id!r} must match {BATCH_ID.pattern}")
+    return f"{DATASET}@{PREFIX}{batch_id}"
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] == "list":
+        cmd, name = "list", None
+    elif len(argv) == 3 and argv[1] in ("create", "destroy"):
+        cmd, name = argv[1], full_name(argv[2])
+    else:
+        die(2, "usage: mcl-snap create <batch-id> | list | destroy <batch-id>")
+
+    url, key = read_env()
+    from truenas_api_client import Client  # noqa: E402 — after arg checks
+
+    try:
+        with Client(url, verify_ssl=False) as c:
+            if not c.call("auth.login_with_api_key", key):
+                die(1, "API key login failed")
+            ours = [
+                s["name"]
+                for s in c.call(
+                    "pool.snapshot.query",
+                    [["name", "^", f"{DATASET}@{PREFIX}"]],
+                    {"select": ["name"]},
+                )
+            ]
+            if cmd == "list":
+                for n in sorted(ours):
+                    print(n)
+                return 0
+            if cmd == "create":
+                if name in ours:
+                    die(3, f"refused: {name} already exists")
+                c.call("pool.snapshot.create", {"dataset": DATASET, "name": name.split("@", 1)[1]})
+                print(name)
+                return 0
+            # destroy: only a name this wrapper could have created, and one that exists
+            if name not in ours:
+                die(3, f"refused: {name} is not an existing {DATASET}@{PREFIX}* snapshot")
+            c.call("pool.snapshot.delete", name)
+            print(f"destroyed {name}")
+            return 0
+    except SystemExit:
+        raise
+    except Exception as exc:  # API/transport errors: loud, non-zero
+        die(1, f"API error: {exc}")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

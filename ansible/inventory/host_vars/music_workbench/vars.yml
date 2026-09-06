@@ -68,3 +68,8 @@ workbench_env_files:
     vars:
       ACOUSTID_API_KEY: "{{ vault_acoustid_api_key }}" # AcoustID application key (rate-limit identity)
       MCL_USER_AGENT: "mcl/0.1 (smoutovkin@eggsunlimited.com)" # MusicBrainz requires a contact in the UA
+      # mcl-snap (#262): TrueNAS API URL and a key scoped to SNAPSHOT_* roles,
+      # created by the operator in the TrueNAS UI (user/group/privilege
+      # `mcl-snap`, key `mcl-snap-ct202`). The API-only NAS posture: no SSH.
+      TRUENAS_API_URL: "wss://192.168.30.20/api/current"
+      TRUENAS_MCL_SNAP_API_KEY: "{{ vault_truenas_mcl_snap_api_key }}"

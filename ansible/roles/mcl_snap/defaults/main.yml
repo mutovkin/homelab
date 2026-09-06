@@ -1,0 +1,22 @@
+---
+# mcl-snap (#262): a wrapper on a workbench CT that lets the music-cleanup tool
+# create, list and destroy snapshots of ONE dataset under ONE name prefix over
+# the TrueNAS JSON-RPC API, with a key scoped to SNAPSHOT_READ/WRITE/DELETE.
+# Those roles are NAS-wide (measured 2026-09-06: the key can query any
+# snapshot, and nothing else — dataset/user/pool queries are EACCES), so the
+# dataset and prefix scoping below is CLIENT-SIDE, enforced by this wrapper,
+# not by the appliance. The key lives in /etc/mcl/env (roles/workbench_env).
+mcl_snap_dataset: vault/media/music
+mcl_snap_prefix: mcl-
+# Variable names the wrapper reads from the env file.
+mcl_snap_env_file: /etc/mcl/env
+mcl_snap_env_url_var: TRUENAS_API_URL
+mcl_snap_env_key_var: TRUENAS_MCL_SNAP_API_KEY
+
+# truenas_api_client is git-only and reports version 0.0.0, so it is pinned by
+# SHA — the SAME SHA docs/onboarding.md pins for the control node. Installed
+# into its own venv by uv (on PATH via roles/linuxbrew); the wrapper's shebang
+# points at that venv's python.
+mcl_snap_client_repo: https://github.com/truenas/api_client.git
+mcl_snap_client_sha: 8d7e37383717aea15ce46167cfcd92325acbcd8a
+mcl_snap_venv: /opt/mcl-snap

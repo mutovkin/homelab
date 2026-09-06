@@ -1,0 +1,123 @@
+---
+# LMS stop/start/status hook (#262). Host side first, then per-client.
+
+- name: Create the hook user (no password, plain sh so the forced command can exec)
+  ansible.builtin.user:
+    name: "{{ mcl_lms_hook_user }}"
+    shell: /bin/sh
+    home: "/var/lib/{{ mcl_lms_hook_user }}"
+    create_home: true
+    password_lock: true
+    system: true
+
+- name: Install the forced-command script
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.file', 'mcl-lms-hook') | replace('__CONTAINER__', mcl_lms_hook_container) }}"
+    dest: "{{ mcl_lms_hook_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+# Exact argv strings, validated by visudo before landing: sudoers `*` matches
+# across spaces, so no wildcard appears anywhere in these lines.
+- name: Grant exactly the three docker invocations
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ mcl_lms_hook_user }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+    content: |
+      # Managed by Ansible (roles/mcl_lms_hook, #262)
+      {{ mcl_lms_hook_user }} ALL=(root) NOPASSWD: /usr/bin/docker stop {{ mcl_lms_hook_container }}
+      {{ mcl_lms_hook_user }} ALL=(root) NOPASSWD: /usr/bin/docker start {{ mcl_lms_hook_container }}
+      {{ mcl_lms_hook_user }} ALL=(root) NOPASSWD: /usr/bin/docker inspect -f {{ '{{' }}.State.Status{{ '}}' }} {{ mcl_lms_hook_container }}
+
+- name: Read this host's ed25519 host key (pinned on every client)
+  ansible.builtin.slurp:
+    src: /etc/ssh/ssh_host_ed25519_key.pub
+  register: mcl_lms_hook_hostkey
+  check_mode: false
+
+# --- Per client: key on the client, pin on this host, wrapper on the client --
+- name: Generate each client's hook key on the client
+  ansible.builtin.command:
+    argv: [ssh-keygen, -q, -t, ed25519, -N, "", -C, "{{ item }}->{{ inventory_hostname }} mcl-lms-hook",
+           -f, "{{ mcl_lms_hook_client_key }}"]
+    creates: "{{ mcl_lms_hook_client_key }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ mcl_lms_hook_clients }}"
+  register: mcl_lms_hook_keygen
+
+- name: Read each client's public key
+  ansible.builtin.slurp:
+    src: "{{ mcl_lms_hook_client_key }}.pub"
+  delegate_to: "{{ item }}"
+  loop: "{{ mcl_lms_hook_clients }}"
+  register: mcl_lms_hook_pubkeys
+  # Under --check the keygen above is skipped, so a fresh client has no key
+  # yet; slurp would fail. Skip it (and the authorize below) for that client.
+  when: not (ansible_check_mode and mcl_lms_hook_keygen is changed)
+
+# `restrict` alone disables everything (pty, forwarding, agent, X11, user-rc);
+# the explicit no-* options are kept so the intent reads without knowing
+# `restrict`'s expansion, and an old sshd that lacks `restrict` still gets them.
+- name: Authorize each client key for the forced command only
+  ansible.posix.authorized_key:
+    user: "{{ mcl_lms_hook_user }}"
+    key: "{{ item.content | b64decode | trim }}"
+    key_options: 'restrict,command="{{ mcl_lms_hook_script }}",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc'
+    state: present
+  loop: "{{ mcl_lms_hook_pubkeys.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.content is defined
+
+- name: Pin this host's key in each client's known_hosts
+  ansible.builtin.known_hosts:
+    path: "{{ mcl_lms_hook_client_known_hosts }}"
+    name: "{{ ansible_host }}"
+    key: "{{ ansible_host }} {{ (mcl_lms_hook_hostkey.content | b64decode).split()[0:2] | join(' ') }}"
+    state: present
+  delegate_to: "{{ item }}"
+  loop: "{{ mcl_lms_hook_clients }}"
+
+- name: Deploy the client wrapper
+  ansible.builtin.template:
+    src: mcl-lms.j2
+    dest: "{{ mcl_lms_hook_client_wrapper }}"
+    mode: "0755"
+  vars:
+    mcl_lms_hook_host_addr: "{{ ansible_host }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ mcl_lms_hook_clients }}"
+
+# --- Verify from each client -------------------------------------------------
+# status is read-only; the refusal proves the forced command, not just the key.
+- name: Verify each client can read the container status
+  ansible.builtin.command:
+    argv: ["{{ mcl_lms_hook_client_wrapper }}", status]
+  register: mcl_lms_hook_status
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ item }}"
+  loop: "{{ mcl_lms_hook_clients }}"
+  when: not (ansible_check_mode and mcl_lms_hook_keygen is changed)
+
+- name: Verify each client is refused any other command (rc 3, no shell)
+  ansible.builtin.command:
+    argv: [ssh, -i, "{{ mcl_lms_hook_client_key }}", -o, IdentitiesOnly=yes, -o, BatchMode=yes,
+           -o, "UserKnownHostsFile={{ mcl_lms_hook_client_known_hosts }}", -o, StrictHostKeyChecking=yes,
+           "{{ mcl_lms_hook_user }}@{{ ansible_host }}", id]
+  register: mcl_lms_hook_refuse
+  changed_when: false
+  failed_when: mcl_lms_hook_refuse.rc != 3 or 'refused' not in mcl_lms_hook_refuse.stderr
+  check_mode: false
+  delegate_to: "{{ item }}"
+  loop: "{{ mcl_lms_hook_clients }}"
+  when: not (ansible_check_mode and mcl_lms_hook_keygen is changed)
+
+- name: Report container status as seen by each client
+  ansible.builtin.debug:
+    msg: "{{ mcl_lms_hook_status.results | map(attribute='stdout') | list }}"
+  when: mcl_lms_hook_status is not skipped

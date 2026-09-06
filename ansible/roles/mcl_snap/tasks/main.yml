@@ -1,0 +1,81 @@
+---
+# mcl-snap wrapper (#262). Runs after roles/workbench_env has written the env
+# file that carries the API key and URL.
+
+- name: Assert the env file declares the variables the wrapper reads
+  ansible.builtin.assert:
+    that:
+      - mcl_snap_env_url_var in mcl_snap_env_vars
+      - mcl_snap_env_key_var in mcl_snap_env_vars
+    fail_msg: >-
+      workbench_env_files has no {{ mcl_snap_env_file }} entry carrying
+      {{ mcl_snap_env_url_var }} and {{ mcl_snap_env_key_var }} — mcl-snap
+      would deploy and fail at first use.
+  vars:
+    mcl_snap_env_vars: >-
+      {{ (workbench_env_files | default([]) | selectattr('path', 'eq', mcl_snap_env_file)
+          | map(attribute='vars') | first | default({})).keys() | list }}
+
+- name: Create the client venv
+  ansible.builtin.command:
+    argv: [uv, venv, --quiet, "{{ mcl_snap_venv }}"]
+    creates: "{{ mcl_snap_venv }}/bin/python"
+
+# Pinned by SHA (the client reports 0.0.0). The marker file records which SHA
+# the venv holds, written only after the install succeeds: a bump of the pin
+# reinstalls, an unchanged pin is `ok`, an interrupted install re-runs.
+- name: Install truenas_api_client at the pinned SHA
+  ansible.builtin.shell:
+    cmd: >-
+      uv pip install --quiet --python {{ mcl_snap_venv }}/bin/python
+      "truenas-api-client @ git+{{ mcl_snap_client_repo }}@{{ mcl_snap_client_sha }}"
+      && touch {{ mcl_snap_venv }}/.installed-{{ mcl_snap_client_sha }}
+    creates: "{{ mcl_snap_venv }}/.installed-{{ mcl_snap_client_sha }}"
+
+- name: Deploy the mcl-snap wrapper
+  ansible.builtin.template:
+    src: mcl-snap.py.j2
+    dest: /usr/local/bin/mcl-snap
+    mode: "0755"
+
+# --- Verify: the wrapper reaches the appliance with the scoped key ----------
+# `list` is read-only and exercises env parsing, the venv, login and the
+# snapshot query. Skipped only when the env file is not written yet (fresh
+# host under --check); on a converged host a dry-run runs it for real.
+- name: Stat the wrapper and env file (verify gate)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ mcl_snap_env_file }}"
+    - /usr/local/bin/mcl-snap
+    - "{{ mcl_snap_venv }}/bin/python"
+  register: mcl_snap_stats
+  check_mode: false
+
+- name: Decide whether the wrapper can be exercised
+  ansible.builtin.set_fact:
+    # All three present: converged host (also under --check). Any missing:
+    # a fresh host whose dry-run cannot write them yet — skip, visibly.
+    mcl_snap_verifiable: "{{ mcl_snap_stats.results | map(attribute='stat.exists') | list is all }}"
+
+- name: Verify mcl-snap list succeeds
+  ansible.builtin.command:
+    argv: [/usr/local/bin/mcl-snap, list]
+  register: mcl_snap_list
+  changed_when: false
+  check_mode: false
+  when: mcl_snap_verifiable
+
+- name: Verify mcl-snap refuses a malformed batch id without touching the API
+  ansible.builtin.command:
+    argv: [/usr/local/bin/mcl-snap, destroy, "../other@evil"]
+  register: mcl_snap_refuse
+  changed_when: false
+  failed_when: mcl_snap_refuse.rc != 3
+  check_mode: false
+  when: mcl_snap_verifiable
+
+- name: Report existing mcl snapshots
+  ansible.builtin.debug:
+    msg: "{{ mcl_snap_list.stdout_lines | default(['(none)'], true) }}"
+  when: mcl_snap_list is not skipped
