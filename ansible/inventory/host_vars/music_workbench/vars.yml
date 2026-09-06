@@ -55,3 +55,16 @@ linuxbrew_replaces_apt_packages:
 workbench_share_dirs:
   - path: /music/originals # archival single-file rips; LMS never reads it
     mode: "0777"
+
+# Environment files for tools on the workbench (#260), written by the workbench
+# play as root:root 0600 and meant to be SOURCED (`set -a; . <path>`), so every
+# value is written single-quoted — the User-Agent below has spaces and
+# parentheses, and a quoted value also survives a `$` (CLAUDE.md dotenv trap).
+# Secrets come from vault.yml beside this file; the play asserts each value
+# non-empty BY NAME and never diffs the content. Nothing reads these yet: the
+# music-cleanup tool's identification phase will.
+workbench_env_files:
+  - path: /etc/mcl/env
+    vars:
+      ACOUSTID_API_KEY: "{{ vault_acoustid_api_key }}" # AcoustID application key (rate-limit identity)
+      MCL_USER_AGENT: "mcl/0.1 (smoutovkin@eggsunlimited.com)" # MusicBrainz requires a contact in the UA
