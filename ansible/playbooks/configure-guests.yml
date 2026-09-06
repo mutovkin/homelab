@@ -53,6 +53,8 @@
   roles:
     - common
     - linuxbrew
+    - workbench_env # /etc/mcl/env — before the tool roles that read it
+    - mcl_snap      # TrueNAS snapshot wrapper (#262)
   post_tasks:
     # Directories on the bound NAS share (`workbench_share_dirs`, host_vars).
     # Gated on the parent being a LIVE NFS mount: the hookscript refuses to
@@ -111,95 +113,15 @@
       loop_control:
         label: "{{ item.path }}"
 
-    # Sourced env files (`workbench_env_files`, host_vars, #260). NO loop item
-    # may carry a value: `loop_control.label` only rewrites the `(item=…)`
-    # prefix, while Ansible still dumps the full `item` on any failure and for
-    # every ok/changed result at -v (measured: a value-bearing item printed the
-    # secret four times on a happy-path `-v` run). So the loops here carry
-    # indices and key NAMES, and each task reaches its value through task
-    # `vars:`, which are not part of the result. An undefined vault key fails
-    # while the loop list is templated — by name, value-free.
-    - name: Assert every env value is non-empty and free of single quotes, and keys are sh identifiers
-      ansible.builtin.assert:
-        that:
-          - item.key is match('^[A-Za-z_][A-Za-z0-9_]*$')
-          # `is string` first: a YAML null renders as the 4-char string "None"
-          # and `true` as "True", so a length check alone passes both
-          # (measured in review) and the file would carry KEY='' or 'True'.
-          - workbench_env_value is string
-          - workbench_env_value | trim | length > 0
-          - "\"'\" not in workbench_env_value"
-        fail_msg: >-
-          {{ item.path }}: {{ item.key }} is not a sh identifier, is not a
-          quoted string (null/true/123 are rejected), is empty, or contains a
-          single quote (the file is sourced with values single-quoted) — fix
-          it in host_vars (vault key for secrets).
-        quiet: true
-      vars:
-        workbench_env_value: "{{ workbench_env_files[item.i].vars[item.key] }}"
-        workbench_env_keys: >-
-          {%- set out = [] -%}
-          {%- for f in workbench_env_files | default([]) -%}
-          {%- set fi = loop.index0 -%}
-          {%- for k in f.vars.keys() -%}
-          {%- set _ = out.append({'i': fi, 'path': f.path, 'key': k}) -%}
-          {%- endfor -%}
-          {%- endfor -%}
-          {{- out | to_json -}}
-      loop: "{{ workbench_env_keys | from_json }}"
-      loop_control:
-        label: "{{ item.path }}:{{ item.key }}"
-
-    - name: Create env file directories
-      ansible.builtin.file:
-        path: "{{ item | dirname }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      loop: "{{ workbench_env_files | default([]) | map(attribute='path') | list }}"
-
-    # diff:false, not no_log: the content (a vault secret) never renders, but a
-    # failure stays readable (#88).
-    - name: Write env files
-      ansible.builtin.copy:
-        dest: "{{ workbench_env_file.path }}"
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          # Managed by Ansible (workbench_env_files, #260). Source with: set -a; . {{ workbench_env_file.path }}
-          {% for k, v in workbench_env_file.vars.items() %}
-          {{ k }}='{{ v }}'
-          {% endfor %}
-      vars:
-        workbench_env_file: "{{ workbench_env_files[item] }}"
-      loop: "{{ range(workbench_env_files | default([]) | length) | list }}"
-      loop_control:
-        label: "{{ workbench_env_file.path }}"
-      register: workbench_env_write
-      diff: false
-
-    # Prove the file SOURCES the way its consumer will and every key round-trips
-    # non-empty — rc only, so the secret never reaches the log. Runs under
-    # --check on a converged host (drift must go red in a dry-run); skipped,
-    # visibly, only for a file the dry-run could not write yet.
-    - name: Verify each env file sources cleanly with every key non-empty
-      ansible.builtin.shell:
-        cmd: |
-          set -eu
-          set -a; . '{{ workbench_env_file.path }}'; set +a
-          {% for k in workbench_env_file.vars.keys() %}
-          [ -n "${{ k }}" ] || { echo '{{ k }} empty after sourcing'; exit 3; }
-          {% endfor %}
-          echo ok
-        executable: /bin/sh
-      vars:
-        workbench_env_file: "{{ workbench_env_files[item] }}"
-      loop: "{{ range(workbench_env_files | default([]) | length) | list }}"
-      loop_control:
-        label: "{{ workbench_env_file.path }}"
-      register: workbench_env_verify
-      changed_when: false
-      check_mode: false
-      when: not (ansible_check_mode and workbench_env_write.results[item].changed)
+# LMS stop/start hook for workbench CTs (#262): a forced-command user on the
+# docker host that runs the container, keys generated on each client workbench.
+# Runs on the docker host so the authorized_keys and sudoers land where the
+# container is; client-side pieces (keypair, known_hosts pin, wrapper) are
+# delegated to each client listed in `mcl_lms_hook_clients`.
+- name: Configure LMS hook on docker hosts
+  hosts: docker_hosts
+  become: true
+  gather_facts: false
+  roles:
+    - role: mcl_lms_hook
+      when: mcl_lms_hook_clients | default([]) | length > 0
