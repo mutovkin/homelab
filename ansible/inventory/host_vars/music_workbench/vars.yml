@@ -84,3 +84,10 @@ workbench_env_files:
       MCL_LMS_STATUS_CMD: "mcl-lms status"
       MCL_LMS_CLI: "192.168.30.15:9090" # LMS CLI, network_mode: host on CT 201; rescan goes here directly
       MCL_ORIGINALS_ROOT: "/music/originals" # archival rips (workbench_share_dirs below); same dataset as lossless/compressed
+      # Identification / LLM adjudication (#269). All four from vault.yml (the
+      # operator provisioned URL and model there as well). The tool POSTs
+      # {MCL_LLM_BASE_URL}/chat/completions, so any trailing slash is stripped.
+      DISCOGS_TOKEN: "{{ vault_discogs_token }}"
+      MCL_LLM_BASE_URL: "{{ vault_mcl_llm_openapi_url | regex_replace('/+$', '') }}"
+      MCL_LLM_API_KEY: "{{ vault_mcl_llm_api_key }}"
+      MCL_LLM_MODEL: "{{ vault_mcl_llm_model }}"
