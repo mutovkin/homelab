@@ -12,6 +12,7 @@ common_extra_packages:
   - python3-mutagen  # mid3v2 / mutagen-inspect
   - rsync
   - tmux
+  - mp3guessenc # MPEG encoder identification from the bitstream (#273); archive 0.27.6~beta = current upstream, no brew formula
 
 # roles/linuxbrew (#258). Formula names, not apt names: mediainfo is
 # `media-info`, fpcalc ships in `chromaprint`.
