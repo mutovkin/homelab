@@ -87,6 +87,9 @@ workbench_env_files:
       # Identification / LLM adjudication (#269). All four from vault.yml (the
       # operator provisioned URL and model there as well). The tool POSTs
       # {MCL_LLM_BASE_URL}/chat/completions, so any trailing slash is stripped.
+      # The URL is z.ai's CODING PLAN root (api/coding/paas/v4): the general
+      # api/paas/v4 root bills pay-as-you-go balance and answers 429 code 1113
+      # for a Coding Plan key (measured 2026-09-07, #271).
       DISCOGS_TOKEN: "{{ vault_discogs_token }}"
       MCL_LLM_BASE_URL: "{{ vault_mcl_llm_openapi_url | regex_replace('/+$', '') }}"
       MCL_LLM_API_KEY: "{{ vault_mcl_llm_api_key }}"
