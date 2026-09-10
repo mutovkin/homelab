@@ -1,0 +1,91 @@
+---
+# Managed by Ansible (roles/services/musicbrainz). Layered over upstream's
+# docker-compose.yml through COMPOSE_FILE in .env, so every `docker compose`
+# invocation in the deploy dir — including upstream's own admin/ scripts —
+# picks it up without being taught about it.
+#
+# Two jobs, both of which upstream cannot do for us:
+#
+# 1. Move the four named volumes onto /data. Docker's data-root here is
+#    /var/lib/docker on CT 201's 64 GB ROOTFS, which had 58 GB free — the Solr
+#    load alone extracts ~75 GB, so left as plain named volumes this fills the
+#    container's root filesystem and takes Lyrion down with it. /data is the
+#    200 GB (now 600 GB) mp0 subvol.
+#
+# 2. AppArmor + privilege posture, which every compose service on this fleet
+#    carries (CLAUDE.md): Docker inside this privileged LXC cannot load its
+#    docker-default profile, and no-new-privileges is the in-container
+#    escalation defence that matters more precisely because AppArmor is off.
+#    None of these five containers depends on a setuid binary, so the
+#    no_new_privs carve-out that telegraf needed does not apply here.
+services:
+  db:
+    security_opt: &homelab_secopt
+      - apparmor:unconfined
+      - no-new-privileges:true
+  musicbrainz:
+    security_opt: *homelab_secopt
+  # Excluded from the stack by an inactive profile. Two independent reasons,
+  # either of which would be sufficient:
+  #
+  # 1. It has no job here. sir/indexer exists to push LIVE database changes into
+  #    Solr. This mirror takes a static dump with no replication, so the database
+  #    never changes and there is nothing to propagate — the prebuilt Solr
+  #    archives ARE the index. Upstream's compose/live-indexing-search.yml is the
+  #    override that gives it a real command; we are not using it.
+  #
+  # 2. It cannot be built on this host. build/sir is the ONLY one of the four
+  #    build contexts with RUN steps (the other three are thin `FROM
+  #    metabrainz/...` prebuilt wrappers), and RUN steps fail inside this
+  #    privileged LXC with:
+  #      unable to apply apparmor profile: ... no such file or directory
+  #    Measured 2026-09-09. This is the familiar Docker-in-LXC AppArmor trap
+  #    wearing an unfamiliar hat: masking the apparmor SERVICE does not stop the
+  #    daemon detecting AppArmor in the host kernel — `docker info` still reports
+  #    `name=apparmor` because a privileged CT sees the host's securityfs — and
+  #    the per-container `security_opt: apparmor:unconfined` that rescues every
+  #    RUNTIME container on this fleet has no build-time equivalent. buildkit
+  #    offers no escape hatch for RUN steps. So on this host, images with RUN
+  #    steps cannot be built at all; only prebuilt bases work.
+  #
+  # If replication is ever enabled here, reason 1 stops applying and reason 2
+  # becomes a blocker that must be solved (build the sir image elsewhere and
+  # push it, or run the mirror on a host that is not Docker-in-LXC).
+  indexer:
+    profiles:
+      - live-indexing
+    security_opt: *homelab_secopt
+  search:
+    security_opt: *homelab_secopt
+  valkey:
+    security_opt: *homelab_secopt
+
+# `type: none` + `o: bind` is a bind mount wearing a named volume's name: it
+# keeps upstream's volume references untouched while putting the bytes where we
+# choose. The directories are created by the role before this is ever used —
+# Docker would otherwise create them root-owned at first mount.
+volumes:
+  pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: {{ musicbrainz_data_dir }}/pgdata
+  solrdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: {{ musicbrainz_data_dir }}/solrdata
+  dbdump:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: {{ musicbrainz_data_dir }}/dbdump
+  solrdump:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: {{ musicbrainz_data_dir }}/solrdump

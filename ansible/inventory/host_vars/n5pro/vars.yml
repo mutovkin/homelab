@@ -236,7 +236,13 @@ proxmox_lxcs:
       # LONGER pending: as of 2026-08-19 `pct config 201`, `pct config 201
       # --current` and `pct pending 201` all read `mount=nfs,nesting=1` (pending
       # prints a `cur` line only), so that feature set is in force, not queued.
-      mp0: "local-zfs:200,mp=/data"
+      # Bumped 200 -> 600 on 2026-09-09 for the MusicBrainz mirror: upstream
+      # asks 350 GB for the indexed-search profile and the live refquota had
+      # 199 GB free. The LIVE change is `pct resize 201 mp0 600G`, which the
+      # musicbrainz role performs (delegated to this node) — this line is only
+      # the rebuild declaration, since `mounts` is create-time-only (#86).
+      # rpool has 3.39 TiB available, so this is quota, not capacity.
+      mp0: "local-zfs:600,mp=/data"
     netif:
       net0: "name=eth0,bridge=vmbr1,gw=192.168.23.1,hwaddr=BC:24:11:FC:95:51,ip=192.168.30.15/18,type=veth"
       net1: "name=eth1,bridge=vmbr2,hwaddr=BC:24:11:FC:95:52,ip=10.99.99.3/24,type=veth"
