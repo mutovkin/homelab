@@ -4,9 +4,11 @@
 # on-disk file, skips on match, re-downloads on mismatch; NO stat-exists gate
 # (CLAUDE.md). sha256 verified against the checksum table in the v1.40.0 GitHub
 # release notes AND the downloaded artefact, 2026-09-16 (#275). 1.40.0 is also what
-# the eq12_docker telegraf CONTAINER runs as of that same bump — deliberate this
-# time rather than the coincidence the 1.39.3 pin recorded, but still not a
-# mechanism: the container floats on :latest and drifts away again at the next push.
+# the eq12_docker telegraf CONTAINER runs as of that same bump — the INTENT to align
+# was deliberate, the match was not: the container landed wherever :latest pointed at
+# deploy time, which in the same pass moved VictoriaMetrics and Grafana a release
+# further than watchtower had reported. So this is the same non-mechanism the 1.39.3
+# pin recorded. The container floats and drifts away again at the next upstream push.
 #
 # What 1.40.0 changes that this role could have cared about, and why it does not:
 #   - Removed: inputs.aerospike, inputs.sflow, outputs.amon, and deprecated options
