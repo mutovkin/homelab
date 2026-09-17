@@ -581,12 +581,15 @@
       FIRST INSTALL"
       if telegraf_agent_installed_version | length == 0
       else "dpkg reports telegraf " ~ telegraf_agent_installed_version ~ " installed
-      and the pin is " ~ telegraf_agent_version ~ " — this is a VERSION BUMP, and the
-      .deb fetch, `apt`, `telegraf --test` and every VictoriaMetrics arrival assert
-      below are SKIPPED because the pinned .deb is not cached yet. changed=0 in the
-      recap below means 'check mode could not look', NOT 'no drift'. The apply is
-      this bump's first real test. (The config, env-file and drop-in templates DO
-      still render their diff — only the package chain is blind.)" }}
+      and the pin is " ~ telegraf_agent_version ~
+      (" — this is a VERSION BUMP and the pinned .deb is not cached yet"
+      if not telegraf_agent_deb_stat.stat.exists
+      else " — the .deb IS cached, so what blocked the preview is the missing
+      /etc/telegraf") ~ ". The .deb fetch, `apt`, `telegraf --test` and every
+      VictoriaMetrics arrival assert below are SKIPPED. changed=0 in the recap below
+      means 'check mode could not look', NOT 'no drift'. The apply is this run's
+      first real test. (The config, env-file and drop-in templates DO still render
+      their diff — only the package chain is blind.)" }}
       (/etc/telegraf present: {{ telegraf_agent_etc_stat.stat.isdir | default(false) }},
       {{ telegraf_agent_deb_filename }} cached:
       {{ telegraf_agent_deb_stat.stat.exists }}). A real run WILL: download and
