@@ -346,3 +346,24 @@ Before starting the service:
 4. The service will be available on port 22300
 
 The server integrates with PostgreSQL for metadata storage while using the filesystem for efficient file storage.
+
+## Bump log
+
+`joplin/server` floats on `:latest` with the `enable` + `monitor-only` posture: watchtower
+reports a new digest, and only a deliberate
+`task deploy:service -- --limit eq12_docker --tags joplin` adopts it (the shared `_deploy`
+role runs `pull: always`). Nothing else records the running version — this table is that
+record. Same convention as `roles/services/watchtower/README.md`.
+
+Joplin Server runs **one-way schema migrations on start**, so the pre-deploy
+`joplin-pgdump-<ts>.sql.gz` is the only way back. Verify a restore with `gzip -t &&` first
+and `psql -v ON_ERROR_STOP=1` plus an object count on both sides — "the database is there"
+is not a verified restore.
+
+**Caveat that cost time in #275:** watchtower's notification names the digest it staged at
+its last scan, not what a deploy will adopt — `pull: always` re-consults the registry, and
+`:latest` may have moved on. Read the landed version out of the running container.
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-09-17 | 3.7.1 → **3.7.2** (#275) | Landed version matched what watchtower reported (unlike the observability images in the same pass). Release is OrphanTrace logging to investigate the orphaned-items bug, plus dependency bumps — including the `pg` driver, which is the one worth watching against our PostgreSQL 18. Pre-deploy dump taken automatically by the role: `joplin-pgdump-20260916T232135.sql.gz`, 315 MB, and the retention prune dropped the oldest (`20260818T234825.sql`). **Verified 2026-09-17 06:22Z from the container's own log, not the recap:** `autoMigration: true`, `latestMigration: { name: '20260821120000_token_purpose.js', done: true }`, `error: null`, and Joplin's own storage self-test — `Item was written, read back and deleted without any error` — passed after the migration. Container `healthy` past its 240 s `start_period`. Rollback tag, digest-verified against the running image before the apply: `joplin/server:3.7.1`. |

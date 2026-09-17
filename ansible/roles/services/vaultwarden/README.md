@@ -92,3 +92,21 @@ These are the controls the role actually enforces, not aspirations:
   suspicious access attempts.
 
 The service runs on port 8086 and provides the web vault interface for user access and administration.
+
+## Bump log
+
+`vaultwarden/server` floats on `:latest` with the `enable` + `monitor-only` posture:
+watchtower reports a new digest, and only a deliberate
+`task deploy:service -- --limit eq12_docker --tags vaultwarden` adopts it. The role's own
+gate pulls the image, compares its id against the running container, and takes the
+`vaultwarden-<ts>.tgz` archive **only when they differ** — so a routine no-op deploy stops
+nothing. Nothing else records the running version; this table is that record. Same
+convention as `roles/services/watchtower/README.md`.
+
+**Caveat that cost time in #275:** watchtower's notification names the digest it staged at
+its last scan, not what a deploy will adopt — `pull: always` re-consults the registry, and
+`:latest` may have moved on. Read the landed version out of the running container.
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-09-17 | 1.37.2 → **1.37.3** (#275) | Landed version matched what watchtower reported. Security-weighted release: 2FA remember-tokens are now revoked when credentials or 2FA change, prelogin and auth-request endpoints are rate limited, 2FA failures log IP and username, and admins can reset a user's 2FA. Also fixes password change against newer web-vault clients and a MariaDB 12.2.2 migration (not our backend — we are SQLite on `/data/vaultwarden`). Adds `SSO_SIGNUPS_ALLOWED`; we set neither it nor any new variable, so `templates/env.j2` is unchanged. **No breaking changes, and existing `$argon2id$` `ADMIN_TOKEN` hashes stay valid** — the role's PHC-shape assert (`tasks/main.yml:25-38`) passed unchanged. **Verified 2026-09-17 06:21–06:30Z:** pre-upgrade archive `vaultwarden-20260916T232106.tgz` (6.8 MB) written and the retention prune dropped the oldest; `Version 1.37.3` in the startup banner; `/alive` returns a live timestamp; container `healthy`. Rollback tag, digest-verified against the running image before the apply: `vaultwarden/server:1.37.2`. |

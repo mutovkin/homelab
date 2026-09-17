@@ -528,10 +528,30 @@
     label: "{{ item.path | basename }}"
   when: not telegraf_agent_preview_only
 
-- name: Report what a real run would do here (check mode, telegraf not installed yet)
+# Two DIFFERENT conditions arm telegraf_agent_preview_only, and conflating them
+# misreports the common one. A fresh host has neither /etc/telegraf nor the .deb. A
+# VERSION BUMP on a converged host has /etc/telegraf and a running telegraf, and is
+# missing only the newly-pinned .deb — telegraf_agent_deb_path carries the version in
+# its filename, so the moment the pin moves, the cached file the gate stats is the OLD
+# one and stat.exists goes false. Measured on eq12 during #275 (1.39.3 -> 1.40.0):
+# `telegraf --version` reported 1.39.3 and `systemctl is-active` reported active while
+# this task announced telegraf "not installed yet". The gate itself is right either way
+# — `apt: deb=<path>` cannot preview installing a file that is not there, the same
+# shape as "--check cannot install from a repo it did not write" — so the fix is to
+# say which case it is, and to say plainly that a bump's dry-run previews NOTHING
+# below this point. Otherwise the operator reads changed=0 on a bump as "no drift".
+- name: Report what a real run would do here (check mode, install cannot be previewed)
   ansible.builtin.debug:
     msg: >-
-      CHECK MODE, and telegraf is not installed on {{ inventory_hostname }} yet
+      CHECK MODE on {{ inventory_hostname }}:
+      {{ "telegraf is not installed here yet"
+      if not (telegraf_agent_etc_stat.stat.isdir | default(false))
+      else "telegraf is ALREADY INSTALLED here, but the pinned .deb for version "
+      ~ telegraf_agent_version ~ " is not cached yet — this is a VERSION BUMP, and
+      every task below (install, config, restart, telegraf --test and the
+      VictoriaMetrics arrival asserts) is SKIPPED. changed=0 in the recap below means
+      'check mode could not look', NOT 'no drift'. The apply is this bump's first
+      real test" }}
       (/etc/telegraf present: {{ telegraf_agent_etc_stat.stat.isdir | default(false) }},
       {{ telegraf_agent_deb_filename }} cached:
       {{ telegraf_agent_deb_stat.stat.exists }}). A real run WILL: download and

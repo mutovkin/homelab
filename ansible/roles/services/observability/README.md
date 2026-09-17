@@ -1276,3 +1276,24 @@ ssh root@192.168.25.15 'docker exec telegraf ping -c1 victoriametrics'
   [LogsQL](https://docs.victoriametrics.com/VictoriaLogs/LogsQL.html)
 - [Vector](https://vector.dev/docs/) · [Telegraf](https://docs.influxdata.com/telegraf/v1/) ·
   [Grafana](https://grafana.com/docs/grafana/latest/)
+
+## Bump log
+
+`victoriametrics`, `telegraf` and `grafana` all float on `:latest` with the
+`enable` + `monitor-only` posture, so a new digest is reported by watchtower and adopted
+only by a deliberate `task deploy:service -- --limit eq12_docker --tags observability`
+(the shared `_deploy` role runs `pull: always`). Nothing else records what these
+containers are actually running — this table is that record. Same convention as
+`roles/services/watchtower/README.md`; see it for the pinned-tag variant.
+
+**Read this before the next bump:** watchtower's notification names the digest **it**
+staged at scan time, and the local `:latest` tag points at that staged image — so
+`docker image inspect <repo>:latest` shows what watchtower saw, NOT what a deploy will
+adopt. Only `pull: always` consults the registry. On 2026-09-16 that gap was two releases
+wide for two of three images. Review the release notes for the version you actually
+**land**, read out of the running container afterwards, and do not treat the notification
+as a manifest.
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-09-17 | victoria-metrics v1.150.0 → **v1.152.0**; grafana 13.2.0 → **13.2.2**; telegraf 1.39.3 → **1.40.0** (#275) | Watchtower reported v1.151.0 / 13.2.1 / telegraf 1.40.0; the apply landed **v1.152.0** and **13.2.2** because `:latest` had moved again upstream (registry `tag_last_pushed`: VM v1.152.0 on 09-14, grafana 13.2.2 on 09-15) — see the warning above. Both extra deltas were reviewed after the fact and carry no removals: **VM 1.151+1.152** add flags and fix vmauth JWT / vmselect delete-auth (neither deployed here — we run vmsingle), with **no `vm_*` removals or renames and no MetricsQL changes**, which matters because 22 `lag()` and 27 `last_over_time()` uses back every absence rule. **Grafana 13.2.1+13.2.2** are pure security/bugfix (CVE-2026-12704, -14199, -15815, -76154, -79656) with no provisioning or alerting changes. **Telegraf 1.40.0** removes `inputs.aerospike`, `inputs.sflow`, `outputs.amon` and deprecated options on kafka_consumer/openstack/procstat/tail — none used in `telegraf.conf`; its `inputs.smart` `power_on_hours` seconds→hours fix applies only to the SATA/SCSI duration-string form and this container's `inputs.smart` is commented out. `inputs.exec`'s value-form deprecation is still un-actioned (removal targeted 1.45.0). **victorialogs and vector did NOT move** — same image id and `.Created` before and after, confirming `pull: always` over the whole stack adopted nothing unreviewed. **Verified 2026-09-17 06:22–06:35Z:** the #95 ping trap did not fire — `getcap /usr/bin/ping` still reports `cap_net_raw=ep` in the new image and the pinger's own OUTPUT is healthy (`ping_result_code`=0 for both targets, 0% loss, 17.3/18.7 ms, 39 unbroken samples across the recreate), not merely "container started". The #94 uid/gid trap did not fire (`uid=999(telegraf) gid=996`), and `docker_*` still carries `host=eq12_docker` across 12 series. Grafana's delivery sentinel `grafana_alerting_alertmanager_receivers` survived the bump — its loss would have fired `obs-alert-delivery-telemetry-absent` on `noDataState: Alerting`. Served surface read from Grafana's own API: **36/36 provisioned rules served, 36/36 evaluating, health `ok` for all 36, both datasources `OK`**. All three telegraf producers (eq12, n5pro, eq12_docker) fresh within 3 min. Rollback path, digest-verified against the running images before the apply: `victoria-metrics:v1.150.0`, `grafana:13.2.0`, `telegraf:1.39.3`. |
