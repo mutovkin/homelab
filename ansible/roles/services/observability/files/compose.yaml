@@ -233,6 +233,12 @@ services:
       #     unprivileged option on the plugin), so it fails with "enable CAP_NET_RAW
       #     capabilities" no matter what the ping group range is. The unprivileged
       #     ICMP-datagram path the sysctl unlocks is never taken.
+      #     MEASURED ON 1.39 AND NOT RE-TESTED SINCE: the container floats on
+      #     :latest and is on 1.40.0 as of #275, where the EXEC path was re-verified
+      #     (getcap cap_net_raw=ep, ping_result_code=0 across the recreate) but this
+      #     rejected alternative was not. Treat it as a standing reason not to try
+      #     native casually, not as a fresh measurement — if you do re-test it,
+      #     re-date this line with the version you tested.
       # A non-root telegraf therefore cannot ping without the setuid/fscaps binary,
       # and keeping the ping input is worth more than no_new_privs on this one
       # container: internet-reachability data is the whole point of the input, and

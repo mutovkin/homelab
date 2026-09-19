@@ -346,3 +346,24 @@ Before starting the service:
 4. The service will be available on port 22300
 
 The server integrates with PostgreSQL for metadata storage while using the filesystem for efficient file storage.
+
+## Bump log
+
+`joplin/server` floats on `:latest` with the `enable` + `monitor-only` posture: watchtower
+reports a new digest, and only a deliberate
+`task deploy:service -- --limit eq12_docker --tags joplin` adopts it (the shared `_deploy`
+role runs `pull: always`). Nothing else records the running version — this table is that
+record. Same convention as `roles/services/watchtower/README.md`.
+
+Joplin Server runs **one-way schema migrations on start**, so the pre-deploy
+`joplin-pgdump-<ts>.sql.gz` is the only way back. Verify a restore with `gzip -t &&` first
+and `psql -v ON_ERROR_STOP=1` plus an object count on both sides — "the database is there"
+is not a verified restore.
+
+**Caveat that cost time in #275:** watchtower's notification names the digest it staged at
+its last scan, not what a deploy will adopt — `pull: always` re-consults the registry, and
+`:latest` may have moved on. Read the landed version out of the running container.
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-09-17 | 3.7.1 → **3.7.2** (#275) | Landed version matched what watchtower reported (unlike the observability images in the same pass). **Not a patch: 33 changelog entries spanning 2026-05-18 → 2026-09-07**, because server releases lag the app's. A first pass called this "OrphanTrace logging plus dependency bumps" from a search snippet; reading `readme/about/changelog/server.md` for `server-v3.7.2` corrected it, and the correction is the reason this cell is long. It is mostly **security hardening**: session and CSRF checks enforced on the application-authorisation POST (#16270), user-content responses hardened against XSS via uploaded resources (#15787), password-reset tokens scoped to their purpose (#16274), items with a null byte in any field rejected (#15489), `items/` route validation improved (#15657), `__proto__` disabled (#15765), transcribe job IDs validated against path traversal, LDAP login made safer plus an LDAP connection-leak fix, and SAML prevented from reaching local password accounts (#15647). Behaviour worth knowing: SVG resources are served inline again (#15814) and pending share recipients can no longer write into a shared folder before accepting. The SQLite permanent-lock fix (#16244) is not our backend — we are `DB_CLIENT: pg` against PostgreSQL 18. **The CSRF/session change is the one client-facing item**, so a client that re-authorises against this server is the thing to exercise after this bump. Pre-deploy dump taken automatically by the role: `joplin-pgdump-20260916T232135.sql.gz`, 315 MB, and the retention prune dropped the oldest (`20260818T234825.sql`). **Verified 2026-09-17 06:22Z from the container's own log, not the recap:** `autoMigration: true`, `latestMigration: { name: '20260821120000_token_purpose.js', done: true }`, `error: null`, and Joplin's own storage self-test — `Item was written, read back and deleted without any error` — passed after the migration. Container `healthy` past its 240 s `start_period`. **NOT verified by the deploy:** an end-to-end client sync round-trip. The container's self-test exercises server-side item storage, not the authorisation flow #16270 touched — if a client reports an auth failure after this bump, start there. Rollback tag, digest-verified against the running image before the apply: `joplin/server:3.7.1`. |

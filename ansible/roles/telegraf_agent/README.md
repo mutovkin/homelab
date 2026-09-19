@@ -37,10 +37,12 @@ which belong on a hypervisor.
 
 ## The shipped unit's traps
 
-The unit inside the 1.39.3 .deb (`usr/lib/telegraf/scripts/telegraf.service`,
-read out of the package rather than assumed) is `Type=notify`,
-`User=telegraf`, `EnvironmentFile=-/etc/default/telegraf`, `Restart=on-failure`,
-with no StartLimit overrides.
+The unit inside the .deb (`usr/lib/telegraf/scripts/telegraf.service`, read out of
+the package rather than assumed) is `Type=notify`, `User=telegraf`,
+`EnvironmentFile=-/etc/default/telegraf`, `Restart=on-failure`, with no StartLimit
+overrides. First read on 1.39.3; **re-checked on 1.40.0 at the #275 bump, where the
+unit file and `postinst` are byte-identical to 1.39.3's**, so everything below still
+holds. Re-read them on the next bump rather than assuming that stays true.
 
 `StartLimitIntervalSec=0` removes systemd's default five-starts-in-ten-seconds
 rate limit. A collector that retries forever is strictly better than one that
@@ -181,10 +183,13 @@ the update path has to be named or there is not one.** It is:
    and the role's arrival asserts then prove the bumped agent still delivers.
 
 No mutable tag exists anywhere in this path. That is a real difference from the
-eq12_docker container telegraf, which floats on `telegraf:latest` and moved to
-1.39.3 under #187's apply on 2026-08-25. The two WILL drift, and the same
-follow-up that owns vector's identical container-vs-native drift note owns this
-one.
+eq12_docker container telegraf, which floats on `telegraf:latest`; it moved to
+1.39.3 under #187's apply on 2026-08-25 and to 1.40.0 at #275, where this pin was
+bumped to match. **The alignment is not a mechanism** — the container lands on
+whatever `:latest` resolves to at deploy time, which in that same pass put
+VictoriaMetrics and Grafana a release ahead of what watchtower had reported. The two
+WILL drift again, and the same follow-up that owns vector's identical
+container-vs-native drift note owns this one.
 
 ## RAPL package power (#194)
 
