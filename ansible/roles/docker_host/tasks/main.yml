@@ -721,3 +721,100 @@
     name: nfs-common
     state: present
   when: nfs_enabled | default(false)
+
+# --- Image retention (#276) ---------------------------------------------------
+# Superseded images are never reaped on this fleet, and the gap is structural
+# rather than an oversight. WATCHTOWER_CLEANUP=true only reaps images from updates
+# WATCHTOWER ITSELF performed; every stateful service here is `monitor-only`, so
+# its images are adopted by a deliberate `task deploy:service` run — a path
+# watchtower never cleans. Watchtower also PULLS a candidate image on every scan to
+# compare digests, so it manufactures superseded images for services it will never
+# update.
+#
+# Measured on eq12_docker 2026-09-17, after the #275 bumps: 44 images, 28 of them
+# dangling, with the root subvol at 95% (1.5 GB free). The real consumer was
+# /var/lib/containerd at 20 GB — 15 GB of it the overlayfs SNAPSHOTTER, only 6.2 GB
+# the content blob store — against /var/lib/docker at 2.5 GB. This daemon uses the
+# containerd image store (`docker info` -> driver=overlayfs), so anything reasoning
+# about /var/lib/docker sizes on this fleet is reading the wrong directory.
+#
+# DANGLING ONLY, and deliberately not `prune -a`. `-a` removes every image no
+# container currently uses, which here would take deliberately-retained references
+# (a pinned watchtower rollback tag, the newest :latest a deploy has not adopted
+# yet) for no gain — the space is in the untagged ones.
+#
+# WHAT THIS DELETES, stated plainly because it is the rollback: the immediately
+# previous image of each service. That is acceptable ONLY because every service's
+# rollback path is an immutable upstream tag whose digest was verified against the
+# running image before the bump, recorded in the role's bump log (see
+# roles/services/{observability,joplin,vaultwarden}/README.md). A `docker image
+# prune --filter until=<age>` does NOT protect that image: the filter reads image
+# CREATION time, not when it became superseded, and a just-replaced image is
+# usually weeks old. Do not add one believing it buys a grace period.
+#
+# Volumes are never pruned. Named volumes are where data lives, and a prune that
+# can delete data is not hygiene.
+- name: Read docker disk usage before pruning
+  ansible.builtin.command: docker system df --format '{{ "{{" }}.Type{{ "}}" }}={{ "{{" }}.Reclaimable{{ "}}" }}'
+  register: docker_df_before
+  changed_when: false
+  check_mode: false
+  tags: [docker_prune]
+
+# `docker_prune` is necessarily skipped in check mode, which would otherwise leave
+# a dry-run reporting changed=0 for a task that is about to delete gigabytes. Count
+# the candidates with a read-only query instead, so --check says what an apply would
+# take. (The lesson from #275: a dry-run that structurally cannot preview its change
+# must SAY so rather than report a clean recap.)
+- name: Count the dangling images an apply would remove (check mode)
+  ansible.builtin.command: docker images -f dangling=true --format '{{ "{{" }}.ID{{ "}}" }}'
+  register: docker_dangling_preview
+  changed_when: false
+  check_mode: false
+  when: ansible_check_mode
+  tags: [docker_prune]
+
+- name: Report what an apply would prune (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      CHECK MODE: an apply WOULD remove
+      {{ docker_dangling_preview.stdout_lines | default([]) | length }} dangling
+      image(s) on {{ inventory_hostname }}. Reclaimable now:
+      {{ docker_df_before.stdout | default('n/a') }}. changed=0 below means the
+      prune was skipped, NOT that there is nothing to reclaim. Images a container
+      references are never removed, so this count is an upper bound.
+  when: ansible_check_mode
+  tags: [docker_prune]
+
+- name: Prune dangling (untagged, superseded) docker images
+  community.docker.docker_prune:
+    images: true
+    images_filters:
+      dangling: true
+    # Everything else off by name rather than by omission, so a future reader can
+    # see the scope was chosen and not inherited from the module's defaults.
+    containers: false
+    networks: false
+    volumes: false
+    builder_cache: false
+  register: docker_prune_result
+  # An image an existing container references is never removed by prune — docker
+  # refuses — so this cannot pull an image out from under a running service. That
+  # matters more than it looks: a floating tag can move while a container keeps
+  # running the old image, which leaves the RUNNING container's image dangling
+  # (measured: eq12_docker's telegraf ran c25bff1bb4bf while telegraf:latest had
+  # already moved to 777cdbf33325).
+  when: not ansible_check_mode
+  tags: [docker_prune]
+
+- name: Report the space image pruning reclaimed
+  ansible.builtin.debug:
+    msg: >-
+      Pruned {{ docker_prune_result.images | default([]) | length }} dangling
+      image(s), reclaiming
+      {{ ((docker_prune_result.images_space_reclaimed | default(0)) / 1024 / 1024)
+         | round(1) }} MB on {{ inventory_hostname }}.
+      Reclaimable before this run: {{ docker_df_before.stdout | default('n/a') }}
+    verbosity: 0
+  when: not ansible_check_mode
+  tags: [docker_prune]
