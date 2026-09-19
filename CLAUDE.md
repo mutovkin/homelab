@@ -149,7 +149,18 @@ Hard-won lessons — check here before debugging from scratch.
   — watchtower itself is pinned this way, so its bumps are a manual check of
   <https://github.com/nicholas-fedor/watchtower/releases> (GitHub org ≠ Docker Hub namespace
   `nickfedor`; the lookalike GitHub URL 404s — don't "fix" it).
-  See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md).
+  **A notification is a trigger, not a manifest:** it names the digest watchtower resolved
+  at ITS scan time, and watchtower's own pull moves the local `:latest` tag onto that image —
+  so `docker image inspect <repo>:latest` corroborates the mail while both read the same stale
+  state (measured before the #275 apply: local tags resolved to the NOTIFIED digests
+  `6d164540a04f`/`f772d434e8fa` while the registry held `86ca5fdb6d87`/`ac461fb352ab` — and
+  `pull: always` then overwrote the local tags, so this evidence exists only if captured first). `pull: always` re-consults the registry at deploy time, so the version you land can be
+  a release further on than the one whose notes you reviewed (measured #275: 2 of 5 images —
+  VM v1.151.0→**v1.152.0**, grafana 13.2.1→**13.2.2**). Resolve the CURRENT digest from the
+  registry before deploying, read the landed version out of the RUNNING container after, and
+  record it in the role's bump log — a `:latest` fleet has no memory otherwise.
+  See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md)
+  and [docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md](docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md).
 - **nftables `hook input` is inert for docker-published ports.** Docker DNATs published
   ports in prerouting (`dstnat`/-100) and the traffic takes the FORWARD path — an
   input-hook allowlist loads cleanly and filters nothing. Filter docker-published ports

@@ -327,17 +327,76 @@
 #   * the `--test` pre-flight needs an installed binary and a rendered config.
 #
 # All of those are artefacts of dry-running a first install, not defects in the
-# play. So: on a converged host --check --diff previews everything, including a
-# real content diff of telegraf.conf — the run that actually matters, because that
-# is when someone is reviewing a config change. On a virgin host, or on the first
-# --check after a version bump, it previews the plan in a debug message instead of
-# failing.
-- name: Decide whether check mode can preview the install
+# play. So on a converged host --check --diff previews everything, including a real
+# content diff of telegraf.conf — the run that actually matters, because that is
+# when someone is reviewing a config change.
+#
+# This flag blocks the .deb chain ONLY, and the three config templates are no longer
+# gated at all (#275). Two rounds of review to get here, and both are worth keeping:
+#
+#   Round 1: one flag gated both the package chain AND the templates. Because
+#   telegraf_agent_deb_path carries the version in its filename, a pin bump makes the
+#   cached .deb absent on a fully converged host and armed the flag — so a commit that
+#   bumped the version AND edited telegraf.conf.j2 rendered NO content diff under
+#   --check --diff. The one artefact the operator dry-runs for, hidden on exactly the
+#   run it mattered.
+#
+#   Round 2: the replacement was a second flag gating the templates on "is /etc/telegraf
+#   missing", justified by "`template` in check mode cannot diff into a missing parent".
+#   That justification is FALSE, and it was a guard that could never fire for its stated
+#   reason. MEASURED on this repo's ansible-core 2.21.3: templating to a dest whose
+#   parent is two levels missing reports `changed` and renders a full before/after diff
+#   under --check --diff, and fails with "Destination directory ... does not exist" only
+#   on a REAL run — the copy action plugin returns on check_mode before dispatching to
+#   the module. So the templates are simply ungated: check mode never writes, and a
+#   virgin-host dry-run now shows the config it would install.
+- name: Decide what check mode can preview
   ansible.builtin.set_fact:
+    # Blocks the .deb fetch, `apt: deb=`, `telegraf --test` and the asserts that
+    # read an installed binary. Nothing else.
     telegraf_agent_preview_only: >-
       {{ ansible_check_mode
          and not (telegraf_agent_etc_stat.stat.isdir | default(false)
                   and telegraf_agent_deb_stat.stat.exists) }}
+
+# What version is ACTUALLY installed, asked of dpkg rather than inferred. The
+# check-mode report below has to tell the operator whether a blocked preview is a
+# virgin host or a version bump, and the only honest source for that is the package
+# database — /etc/telegraf existing is a proxy that an interrupted first install or
+# a hand-created directory also satisfies, and `Create the telegraf configuration
+# directory` below is itself ungated, so the proxy is partly this role's own doing.
+#
+# `${db:Status-Abbrev}`, NOT the exit code: dpkg-query -W exits 0 with a populated
+# ${Version} for iU/iF/rc packages too, so "installed" must be read off the status
+# field (CLAUDE.md, measured on a live rc package). check_mode: false because this
+# is a read whose answer the check-mode report depends on — the same treatment the
+# staleness probe further down already gets.
+- name: Read the telegraf version dpkg believes is installed
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, -f, '${db:Status-Abbrev} ${Version}', telegraf]
+  register: telegraf_agent_dpkg
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Record the installed telegraf version, or none
+  vars:
+    # SPLIT ON WHITESPACE, not on a single space. `${db:Status-Abbrev}` is padded to
+    # three characters, so the output is "ii  1.40.0-1" with TWO spaces (measured
+    # with `cat -A` on eq12, #275) and `.split(' ')[1]` returns the empty field
+    # between them — which reported a host running 1.40.0 as "not installed". The
+    # first version of this very task shipped that bug; the falsification run caught
+    # it, which is the only reason it is not in master.
+    _dpkg_fields: "{{ (telegraf_agent_dpkg.stdout | default('') | trim).split() }}"
+  ansible.builtin.set_fact:
+    # "ii  1.40.0-1" -> "1.40.0-1". Anything not `ii` (iU/iF/rc) or a non-zero query
+    # is NOT installed and must not be reported as a version.
+    telegraf_agent_installed_version: >-
+      {{ _dpkg_fields[1]
+         if telegraf_agent_dpkg.rc | default(1) == 0
+            and _dpkg_fields | length >= 2
+            and _dpkg_fields[0] == 'ii'
+         else '' }}
 
 # --- What the inputs shell out to --------------------------------------------
 # `sensors` and `smartctl` were both MEASURED PRESENT on eq12 and n5pro
@@ -507,31 +566,36 @@
     quiet: true
   when: not telegraf_agent_preview_only
 
-# Every version bump otherwise leaves another artefact in the cache forever.
-# Deleting the superseded ones is the role's job, not a line in a bump procedure
-# someone has to remember — but ONLY the superseded ones: the current file is what
-# makes a re-run cheap and what `apt` installs from.
-- name: Find superseded telegraf packages in the cache
-  ansible.builtin.find:
-    paths: "{{ telegraf_agent_deb_cache_dir }}"
-    patterns: "telegraf_*_amd64.deb"
-    excludes: "{{ telegraf_agent_deb_filename }}"
-  register: telegraf_agent_stale_debs
-  when: not telegraf_agent_preview_only
-
-- name: Remove superseded telegraf packages from the cache
-  ansible.builtin.file:
-    path: "{{ item.path }}"
-    state: absent
-  loop: "{{ telegraf_agent_stale_debs.files | default([]) }}"
-  loop_control:
-    label: "{{ item.path | basename }}"
-  when: not telegraf_agent_preview_only
-
-- name: Report what a real run would do here (check mode, telegraf not installed yet)
+# Two DIFFERENT conditions block the package chain, and conflating them misreports
+# the common one. A fresh host has no telegraf and no .deb. A VERSION BUMP on a
+# converged host has a running telegraf and is missing only the newly-pinned .deb —
+# telegraf_agent_deb_path carries the version in its filename, so the moment the pin
+# moves, the cached file the gate stats is the OLD one and stat.exists goes false.
+# Measured on eq12 during #275 (1.39.3 -> 1.40.0): `telegraf --version` reported
+# 1.39.3 and `systemctl is-active` reported active while this task announced telegraf
+# "not installed yet". The gate itself is right either way — `apt: deb=<path>` cannot
+# preview installing a file that is not there, the same shape as "--check cannot
+# install from a repo it did not write" — so the fix is to say which case it is, on
+# the authority of dpkg rather than a directory, and to say plainly that the package
+# chain previews nothing. Otherwise the operator reads changed=0 on a bump as
+# "no drift".
+- name: Report what a real run would do here (check mode, install cannot be previewed)
   ansible.builtin.debug:
     msg: >-
-      CHECK MODE, and telegraf is not installed on {{ inventory_hostname }} yet
+      CHECK MODE on {{ inventory_hostname }}:
+      {{ "telegraf is not installed here (dpkg knows no ii telegraf), so this is a
+      FIRST INSTALL"
+      if telegraf_agent_installed_version | length == 0
+      else "dpkg reports telegraf " ~ telegraf_agent_installed_version ~ " installed
+      and the pin is " ~ telegraf_agent_version ~
+      (" — this is a VERSION BUMP and the pinned .deb is not cached yet"
+      if not telegraf_agent_deb_stat.stat.exists
+      else " — the .deb IS cached, so what blocked the preview is the missing
+      /etc/telegraf") ~ ". The .deb fetch, `apt`, `telegraf --test` and every
+      VictoriaMetrics arrival assert below are SKIPPED. changed=0 in the recap below
+      means 'check mode could not look', NOT 'no drift'. The apply is this run's
+      first real test. (The config, env-file and drop-in templates are ungated, so
+      their diff still renders — only the package chain is blind.)" }}
       (/etc/telegraf present: {{ telegraf_agent_etc_stat.stat.isdir | default(false) }},
       {{ telegraf_agent_deb_filename }} cached:
       {{ telegraf_agent_deb_stat.stat.exists }}). A real run WILL: download and
@@ -580,7 +644,6 @@
     dest: /etc/telegraf/telegraf.conf
     mode: "0644"
   register: telegraf_agent_config
-  when: not telegraf_agent_preview_only
 
 # diff:false because this file carries the VictoriaMetrics credential; the task
 # still reports changed, its content just never renders into the transcript
@@ -599,7 +662,6 @@
     mode: "0600"
   diff: false
   register: telegraf_agent_env
-  when: not telegraf_agent_preview_only
 
 - name: Create the telegraf systemd drop-in directory
   ansible.builtin.file:
@@ -613,7 +675,6 @@
     dest: /etc/systemd/system/telegraf.service.d/10-homelab.conf
     mode: "0644"
   register: telegraf_agent_dropin
-  when: not telegraf_agent_preview_only
 
 # eq12 only, and the gate is the host_vars flag rather than a fact probe: n5pro
 # has NO ACPI fan objects at all (measured 2026-08-24), so there is nothing here
@@ -778,13 +839,17 @@
 # And none is NEEDED anywhere, which is where this comment used to be wrong
 # (#186 review round). A task skipped by its `when` STILL REGISTERS — the skip
 # result is stored and `changed` is false — so every one of these six variables
-# exists on every host in the group. That is as true of the fan-script task,
-# gated on telegraf_agent_acpi_fan_state and therefore skipped on n5pro (and of
-# the RAPL script task, which is enabled on both hosts today but gated all the
-# same), as it is of the four preview_only-gated tasks above it; a `when`-gated
-# task is not "never reached", it is skipped, which is the very mechanism the
-# paragraph above relies on. Reading the term bare is therefore uniform, and a renamed register
-# fails loudly instead of silently voting "no restart".
+# exists on every host in the group, whatever gates its task. The six, and what
+# gates each (re-counted after #275 ungated the templates; the old text said
+# "four preview_only-gated tasks" and only one is now):
+#   config / env / dropin  — ungated, always run
+#   fan_script             — telegraf_agent_acpi_fan_state (false on n5pro)
+#   rapl_script            — telegraf_agent_rapl_power (true on both today)
+#   pkg                    — telegraf_agent_preview_only
+# A `when`-gated task is not "never reached", it is skipped, which is the very
+# mechanism the paragraph above relies on. Reading the term bare is therefore
+# uniform, and a renamed register fails loudly instead of silently voting
+# "no restart".
 # DURABLE staleness term, ORed into the six one-shot `changed` flags below.
 #
 # Those six describe only what THIS run did. A run that writes the config and
@@ -1936,3 +2001,40 @@
   when:
     - not ansible_check_mode
     - telegraf_agent_needs_restart | bool
+
+# --- Cache hygiene, LAST on purpose ------------------------------------------
+# Every version bump otherwise leaves another artefact in the cache forever.
+# Deleting the superseded ones is the role's job, not a line in a bump procedure
+# someone has to remember — but ONLY the superseded ones: the current file is what
+# makes a re-run cheap and what `apt` installs from.
+#
+# This runs AFTER the arrival asserts, not before the install (#275 review). The
+# superseded .deb IS the offline rollback: if a bump goes red at `telegraf --test`,
+# at the unit asserts or at any of the VictoriaMetrics arrival asserts, apt's
+# postinst has already try-restart'ed the host onto the NEW telegraf, and the
+# fastest way back is `apt install /var/cache/telegraf/telegraf_<old>-1_amd64.deb`.
+# Pruning first spent that capability before the run had earned the right to — the
+# same shape as #240's probe-gated block that ran the step consuming its own signal
+# before the step that could fail. Ordering the consumer last closes the window with
+# no extra state. Cost on a failed bump: one extra .deb in the cache.
+- name: Find superseded telegraf packages in the cache
+  ansible.builtin.find:
+    paths: "{{ telegraf_agent_deb_cache_dir }}"
+    patterns: "telegraf_*_amd64.deb"
+    excludes: "{{ telegraf_agent_deb_filename }}"
+  register: telegraf_agent_stale_debs
+  when: not telegraf_agent_preview_only
+
+- name: Remove superseded telegraf packages from the cache
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  # No `| default([])`. The reason is NOT "the register is always populated" — when
+  # the find is skipped the register exists but has no `.files` key, so this would be
+  # Undefined. What makes it safe is that Ansible evaluates `when` before expanding
+  # `loop`, so the task is skipped before the loop is touched (confirmed on core
+  # 2.21.3). A fail-open default would buy nothing here and would hide a rename.
+  loop: "{{ telegraf_agent_stale_debs.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: not telegraf_agent_preview_only
