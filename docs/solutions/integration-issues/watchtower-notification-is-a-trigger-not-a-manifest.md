@@ -72,6 +72,8 @@ release further on:
 **The local-tag corroboration was measured too, before the deploy.** At 06:17Z, roughly
 five minutes before the apply, `docker image inspect <repo>:latest` on the host reported:
 
+All digests below are manifest(-list) digests, truncated.
+
 | Image | Local `:latest` resolved to | Registry held |
 | --- | --- | --- |
 | `victoria-metrics` | `6d164540a04f` — **v1.151.0**, the notified digest | `86ca5fdb6d87` (v1.152.0) |
@@ -122,6 +124,22 @@ Grafana 13.2.2 was pure security/bugfix). That is luck, not a control.
    ```
    Compare that digest to the running container's image id, and review the notes for the
    range between them — which may be more than one release.
+
+   **That comparison works on this fleet, and the reason is worth knowing before you
+   copy it elsewhere.** Docker Hub's `digest` is the manifest-LIST digest; a classic
+   overlay2 docker reports a container's `.Image` as the config-blob digest, and those
+   two never match. This host runs the **containerd image store** (`docker info` →
+   `driver=overlayfs`, with the real bulk under `/var/lib/containerd`), which records
+   the image by its manifest digest instead — so they are equal. Measured on stable
+   pinned tags: `postgres:18` Hub list digest `86c951e05bf5…` = local `.Id`
+   `86c951e05bf5…`; `dpage/pgadmin4:9` `c332c5f6dfba…` = `c332c5f6dfba…`; likewise all
+   five images in the table above. The portable form, correct on either storage
+   backend, is `docker image inspect <repo>:<tag> --format '{{index .RepoDigests 0}}'`.
+
+   A worked non-match: `searxng:latest` resolved locally to `0e8d3a8df66b…` against a
+   Hub digest of `547fdc19b455…`. That is not a digest-type mismatch — searxng is
+   `enable`-only and auto-updates, so its tag had simply moved on again. A mismatch
+   here means "the tag moved", which is the signal you are looking for.
 2. After the deploy, read the landed version out of the **running container** and record it:
    ```bash
    docker exec grafana grafana server -v

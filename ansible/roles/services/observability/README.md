@@ -1289,8 +1289,10 @@ containers are actually running — this table is that record. Same convention a
 **Read this before the next bump:** watchtower's notification names the digest **it**
 staged at scan time, and the local `:latest` tag points at that staged image — so
 `docker image inspect <repo>:latest` shows what watchtower saw, NOT what a deploy will
-adopt. Only `pull: always` consults the registry. On 2026-09-16 that gap was two releases
-wide for two of three images. Review the release notes for the version you actually
+adopt. Only `pull: always` consults the registry. On 2026-09-17Z that gap was ONE release
+wide, for two of the three images bumped here. (The distance from what was RUNNING to what
+landed was two releases for VictoriaMetrics — a different quantity, and not the one this
+warning is about.) Review the release notes for the version you actually
 **land**, read out of the running container afterwards, and do not treat the notification
 as a manifest.
 

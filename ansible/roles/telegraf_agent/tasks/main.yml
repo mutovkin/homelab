@@ -839,13 +839,17 @@
 # And none is NEEDED anywhere, which is where this comment used to be wrong
 # (#186 review round). A task skipped by its `when` STILL REGISTERS — the skip
 # result is stored and `changed` is false — so every one of these six variables
-# exists on every host in the group. That is as true of the fan-script task,
-# gated on telegraf_agent_acpi_fan_state and therefore skipped on n5pro (and of
-# the RAPL script task, which is enabled on both hosts today but gated all the
-# same), as it is of the four preview_only-gated tasks above it; a `when`-gated
-# task is not "never reached", it is skipped, which is the very mechanism the
-# paragraph above relies on. Reading the term bare is therefore uniform, and a renamed register
-# fails loudly instead of silently voting "no restart".
+# exists on every host in the group, whatever gates its task. The six, and what
+# gates each (re-counted after #275 ungated the templates; the old text said
+# "four preview_only-gated tasks" and only one is now):
+#   config / env / dropin  — ungated, always run
+#   fan_script             — telegraf_agent_acpi_fan_state (false on n5pro)
+#   rapl_script            — telegraf_agent_rapl_power (true on both today)
+#   pkg                    — telegraf_agent_preview_only
+# A `when`-gated task is not "never reached", it is skipped, which is the very
+# mechanism the paragraph above relies on. Reading the term bare is therefore
+# uniform, and a renamed register fails loudly instead of silently voting
+# "no restart".
 # DURABLE staleness term, ORed into the six one-shot `changed` flags below.
 #
 # Those six describe only what THIS run did. A run that writes the config and
