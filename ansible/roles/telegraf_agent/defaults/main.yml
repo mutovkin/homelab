@@ -3,7 +3,8 @@
 # VERSION + CHECKSUM PINNED IN ONE PLACE, bumped deliberately — get_url hashes the
 # on-disk file, skips on match, re-downloads on mismatch; NO stat-exists gate
 # (CLAUDE.md). sha256 verified against the checksum table in the v1.40.0 GitHub
-# release notes AND the downloaded artefact, 2026-09-16 (#275). 1.40.0 is also what
+# release notes AND the downloaded artefact, 2026-09-17Z (#275; the hosts and the
+# control machine run PDT, so local timestamps for this work read 2026-09-16 evening). 1.40.0 is also what
 # the eq12_docker telegraf CONTAINER runs as of that same bump — the INTENT to align
 # was deliberate, the match was not: the container landed wherever :latest pointed at
 # deploy time, which in the same pass moved VictoriaMetrics and Grafana a release
@@ -33,19 +34,33 @@
 # 1.40.0 starts on BOTH hosts, 2026-09-17. NOTE the hosts run PDT: a UTC `--since`
 # silently returns "No entries", which is not the same as "no warnings" — read the
 # whole boot and compare starts instead.
-#   GONE on 1.40.0: the two `DeprecationWarning ... inputs.exec ... removed in 1.45.0`
-#     lines (acpi_fan_state.sh, rapl_power.sh) that 1.39.3 logged on every start.
-#   REMAINS, and is the next bump-blocker to watch: `W! [agent] The default value of
-#     'skip_processors_after_aggregators' will change to 'true' with Telegraf v1.40.0`.
-#     Upstream's message is stale (it still says "with v1.40.0" while running 1.40.0),
-#     and it is a no-op here either way — this agent loads ZERO aggregators ("Loaded
-#     aggregators:" is empty on both hosts) — but the default WILL flip, so re-read this
-#     line if an aggregator is ever added.
+#   NO inputs.exec deprecation, before OR after. A first pass wrote that the bump had
+#     removed it, which is a FALSE CAUSE and the review caught it. The last 1.39.3
+#     start on each host — eq12 2026-09-01T22:58-07:00, n5pro 2026-09-04T21:48-07:00 —
+#     already logged ZERO DeprecationWarnings. The `inputs.exec ... removed in 1.45.0`
+#     lines exist further back (eq12, 2026-08-25, naming acpi_fan_state.sh and
+#     rapl_power.sh) and stopped when #209 migrated this template to the nested-array
+#     form, NOT at this bump. Those August starts are pre-merge working-tree applies of
+#     the #194/#209 branch, which is why the journal shows rapl_power.sh warning under a
+#     flat form that never existed on master — the change loop applies before it merges,
+#     so `journalctl` records branch iterations, not just merged states. Counting also
+#     differs per host and "two lines on both hosts" would be wrong either way: n5pro
+#     sets telegraf_agent_acpi_fan_state: false and renders ONE [[inputs.exec]].
+#   REMAINS, unchanged by the bump, and is the next thing to watch: `W! [agent] The
+#     default value of 'skip_processors_after_aggregators' will change to 'true' with
+#     Telegraf v1.40.0`. Upstream's message is stale (it still says "with v1.40.0" while
+#     running 1.40.0), and it is a no-op here either way — this agent loads ZERO
+#     aggregators ("Loaded aggregators:" is empty on both hosts) — but the default WILL
+#     flip, so re-read this line if an aggregator is ever added.
 #   PRE-EXISTING, not caused by the bump: `W! [inputs.smart] nvme not found ... to
 #     gather vendor specific attributes`. Present identically on 1.39.3. nvme-cli is not
 #     installed, so only smartctl's generic attributes are collected; the
 #     smart_device_* series this fleet alerts on are unaffected. Enriching it is #278.
 #   PRE-EXISTING and benign: the strict-env notice and `TELEGRAF_OPTS` unset.
+#   NET: the bump introduced no new deprecation and silenced none. The one live
+#     bump-blocker for 1.45.0 is inputs.exec, and this template already satisfies it —
+#     which means the journal will NOT warn us again about it. Do not read future
+#     silence as safety.
 telegraf_agent_version: "1.40.0"
 telegraf_agent_deb_sha256: "94592ad341e2fa43597353a16f1eb1f242534781854c5a806852c153c53482eb"
 telegraf_agent_deb_url: "https://dl.influxdata.com/telegraf/releases/telegraf_{{ telegraf_agent_version }}-1_amd64.deb"

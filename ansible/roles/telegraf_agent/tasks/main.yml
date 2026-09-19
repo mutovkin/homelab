@@ -331,27 +331,33 @@
 # content diff of telegraf.conf — the run that actually matters, because that is
 # when someone is reviewing a config change.
 #
-# TWO SEPARATE BLOCKERS, and they must not share one flag (#275). The .deb chain is
-# blocked whenever the PINNED file is absent — and telegraf_agent_deb_path carries
-# the version in its filename, so a bump makes it absent on a fully converged host.
-# Templating a config needs none of that; it needs only a destination directory that
-# exists, because `template` in check mode cannot diff into a missing parent. Gating
-# the config on the .deb term meant a commit that bumped the version AND edited
-# telegraf.conf.j2 showed NO content diff in --check --diff: the one artefact the
-# operator dry-runs for was hidden by the flag, on exactly the run it mattered.
+# This flag blocks the .deb chain ONLY, and the three config templates are no longer
+# gated at all (#275). Two rounds of review to get here, and both are worth keeping:
+#
+#   Round 1: one flag gated both the package chain AND the templates. Because
+#   telegraf_agent_deb_path carries the version in its filename, a pin bump makes the
+#   cached .deb absent on a fully converged host and armed the flag — so a commit that
+#   bumped the version AND edited telegraf.conf.j2 rendered NO content diff under
+#   --check --diff. The one artefact the operator dry-runs for, hidden on exactly the
+#   run it mattered.
+#
+#   Round 2: the replacement was a second flag gating the templates on "is /etc/telegraf
+#   missing", justified by "`template` in check mode cannot diff into a missing parent".
+#   That justification is FALSE, and it was a guard that could never fire for its stated
+#   reason. MEASURED on this repo's ansible-core 2.21.3: templating to a dest whose
+#   parent is two levels missing reports `changed` and renders a full before/after diff
+#   under --check --diff, and fails with "Destination directory ... does not exist" only
+#   on a REAL run — the copy action plugin returns on check_mode before dispatching to
+#   the module. So the templates are simply ungated: check mode never writes, and a
+#   virgin-host dry-run now shows the config it would install.
 - name: Decide what check mode can preview
   ansible.builtin.set_fact:
     # Blocks the .deb fetch, `apt: deb=`, `telegraf --test` and the asserts that
-    # read an installed binary.
+    # read an installed binary. Nothing else.
     telegraf_agent_preview_only: >-
       {{ ansible_check_mode
          and not (telegraf_agent_etc_stat.stat.isdir | default(false)
                   and telegraf_agent_deb_stat.stat.exists) }}
-    # Blocks ONLY the config/env/drop-in templates, and only on a virgin host. A
-    # version bump leaves this false, so the config diff is still rendered.
-    telegraf_agent_config_preview_only: >-
-      {{ ansible_check_mode
-         and not (telegraf_agent_etc_stat.stat.isdir | default(false)) }}
 
 # What version is ACTUALLY installed, asked of dpkg rather than inferred. The
 # check-mode report below has to tell the operator whether a blocked preview is a
@@ -588,8 +594,8 @@
       /etc/telegraf") ~ ". The .deb fetch, `apt`, `telegraf --test` and every
       VictoriaMetrics arrival assert below are SKIPPED. changed=0 in the recap below
       means 'check mode could not look', NOT 'no drift'. The apply is this run's
-      first real test. (The config, env-file and drop-in templates DO still render
-      their diff — only the package chain is blind.)" }}
+      first real test. (The config, env-file and drop-in templates are ungated, so
+      their diff still renders — only the package chain is blind.)" }}
       (/etc/telegraf present: {{ telegraf_agent_etc_stat.stat.isdir | default(false) }},
       {{ telegraf_agent_deb_filename }} cached:
       {{ telegraf_agent_deb_stat.stat.exists }}). A real run WILL: download and
@@ -638,7 +644,6 @@
     dest: /etc/telegraf/telegraf.conf
     mode: "0644"
   register: telegraf_agent_config
-  when: not telegraf_agent_config_preview_only
 
 # diff:false because this file carries the VictoriaMetrics credential; the task
 # still reports changed, its content just never renders into the transcript
@@ -657,7 +662,6 @@
     mode: "0600"
   diff: false
   register: telegraf_agent_env
-  when: not telegraf_agent_config_preview_only
 
 - name: Create the telegraf systemd drop-in directory
   ansible.builtin.file:
@@ -671,7 +675,6 @@
     dest: /etc/systemd/system/telegraf.service.d/10-homelab.conf
     mode: "0644"
   register: telegraf_agent_dropin
-  when: not telegraf_agent_config_preview_only
 
 # eq12 only, and the gate is the host_vars flag rather than a fact probe: n5pro
 # has NO ACPI fan objects at all (measured 2026-08-24), so there is nothing here
@@ -2022,8 +2025,11 @@
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: absent
-  # No `| default([])`: the find above carries the identical `when`, so the register
-  # is always defined here. A fail-open default would only hide a rename.
+  # No `| default([])`. The reason is NOT "the register is always populated" — when
+  # the find is skipped the register exists but has no `.files` key, so this would be
+  # Undefined. What makes it safe is that Ansible evaluates `when` before expanding
+  # `loop`, so the task is skipped before the loop is touched (confirmed on core
+  # 2.21.3). A fail-open default would buy nothing here and would hide a rename.
   loop: "{{ telegraf_agent_stale_debs.files }}"
   loop_control:
     label: "{{ item.path | basename }}"
