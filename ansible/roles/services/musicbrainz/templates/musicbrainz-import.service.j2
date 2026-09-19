@@ -1,0 +1,17 @@
+# Managed by Ansible (roles/services/musicbrainz).
+# Deliberately NOT RemainAfterExit: a RemainAfterExit oneshot reports "active"
+# forever once it has run, so `state: started` could never re-run it and a
+# half-finished import would look healthy (CLAUDE.md, nftables gotcha). This
+# unit's re-run guard is the marker file the script writes, which is durable
+# state rather than a unit property.
+[Unit]
+Description=MusicBrainz mirror initial import (one-shot, multi-hour)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/musicbrainz-import.sh
+TimeoutStartSec=0
+StandardOutput=journal
+StandardError=journal

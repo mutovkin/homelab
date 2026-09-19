@@ -56,6 +56,28 @@ else
   exit 1
 fi
 
+# Roles that deliberately ship NO compose stack of their own, and are therefore
+# outside this gate rather than failing it. Keep this list SHORT and justified —
+# every name here is coverage the CI does not have.
+#
+#   musicbrainz — deploys upstream's musicbrainz-docker git checkout (build
+#     contexts, admin scripts and upstream's own compose files) instead of a
+#     compose payload of ours, so there is no roles/services/musicbrainz/files/
+#     compose.yaml for this script to read. It also does not use services/_deploy
+#     and has no templates/env.j2, so neither check below has an input. The stack
+#     is deliberately short-lived; see the role's defaults/main.yml for the
+#     retirement procedure, at which point this entry goes with it.
+#
+# Everything else missing a compose file stays a HARD ERROR (see the loop below):
+# under-covering is the failure mode a validation gate exists to prevent, so the
+# exemption is explicit, named and auditable rather than a silent skip.
+no_compose_stack() {
+  case "$1" in
+  musicbrainz) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 files=()
 if [[ $# -gt 0 ]]; then
   files=("$@")
@@ -68,6 +90,18 @@ else
   for dir in "${repo_root}"/ansible/roles/services/*/; do
     svc="$(basename "${dir}")"
     case "${svc}" in _*) continue ;; esac
+    if no_compose_stack "${svc}"; then
+      # Self-policing: a role cannot be exempt AND carry a stack this gate never
+      # reads. If it grows one, the exemption is stale and must go, not silently
+      # suppress validation of a real compose file.
+      if [[ -f "${dir}files/compose.yaml" ]]; then
+        echo "error: ${svc} is exempted by no_compose_stack() but ${dir}files/compose.yaml exists" >&2
+        echo "       remove it from the exemption list in scripts/validate-compose.sh" >&2
+        exit 1
+      fi
+      echo "exempt   ansible/roles/services/${svc}/ (ships no compose stack of its own)"
+      continue
+    fi
     if [[ -f "${dir}files/compose.yaml" ]]; then
       files+=("${dir}files/compose.yaml")
     else

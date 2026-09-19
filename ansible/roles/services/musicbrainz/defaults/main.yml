@@ -1,0 +1,87 @@
+---
+# Local MusicBrainz mirror (indexed-search profile) for the music-cleanup
+# project. DELIBERATELY SHORT-LIVED: it exists to take the identify pass off the
+# public MusicBrainz server (measured 2026-09-09: 31.4 h of a 53.3 h run in
+# ws/2 calls plus 8.7 h of backoff against a 22% HTTP 503 rate).
+#
+# RETIREMENT, in order (verified against the live storage 2026-09-09):
+#   1. Remove `musicbrainz` from n5pro_docker's `services` list.
+#   2. On CT 201: `cd /data/deploy/musicbrainz && docker compose down`
+#      NOT `down -v`. These volumes are bind mounts onto /data, and compose does
+#      not delete bind-mount content — `-v` would give a false sense of having
+#      reclaimed something.
+#   3. `rm -rf /data/musicbrainz /data/deploy/musicbrainz` — the step that
+#      actually frees the space.
+#   4. `docker image rm` the three built images (~3 GB), which live in
+#      /var/lib/docker on the 64 GB ROOTFS, not on /data.
+#   5. Confirm nothing pins the freed blocks:
+#      `zfs get usedbysnapshots rpool/data/subvol-201-disk-1`
+#   6. On n5pro: `zfs set refquota=200G rpool/data/subvol-201-disk-1`
+#      NOT `pct resize`, which refuses to shrink outright
+#      (PVE/API2/LXC.pm: `die "unable to shrink disk size"`). The underlying
+#      storage op pct would have performed is exactly this `zfs set refquota`
+#      (PVE/Storage/ZFSPoolPlugin.pm volume_resize) — the block is an API-layer
+#      guard, not a storage limitation. It is hot, needs no unmount, and only
+#      requires `referenced` to be below the new value, so it must come AFTER 3.
+#   7. Revert the mp0 line in host_vars/n5pro to `local-zfs:200,mp=/data`.
+#
+# Shrinking is a GUARDRAIL, not a reclaim: this dataset has refreservation=none,
+# so the 600G quota reserves no pool space and costs nothing while unused.
+# Deleting the data (step 3) is what returns capacity.
+#
+# THE ONE REAL TRAP: a ZFS snapshot taken while the mirror's ~175 GB is live
+# pins those blocks after deletion, and `used` will not drop until that snapshot
+# is destroyed. This dataset already carries 11 snapshots named `pre-batchF`,
+# `pre-omnibus`, `pre-issue194` and similar — taken automatically before change
+# batches — so a routine change-loop run against CT 201 during the mirror's life
+# is a live risk, not a hypothetical.
+#
+# Unlike every other services/* role this one does NOT go through services/_deploy:
+# upstream ships a whole git checkout with build contexts and admin scripts, not a
+# single compose.yaml, so there is no payload for _deploy to rsync.
+musicbrainz_repo: https://github.com/metabrainz/musicbrainz-docker.git
+
+# Pinned to the commit inspected while writing this role (2026-08-04). Upstream
+# publishes no semver tags for the compose project; a moving `master` would change
+# the DB schema and the Solr version under us mid-import.
+musicbrainz_version: c8a225fab3ea3a4650d8b1e0fab41d98878adc29
+
+musicbrainz_deploy_dir: "{{ data_mount }}/deploy/musicbrainz"
+musicbrainz_data_dir: "{{ data_mount }}/musicbrainz"
+
+# Published on the CT's LAN address; the ws/2 API lives under /ws/2.
+musicbrainz_web_port: 5000
+
+# --- Disk -------------------------------------------------------------------
+# Upstream's stated requirement for the full indexed-search setup is 350 GB
+# (README: "16 threads / 16 GB / 350 GB"). Measured breakdown of what actually
+# lands on disk: pgdata ~50 GB, solrdata ~75 GB extracted index, solrdump 60 GB
+# of compressed Solr backup archives, dbdump ~20 GB of mbdump tarballs — so the
+# peak is during import and ~80 GB of it (the two dump volumes) is reclaimable
+# afterwards.
+#
+# CT 201's /data was a 200 GB refquota with 199 GB free, which does not cover the
+# peak. rpool has 3.39 TiB available (single WD_BLACK SN850X 4 TB NVMe), so this
+# is a quota bump, not a capacity problem. 600 GB leaves the pool ~2.8 TiB.
+musicbrainz_data_disk_size_gb: 600
+
+# `pct resize` has to run on the Proxmox node, not in the CT — see the
+# delegate_to in tasks/main.yml. Hardcoding the node and vmid is acceptable
+# precisely because this role is scoped to one short-lived deployment.
+musicbrainz_pve_host: n5pro
+musicbrainz_vmid: 201
+
+# --- MetaBrainz data-use declaration -----------------------------------------
+# Upstream's fetch-dump.sh asks, interactively, whether the downloaded data will
+# be used for commercial or business purposes, and refuses to proceed without an
+# answer. Under systemd there is no stdin, so `read` fails, `set -e` fires and
+# the script exits 1 having printed NOTHING — the prompt text dies with it. The
+# sanctioned non-interactive answer is a marker file in the dump directory,
+# which is what the role writes.
+#
+# This is a declaration to the MetaBrainz Foundation about how the data is used,
+# not a technical switch: it changes nothing about what is downloaded or how the
+# mirror behaves. Answered `non-commercial` by the operator on 2026-09-09 —
+# a personal music library feeding Lyrion. Change it here if that stops being
+# true; MetaBrainz asks commercial users to support the project financially.
+musicbrainz_data_use: non-commercial
