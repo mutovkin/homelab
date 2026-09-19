@@ -1,0 +1,118 @@
+---
+# Local MusicBrainz mirror with indexed search. See defaults/main.yml for why
+# this exists and how to retire it. This role does not use services/_deploy —
+# upstream ships a git checkout with build contexts, not a compose payload.
+
+# `pct resize` grows the ZFS refquota on the CT's mp0 subvol. It is hot: no
+# unmount, no restart, nothing else on /data notices. It has to run on the
+# Proxmox node because the CT cannot resize its own mount — hence delegate_to.
+# Growing is one-way here by design: pct refuses to shrink, so a fat-fingered
+# smaller value fails loudly instead of truncating Lyrion's neighbour data.
+- name: Grow the CT data mount to fit the MusicBrainz import
+  ansible.builtin.command: >-
+    pct resize {{ musicbrainz_vmid }} mp0 {{ musicbrainz_data_disk_size_gb }}G
+  delegate_to: "{{ musicbrainz_pve_host }}"
+  register: musicbrainz_pct_resize
+  changed_when: musicbrainz_pct_resize.rc == 0
+  failed_when:
+    - musicbrainz_pct_resize.rc != 0
+    - "'disk is already at specified size' not in musicbrainz_pct_resize.stderr"
+
+# Created before the stack ever starts: these are the bind targets behind the
+# four named volumes in compose.homelab.yaml, and Docker would otherwise create
+# them itself at first mount.
+- name: Create MusicBrainz data directories
+  ansible.builtin.file:
+    path: "{{ musicbrainz_data_dir }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - pgdata
+    - solrdata
+    - dbdump
+    - solrdump
+
+# Written before the import runs, into the dump directory the fetch script
+# probes. See musicbrainz_data_use in defaults/main.yml for what this declares
+# and why it is a file rather than an answered prompt.
+- name: Record the MetaBrainz data-use declaration
+  ansible.builtin.file:
+    path: "{{ musicbrainz_data_dir }}/dbdump/.for-{{ musicbrainz_data_use }}-use"
+    state: touch
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+
+# force: false matters. The compose override and .env this role writes into the
+# checkout are UNTRACKED files; a forced checkout would discard them on every
+# run. Pinning `version` to a commit gives a detached HEAD that never moves
+# under a running import.
+- name: Clone musicbrainz-docker at the pinned commit
+  ansible.builtin.git:
+    repo: "{{ musicbrainz_repo }}"
+    dest: "{{ musicbrainz_deploy_dir }}"
+    version: "{{ musicbrainz_version }}"
+    force: false
+
+- name: Deploy the homelab compose override
+  ansible.builtin.template:
+    src: compose.homelab.yaml.j2
+    dest: "{{ musicbrainz_deploy_dir }}/compose.homelab.yaml"
+    mode: "0644"
+
+- name: Template .env for musicbrainz
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ musicbrainz_deploy_dir }}/.env"
+    mode: "0644"
+
+- name: Install the one-shot import script
+  ansible.builtin.template:
+    src: musicbrainz-import.sh.j2
+    dest: /usr/local/bin/musicbrainz-import.sh
+    mode: "0755"
+
+- name: Install the import systemd unit
+  ansible.builtin.template:
+    src: musicbrainz-import.service.j2
+    dest: /etc/systemd/system/musicbrainz-import.service
+    mode: "0644"
+  register: musicbrainz_import_unit
+
+- name: Reload systemd for the import unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: musicbrainz_import_unit.changed # noqa: no-handler
+
+# The marker is the same durable state the script itself checks. Reading it here
+# too keeps a re-run of this role from queueing a second import while the first
+# is still going, and keeps the play's output honest about whether it started
+# anything.
+- name: Check whether the initial import has already completed
+  ansible.builtin.stat:
+    path: "{{ musicbrainz_data_dir }}/.import-complete"
+  register: musicbrainz_import_marker
+
+# --no-block: `systemctl start` on a Type=oneshot BLOCKS until the unit exits,
+# which here is several hours. Ansible would sit on it, and an operator Ctrl-C
+# would kill the play but not the import. Fire and return; progress is in
+# `journalctl -u musicbrainz-import -f`.
+# noqa command-instead-of-module — systemd_service has no --no-block equivalent:
+# `state: started` on a Type=oneshot waits for the unit to EXIT, which here is
+# several hours. The module is the wrong tool for this one task, not an oversight.
+- name: Start the initial import in the background # noqa: command-instead-of-module
+  ansible.builtin.command: systemctl start --no-block musicbrainz-import.service
+  when: not musicbrainz_import_marker.stat.exists
+  changed_when: true
+
+- name: Report where the mirror will be reachable
+  ansible.builtin.debug:
+    msg: >-
+      MusicBrainz mirror deploying to {{ musicbrainz_deploy_dir }}.
+      {% if musicbrainz_import_marker.stat.exists %}
+      Import already complete — ws/2 endpoint:
+      http://{{ ansible_host }}:{{ musicbrainz_web_port }}/ws/2
+      {% else %}
+      Initial import started in the background (hours). Follow with
+      `journalctl -u musicbrainz-import -f` on {{ inventory_hostname }}.
+      {% endif %}

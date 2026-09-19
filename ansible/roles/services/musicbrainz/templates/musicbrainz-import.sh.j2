@@ -1,0 +1,51 @@
+#!/bin/bash
+# Managed by Ansible (roles/services/musicbrainz) — do not edit on the host.
+#
+# One-shot, multi-hour, unattended initial import: fetch the MusicBrainz data
+# dump, load it into Postgres, then fetch and load the prebuilt Solr search
+# index. Runs under systemd (musicbrainz-import.service) rather than inside an
+# Ansible task because it takes hours and must survive the operator's SSH
+# session and control machine going away.
+#
+# STATIC DUMP, NO REPLICATION — deliberate. Search indexes are not replicated
+# at all ("You will have to rebuild search indexes regularly"), so enabling
+# replication would buy a continuously fresh database sitting behind a
+# progressively staler index. For a bounded cleanup run an honestly stale,
+# self-consistent pair is better, and it needs no MetaBrainz access token and
+# no hourly packet cron.
+#
+# Prebuilt indexes rather than a local reindex: upstream measures reindexing at
+# 4.5 h with 16 CPU threads, and this CT has 8. Fetch+load is ~12 min each on a
+# fast link. `pct set 201 -cores` is hot if a future rebuild ever needs more.
+set -euo pipefail
+
+MARKER="{{ musicbrainz_data_dir }}/.import-complete"
+cd "{{ musicbrainz_deploy_dir }}"
+
+if [ -f "$MARKER" ]; then
+    echo "import already completed on $(cat "$MARKER") — nothing to do"
+    exit 0
+fi
+
+step() { echo "=== $(date -Is) :: $* ==="; }
+
+step "building images"
+docker compose build
+
+step "creating database and fetching mbdump (the long one)"
+docker compose run --rm musicbrainz createdb.sh -fetch
+
+step "starting musicbrainz + search"
+docker compose up -d musicbrainz search
+
+step "fetching prebuilt Solr backup archives (~60 GB)"
+docker compose exec -T search fetch-backup-archives
+
+step "loading Solr backup archives (extracts ~75 GB)"
+docker compose exec -T search load-backup-archives
+
+step "bringing the full stack up"
+docker compose up -d
+
+date -Is > "$MARKER"
+step "import complete"

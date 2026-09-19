@@ -39,6 +39,13 @@ services:
   - lms
   - portainer
   - watchtower
+  # Local MusicBrainz mirror for the music-cleanup project (indexed search).
+  # Short-lived by design — see roles/services/musicbrainz/defaults/main.yml for
+  # the retirement steps. Its containers carry no `watchtower.enable` label, so
+  # with WATCHTOWER_LABEL_ENABLE=true they are simply out of scan scope: the
+  # correct posture for a stack pinned to one upstream commit and torn down when
+  # the cleanup run finishes.
+  - musicbrainz
 # services:
 #   - postgresql
 #   - immich
