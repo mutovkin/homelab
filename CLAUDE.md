@@ -159,6 +159,14 @@ Hard-won lessons — check here before debugging from scratch.
   VM v1.151.0→**v1.152.0**, grafana 13.2.1→**13.2.2**). Resolve the CURRENT digest from the
   registry before deploying, read the landed version out of the RUNNING container after, and
   record it in the role's bump log — a `:latest` fleet has no memory otherwise.
+  **And a moved digest is not a version bump:** official images are rebuilt under their
+  EXISTING version tags for base-layer patches, so map the digest back through the tag list
+  (`library/` namespace, `page_size=100`) before writing the row — #282 measured 2 of 3
+  reported "updates" as rebuilds at the version already running (telegraf 1.40.0→1.40.0;
+  postgres 18.6→18.6, identical down to the `18.6-1.pgdg13+2` pgdg revision). Adopt them
+  anyway — base-layer CVE patching is the value — but with no application delta the risk is
+  the RUNTIME, not the changelog: a rebuilt image is a new `/usr/bin/ping`, so the
+  setuid/fscaps carve-out above is precisely what to re-verify.
   See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md)
   and [docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md](docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md).
 - **nftables `hook input` is inert for docker-published ports.** Docker DNATs published
