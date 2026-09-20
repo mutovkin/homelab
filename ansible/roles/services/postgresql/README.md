@@ -213,3 +213,32 @@ before exposing the host.
 - **Init scripts**: Executed only on first database initialization
 
 Ensure adequate disk space as databases can grow significantly over time. The backup directory should also have sufficient space for automated backups.
+
+## Bump log
+
+`postgres:18` and `dpage/pgadmin4:9` both float. The postgres container carries
+`watchtower.enable=true` **and** `watchtower.monitor-only=true` (see the comment in
+`files/compose.yaml`): a new 18.x minor is reported but never applied unattended, because
+this is the primary database for every other stack. Adoption is a deliberate
+`task deploy:service -- --limit eq12_docker --tags postgresql`, which is where the shared
+`_deploy` role's `pull: always` does the update. pgAdmin's posture is different and
+deliberate — `enable` only, so watchtower auto-updates it at 04:30.
+
+Nothing else records what this container actually runs. This table is that record.
+
+**Before the next bump, three checks in this order.**
+
+1. **Take the `pg_dumpall` the compose file mandates (#83), and verify it before
+   compressing** (#147): the completion marker for `pg_dumpall` is
+   `-- PostgreSQL database cluster dump complete`, it is tool-specific, and PG18 can write
+   `\unrestrict` *after* it — grep a bounded tail region, never assert it is the last line.
+   Then `gzip -1` and `gzip -t`. The role does **not** do this for you (#283).
+2. **Resolve the notified digest to a VERSION.** A moved tag is not a new PostgreSQL
+   release; official images are rebuilt for base-layer patches under the same version tags.
+3. **Record object counts on both sides of the apply.** "The database is there" is not a
+   verification — tables/indexes per database plus a row count in the real application
+   database is (#161).
+
+| Date | From → To | Notes |
+| ---- | --------- | ----- |
+| 2026-09-20 | postgres **18.6 → 18.6** — a REBUILD, not a minor bump (#282) | Watchtower reported `postgres:18` `86c951e05bf5`. That digest also carries the tags **`18.6`**, `18.6-trixie`, `18`, `18-trixie`, `trixie` and `latest`, and the server reports `18.6 (Debian 18.6-1.pgdg13+2)` **both before and after** — identical down to the pgdg package revision. The image was rebuilt 2026-09-19 (old image built 2026-08-25); the delta is base-layer patching, so there are no PostgreSQL release notes to review and no catalog change to fear. Registry had not drifted: notified digest == local tag == registry digest at 19:25Z and again at 19:27Z immediately before the apply. **Backup:** `pg_dumpall` taken 19:26Z to `/data/backups/pg_dumpall-pre-282-20260920T192622Z.sql`, 681,333,481 bytes, completion marker found in the bounded tail region and `CREATE DATABASE joplin` present; then `gzip -1` → 332,619,044 bytes, `gzip -t` OK, and the marker re-read *through* the gzip. **Verified 19:29–19:31Z:** `pg_isready` accepting connections, container `healthy`, `SHOW hba_file` still `/etc/postgresql/pg_hba.conf` (the mounted file — the #78 wiring survived the recreate), and object counts **identical across the apply** — joplin 95 tables / 259 indexes, postgres 68/163, template1 68/163, joplin `users`=2 `items`=1046. `joplin-server` was **not** recreated (same container id `db9a435452d1`), stayed `healthy` and reconnected on its own — 3 live backends in `pg_stat_activity`. pgAdmin answered `200` on `/misc/ping` at `:10080`. **One recreate that was NOT caused by this bump:** `pgadmin4` came up with a new container id on the *same* image `c332c5f6dfba` — it is `enable`-only, watchtower had created it at the 04:30 session on 09-18, and `compose up` recreates any container watchtower last created. That is the documented gotcha, not a side effect of the postgres image change; do not read it as one next time. Rollback: `postgres@4ef4dbc939d6` is still on the host (dangling but container-referenced, per #276), and the verified dump above is the data-side fallback. |
