@@ -212,7 +212,10 @@ before exposing the host.
   is `999:999` mode `0600` — it carries a real credential)
 - **Init scripts**: Executed only on first database initialization
 
-Ensure adequate disk space as databases can grow significantly over time. The backup directory should also have sufficient space for automated backups.
+Ensure adequate disk space as databases can grow significantly over time. The backup
+directory needs room for the operator-taken dumps described in the bump log below —
+this role has **no automated backup** of its own (#283); joplin's role backs up only
+its own database.
 
 ## Bump log
 
@@ -224,7 +227,9 @@ this is the primary database for every other stack. Adoption is a deliberate
 `_deploy` role's `pull: always` does the update. pgAdmin's posture is different and
 deliberate — `enable` only, so watchtower auto-updates it at 04:30.
 
-Nothing else records what this container actually runs. This table is that record.
+Nothing else records what this container actually runs. This table is that record — it
+covers **postgres only**; pgAdmin floats on the auto-update posture and its version is
+deliberately unrecorded. Same convention as `roles/services/watchtower/README.md`.
 
 **Before the next bump, three checks in this order.**
 
@@ -232,13 +237,16 @@ Nothing else records what this container actually runs. This table is that recor
    compressing** (#147): the completion marker for `pg_dumpall` is
    `-- PostgreSQL database cluster dump complete`, it is tool-specific, and PG18 can write
    `\unrestrict` *after* it — grep a bounded tail region, never assert it is the last line.
-   Then `gzip -1` and `gzip -t`. The role does **not** do this for you (#283).
+   Then `gzip -1` and `gzip -t`. The role does **not** do this for you (#283). Marker and
+   slicing detail:
+   [pg18-restrict-slicing-silent-green-restore-drill.md](../../../../docs/solutions/integration-issues/pg18-restrict-slicing-silent-green-restore-drill.md).
 2. **Resolve the notified digest to a VERSION.** A moved tag is not a new PostgreSQL
    release; official images are rebuilt for base-layer patches under the same version tags.
 3. **Record object counts on both sides of the apply.** "The database is there" is not a
    verification — tables/indexes per database plus a row count in the real application
-   database is (#161).
+   database is — the lesson of the restore drill linked in step 1, which measured a
+   "successful" restore that left a database with the right owner and zero tables.
 
 | Date | From → To | Notes |
 | ---- | --------- | ----- |
-| 2026-09-20 | postgres **18.6 → 18.6** — a REBUILD, not a minor bump (#282) | Watchtower reported `postgres:18` `86c951e05bf5`. That digest also carries the tags **`18.6`**, `18.6-trixie`, `18`, `18-trixie`, `trixie` and `latest`, and the server reports `18.6 (Debian 18.6-1.pgdg13+2)` **both before and after** — identical down to the pgdg package revision. The image was rebuilt 2026-09-19 (old image built 2026-08-25); the delta is base-layer patching, so there are no PostgreSQL release notes to review and no catalog change to fear. Registry had not drifted: notified digest == local tag == registry digest at 19:25Z and again at 19:27Z immediately before the apply. **Backup:** `pg_dumpall` taken 19:26Z to `/data/backups/pg_dumpall-pre-282-20260920T192622Z.sql`, 681,333,481 bytes, completion marker found in the bounded tail region and `CREATE DATABASE joplin` present; then `gzip -1` → 332,619,044 bytes, `gzip -t` OK, and the marker re-read *through* the gzip. **Verified 19:29–19:31Z:** `pg_isready` accepting connections, container `healthy`, `SHOW hba_file` still `/etc/postgresql/pg_hba.conf` (the mounted file — the #78 wiring survived the recreate), and object counts **identical across the apply** — joplin 95 tables / 259 indexes, postgres 68/163, template1 68/163, joplin `users`=2 `items`=1046. `joplin-server` was **not** recreated (same container id `db9a435452d1`), stayed `healthy` and reconnected on its own — 3 live backends in `pg_stat_activity`. pgAdmin answered `200` on `/misc/ping` at `:10080`. **One recreate that was NOT caused by this bump:** `pgadmin4` came up with a new container id on the *same* image `c332c5f6dfba` — it is `enable`-only, watchtower had created it at the 04:30 session on 09-18, and `compose up` recreates any container watchtower last created. That is the documented gotcha, not a side effect of the postgres image change; do not read it as one next time. Rollback: `postgres@4ef4dbc939d6` is still on the host (dangling but container-referenced, per #276), and the verified dump above is the data-side fallback. |
+| 2026-09-20 | postgres **18.6 → 18.6** — a REBUILD, not a minor bump (#282) | Watchtower reported `postgres:18` `86c951e05bf5`. That digest also carries the tags **`18.6`**, `18.6-trixie`, `18`, `18-trixie`, `trixie` and `latest`, and the server reports `18.6 (Debian 18.6-1.pgdg13+2)` **both before and after** — identical down to the pgdg package revision. The image was rebuilt 2026-09-19 (old image built 2026-08-25); the delta is base-layer patching, so there are no PostgreSQL release notes to review and no catalog change to fear. Registry had not drifted: notified digest == local tag == registry digest at 19:25Z and again at 19:27Z immediately before the apply. **Backup:** `pg_dumpall` taken 19:26Z to `/data/backups/pg_dumpall-pre-282-20260920T192622Z.sql`, 681,333,481 bytes, completion marker found in the bounded tail region and `CREATE DATABASE joplin` present; then `gzip -1` → 332,619,044 bytes, `gzip -t` OK, and the marker re-read *through* the gzip. **Verified 19:29–19:31Z:** `pg_isready` accepting connections, container `healthy`, `SHOW hba_file` still `/etc/postgresql/pg_hba.conf` (the mounted file — the #78 wiring survived the recreate), and object counts **identical across the apply** — joplin 95 tables / 259 indexes, postgres 68/163, template1 68/163, joplin `users`=2 `items`=1046. **Record the query with the numbers, because the obvious alternative disagrees:** these come from `SELECT count(*) FROM pg_class WHERE relkind='r'` / `relkind='i'`, which counts TOAST indexes; `pg_indexes` returns 206/124/124 for the same cluster. Re-run the same query at the next bump or the difference reads as a 53-index regression that never happened. `joplin-server` was **not** recreated (same container id `db9a435452d1`), stayed `healthy` and reconnected on its own — it held live backends in `pg_stat_activity` after the recreate (an instantaneous count, so treat it as "reconnected", not as a reproducible figure). pgAdmin answered `200` on `/misc/ping` at `:10080`. **One recreate that was NOT caused by this bump:** `pgadmin4` came up with a new container id on the *same* image `c332c5f6dfba` — it is `enable`-only, watchtower had created it at the 04:30 session on 09-18, and `compose up` recreates any container watchtower last created. That is the documented gotcha, not a side effect of the postgres image change; do not read it as one next time. **Rollback:** `4ef4dbc939d6` is still on the host but **dangling and unreferenced** (`containers=0`, `RepoDigests=[]`), so the next `docker_prune` (#276/#281) reaps it — and being a rebuild there is **no pullable tag to fall back to**: `postgres:18.6` now resolves to the NEW image `86c951e05bf5` and no `18.5` tag exists at all. The image-side rollback is the local image ID until it is pruned (gap filed as #284); the **verified dump above is the durable fallback**, which for a database is the one that matters. |
