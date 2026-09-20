@@ -231,7 +231,7 @@ Nothing else records what this container actually runs. This table is that recor
 covers **postgres only**; pgAdmin floats on the auto-update posture and its version is
 deliberately unrecorded. Same convention as `roles/services/watchtower/README.md`.
 
-**Before the next bump, three checks in this order.**
+**Before the next bump, five checks in this order.**
 
 1. **Take the `pg_dumpall` the compose file mandates (#83), and verify it before
    compressing** (#147): the completion marker for `pg_dumpall` is
