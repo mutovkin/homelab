@@ -167,6 +167,36 @@ done
 If the answer includes a concrete version tag equal to what is already running, the entry
 is a rebuild. Say so in the log, and say what you verified instead of release notes.
 
+### What a rebuild actually requires you to verify
+
+With no application delta there are no release notes to grep, so the verification moves
+from the changelog to the runtime. Two checks generalise, and both are cheap:
+
+- **The metric-name set, before vs after.** One query covers every plugin at once and is the
+  direct answer to #216 (a name that disappears from an unlabelled aggregate does *not* go
+  NoData). Measured across #282's telegraf recreate: 259 names before, 259 after, none lost.
+
+  ```bash
+  curl -sG -u "$VM_AUTH_USERNAME:$VM_AUTH_PASSWORD" \
+    --data-urlencode 'match[]={host="eq12_docker"}' \
+    --data-urlencode 'start=...' --data-urlencode 'end=...' \
+    http://localhost:8428/api/v1/label/__name__/values
+  ```
+
+- **For a database, the collation version** — the failure that object counts are structurally
+  blind to. A rebuild moves base OS packages, and a glibc bump can change collation ordering
+  and silently invalidate every text index; `pg_isready`, the healthcheck, client
+  connectivity and identical table/index counts all stay green over it. The query (and the
+  `IS NOT NULL` that stops it reporting `template0` on a healthy cluster) is in
+  `roles/services/postgresql/README.md`'s pre-bump list.
+
+And one trap that is not about rebuilds at all but shares the deploy: **a real version bump
+can migrate state one way, so an image rollback is not a state rollback.** Portainer 2.45.1
+migrated its BoltDB and refreshed RBAC roles and user authorizations on both hosts during
+#282; reverting the image alone would leave the 2.45.0 binary facing a 2.45.1 database. It
+wrote its own single-slot `portainer.db.bak` first, which the next upgrade overwrites.
+`docker logs <svc> | grep -i migrat` before calling a bump verified.
+
 ### A rebuild also costs you the rollback, quietly
 
 `roles/docker_host` prunes dangling images (#276/#281) and justifies it on the grounds that
