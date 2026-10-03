@@ -1,0 +1,42 @@
+---
+# Reads every pinned pref from the RUNNING server and sets `lms_prefs_drift` to
+# the names whose live value differs from lms_server_prefs. Included twice by
+# server_prefs.yml: once to find drift, once to prove the correction landed.
+# It reads LMS's own view of each value, not server.prefs on disk, which LMS
+# overwrites from memory on its next save anyway.
+#
+# Read-only, so it runs under --check (check_mode: false) and the dry-run shows
+# the real drift.
+- name: Read pinned LMS server prefs ({{ lms_prefs_read_phase }})
+  ansible.builtin.uri:
+    url: "{{ lms_jsonrpc_url }}"
+    method: POST
+    body_format: json
+    body: "{{ {'id': 1, 'method': 'slim.request', 'params': ['', ['pref', item, '?']]} }}"
+  loop: "{{ lms_server_prefs.keys() | list }}"
+  register: lms_prefs_read
+  check_mode: false
+  changed_when: false
+
+# No default() anywhere: a response without result._p2 means the transport or
+# the reply format changed, and it must fail here, not read as drift.
+# Comparison: LMS returns scalars as strings, but a value set as a number can
+# come back as a number, so scalars compare by string form. null (unset) never
+# matches a pinned scalar. Lists compare element-wise as strings, order included.
+- name: Compute LMS server pref drift ({{ lms_prefs_read_phase }})
+  ansible.builtin.set_fact:
+    lms_prefs_drift: >-
+      {%- set drift = [] -%}
+      {%- for r in lms_prefs_read.results -%}
+        {%- set cur = r.json.result._p2 -%}
+        {%- set want = lms_server_prefs[r.item] -%}
+        {%- if want is string -%}
+          {%- set same = cur is not none and (cur is string or cur is number) and (cur | string) == want -%}
+        {%- else -%}
+          {%- set same = cur is not none and cur is iterable and cur is not string and cur is not mapping
+                         and (cur | map('string') | list) == (want | map('string') | list) -%}
+        {%- endif -%}
+        {%- if not same -%}{%- set _ = drift.append(r.item) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ drift }}
+    lms_prefs_live: "{{ dict(lms_prefs_read.results | map(attribute='item') | zip(lms_prefs_read.results | map(attribute='json.result._p2'))) }}"

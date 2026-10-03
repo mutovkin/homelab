@@ -1,0 +1,145 @@
+---
+# Pins the Lyrion server prefs in lms_server_prefs (defaults/main.yml). What each
+# one does in the LMS code: SERVER_PREFS.md beside this role.
+#
+# Mechanism: LMS's own `pref` command over JSON-RPC against the RUNNING server.
+# Two reasons it is not a server.prefs edit:
+#  - LMS keeps the whole file in memory and rewrites it on every save (10 s
+#    debounce, and before every scan), so an on-disk edit while it runs is lost.
+#  - A file that fails to parse makes LMS start with EVERY server and player pref
+#    reset to defaults, then save that over the file.
+# `pref` runs LMS's validators and change handlers. It is a no-op for an
+# unchanged scalar, and this role only sends prefs whose live value differs.
+#
+# `pref` replies success even when a validator REJECTS the value (only mediadirs
+# has one), so the read-back assert below is the only proof a correction landed.
+
+- name: Assert lms_server_prefs leads with dontTriggerScanOnPrefChange "1"
+  ansible.builtin.assert:
+    that:
+      - lms_server_prefs is mapping
+      - (lms_server_prefs | list | first) == 'dontTriggerScanOnPrefChange'
+      - lms_server_prefs['dontTriggerScanOnPrefChange'] == '1'
+    fail_msg: >-
+      dontTriggerScanOnPrefChange: "1" must be the FIRST entry of lms_server_prefs,
+      so a wipecache fired by any later correction is queued, not started.
+    quiet: true
+
+# An unquoted 0/1 loads as an int. The drift comparison expects a string, so an int
+# would read as drift on every run and be re-sent as a JSON number.
+- name: Assert each pinned LMS pref is a quoted string or a list of strings
+  ansible.builtin.assert:
+    that: >-
+      item.value is string
+      or (item.value is iterable and item.value is not mapping
+          and item.value | length > 0
+          and item.value | reject('string') | list | length == 0)
+    fail_msg: "lms_server_prefs.{{ item.key }} must be a quoted string or a non-empty list of strings, got {{ item.value | to_json }}"
+    quiet: true
+  loop: "{{ lms_server_prefs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Set the LMS JSON-RPC endpoint
+  ansible.builtin.set_fact:
+    lms_jsonrpc_url: "http://localhost:{{ lms_web_port | default('9001') }}/jsonrpc.js"
+
+# The deploy above may have just created or recreated the container (compose
+# recreates any container Watchtower last created). LMS answers HTTP only once
+# its startup has finished, and a pref read before then would fail the play.
+# localhost works because lms runs network_mode: host and uri runs on the host.
+- name: Wait for LMS JSON-RPC to answer
+  ansible.builtin.uri:
+    url: "{{ lms_jsonrpc_url }}"
+    method: POST
+    body_format: json
+    body: {id: 1, method: slim.request, params: ["", ["serverstatus", 0, 0]]}
+  register: lms_rpc_ready
+  until: lms_rpc_ready is succeeded
+  retries: 36
+  delay: 5
+  check_mode: false
+  changed_when: false
+
+- name: Read LMS server prefs before pinning
+  ansible.builtin.include_tasks: server_prefs_read.yml
+  vars:
+    lms_prefs_read_phase: before
+
+- name: Record the drift found before pinning
+  ansible.builtin.set_fact:
+    lms_prefs_drift_before: "{{ lms_prefs_drift }}"
+    lms_prefs_live_before: "{{ lms_prefs_live }}"
+
+# Runs in both modes. In --check it is the preview of what a real apply will
+# send. In a real run it records the old values next to the new ones.
+- name: Show LMS server prefs that will be pinned
+  ansible.builtin.debug:
+    msg: "{{ item }}: {{ lms_prefs_live_before[item] | to_json }} -> {{ lms_server_prefs[item] | to_json }}"
+  loop: "{{ lms_prefs_drift_before }}"
+
+# The whole body is one expression so its values keep their types: "0" stays a
+# string and mediadirs stays a JSON array. A templated scalar on its own would be
+# re-evaluated to an int. Sent in lms_server_prefs order, because the drift list
+# is built in that order.
+- name: Pin drifted LMS server prefs via the pref command
+  ansible.builtin.uri:
+    url: "{{ lms_jsonrpc_url }}"
+    method: POST
+    body_format: json
+    body: "{{ {'id': 1, 'method': 'slim.request', 'params': ['', ['pref', item, lms_server_prefs[item]]]} }}"
+  loop: "{{ lms_prefs_drift_before }}"
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Read LMS server prefs back after pinning
+  ansible.builtin.include_tasks: server_prefs_read.yml
+  vars:
+    lms_prefs_read_phase: after
+  when:
+    - not ansible_check_mode
+    - lms_prefs_drift_before | length > 0
+
+# splitList and useTPE2AsAlbumArtist are read by the scanner, so LMS answers a
+# change with a wipecache. dontTriggerScanOnPrefChange "1" turns that into a
+# QUEUED wipe. It is held in memory, lost on a restart, and run by the next
+# rescan of any kind. mediadirs: a removed folder queues a wipe the same way, but
+# an ADDED folder starts a scan of that folder immediately.
+# Placed after the read-back and limited to prefs that no longer drift. A value
+# LMS REJECTED fires no handler, and the first version of this warning claimed a
+# queued wipe for one (seen on the falsification run).
+- name: Warn that a scan-affecting pref was corrected
+  ansible.builtin.debug:
+    msg: >-
+      Corrected scan-affecting LMS pref(s) {{ lms_scan_prefs_corrected }}.
+      LMS has queued a wipecache that the next rescan of any kind will run (a
+      folder ADDED to mediadirs is scanned at once instead). The library still
+      reflects the OLD values until that rescan completes.
+  vars:
+    lms_scan_prefs_corrected: >-
+      {{ lms_prefs_drift_before
+         | intersect(['splitList', 'useTPE2AsAlbumArtist', 'mediadirs'])
+         | difference(lms_prefs_drift) }}
+  when:
+    - not ansible_check_mode
+    - lms_prefs_drift_before | length > 0
+    - lms_scan_prefs_corrected | length > 0
+
+# The read-back is from the running server, so it proves LMS accepted each value.
+# It does not prove the value reached disk: LMS saves server.prefs 10 s later.
+# If the container stops inside that window, the next run sees the drift again
+# and corrects it again.
+- name: Assert every pinned LMS server pref now holds its value
+  ansible.builtin.assert:
+    that:
+      - lms_prefs_drift | length == 0
+    fail_msg: >-
+      LMS did not accept {{ lms_prefs_drift }}. Live values:
+      {{ lms_prefs_drift | map('extract', lms_prefs_live) | list | to_json }}.
+      The pref command replies success even when a validator rejects a value
+      (mediadirs needs a list of unique directories that exist inside the
+      container), so look in the LMS server log for the rejection.
+    quiet: true
+  when:
+    - not ansible_check_mode
+    - lms_prefs_drift_before | length > 0

@@ -72,6 +72,22 @@ sudo chmod -R 755 /data/lyrion/config
 
 All variables are templated by Ansible from `ansible/roles/services/lms/templates/env.j2`.
 
+## Server Preferences (pinned)
+
+The role pins 20 Lyrion server preferences on every deploy (`defaults/main.yml` →
+`lms_server_prefs`): the artist-list roles, compilation handling, tag splitting,
+library scope and per-artist release-type grouping. It uses LMS's own `pref`
+command over JSON-RPC against the running server, and reads every value back.
+It never edits `server.prefs`, which LMS overwrites from memory and which, if it
+fails to parse, resets every server and player pref. Run only the pin:
+
+```bash
+task deploy:service -- --tags lms_prefs --limit n5pro_docker
+```
+
+What each preference does in the LMS 9.1.2 code, with source citations and the
+consequences for tagging, is in **[SERVER_PREFS.md](SERVER_PREFS.md)**.
+
 ## Deployment
 
 Deployed via Ansible:

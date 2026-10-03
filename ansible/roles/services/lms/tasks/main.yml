@@ -146,3 +146,15 @@
   when:
     - not ansible_check_mode
     - lms_restart_needed | bool
+
+# Last, so LMS is serving with its final container and custom-init.sh. The task
+# file explains why the pins go through JSON-RPC and not server.prefs.
+# `--tags lms_prefs` runs only the pin. `apply:` is what makes that work: on a
+# dynamic include, a bare `tags:` tags the include statement only, so the tasks
+# inside would be filtered out and the run would silently do nothing.
+- name: Pin LMS server preferences
+  ansible.builtin.include_tasks:
+    file: server_prefs.yml
+    apply:
+      tags: [lms_prefs]
+  tags: [lms_prefs]
