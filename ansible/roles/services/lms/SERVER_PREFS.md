@@ -1,6 +1,6 @@
 # Lyrion server preferences: what we pin, and how LMS treats each one
 
-The `lms` role pins 20 server preferences (`defaults/main.yml` → `lms_server_prefs`)
+The `lms` role pins 21 server preferences (`defaults/main.yml` → `lms_server_prefs`)
 on every deploy. This page explains what each one does inside Lyrion, based on the
 code that actually runs. It was written for the music-library retag (#142), whose
 tags these preferences interpret.
@@ -66,11 +66,12 @@ so a container stop inside that window loses it, and the next run puts it back.
 | `useTPE2AsAlbumArtist` | `1` | `1` | **scan** (MP3 only) | **queues a wipecache** |
 | `splitList` | `;` | `;` | **scan** | **queues a wipecache** |
 | `mediadirs` | `[/music]` | `[/music]` in Docker | scan | removed dir: queued wipe; added dir: **immediate** scan of it |
+| `ignoreDirRE` | `^extras$` | empty | **scan** + folder browse | clears a query cache only. **No rescan is queued** |
 | `groupArtistAlbumsByReleaseType` | `1` | `0` | browse | clears the web page cache |
 
-The only values the first apply changed were `variousArtistsString` (unset →
-`Various Artists`) and `groupArtistAlbumsByReleaseType` (0 → 1). The rest pin
-values that were already live.
+The first apply changed only `variousArtistsString` (unset → `Various Artists`)
+and `groupArtistAlbumsByReleaseType` (0 → 1). `ignoreDirRE` was added later
+(empty → `^extras$`, 2026-10-03). The rest pin values that were already live.
 
 ## dontTriggerScanOnPrefChange
 
@@ -296,6 +297,39 @@ Never read at scan time. It only affects browsing.
 - Read-only `/music` is safe. Artwork goes to the cache dir and playlists to
   `playlistdir` (`Docker.pm:52-53`). No code was found writing into a media dir
   (INFERRED, the search was not exhaustive).
+
+## ignoreDirRE (`^extras$`)
+
+Keeps mcl's `extras/` folders (cue sheets, rip logs, bonus material filed beside
+an album, `mcl/layout/names.py:73`) out of the library.
+
+- **What it is matched against.** `fileFilter` tests every candidate's NAME, the
+  basename of both files and folders (`Slim/Utils/Misc.pm:840-842`). It is never
+  matched against the full path. The test is `$item =~ /$ignore/`: a Perl regex,
+  unanchored unless you anchor it, case-sensitive.
+  - `^extras$` therefore excludes an entry named exactly `extras` at any depth.
+  - It does **not** exclude `Extras`, `extras (1)`, or a path like
+    `extras/Disc 1` matched as a whole.
+  - mcl writes the lowercase name. As of 2026-10-03 no `extras` folder existed
+    yet in `/music` at any case (checked to depth 6).
+- **A matching folder is pruned with everything under it.** The scanner walks
+  with `folderFilter` → `fileFilter` (`Slim/Utils/Scanner.pm:119-123`,
+  `Utils/Scanner/Local/Async.pm:63-67`).
+- **The same filter applies elsewhere.** The local-artwork search
+  (`Slim/Music/Artwork.pm:135`), the Music Folder browse view
+  (`Slim/Utils/Misc.pm:1008`) and the Linux auto-rescan watcher
+  (`Utils/AutoRescan/Linux.pm:130,144`) all use it.
+- **A change triggers no rescan.** Its only change handler is
+  `Slim::Control::Queries->wipeCaches`, which resets an in-memory query cache
+  (`Prefs.pm:575-577`, `Control/Queries.pm:6098-6103`). Tracks already scanned
+  from a newly excluded folder stay in the library until the next rescan. The role
+  prints its own warning when it corrects this pref, because the general
+  "queued a wipecache" warning would be false here.
+- **No validator.** An invalid regex is accepted by `pref` and would then throw
+  wherever `fileFilter` runs (INFERRED from `$item =~ /$ignore/`, not tested).
+  Check a new pattern with `perl -e '"x" =~ /PATTERN/'` before pinning it.
+- **Default is empty** (`Prefs.pm:145`). Only the Synology OS module sets one
+  (`Utils/OS/Synology.pm:86-88`).
 
 ## groupArtistAlbumsByReleaseType (`1`)
 
