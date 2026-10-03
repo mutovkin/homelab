@@ -125,6 +125,19 @@
     - lms_prefs_drift_before | length > 0
     - lms_scan_prefs_corrected | length > 0
 
+# ignoreDirRE is read by the scanner too, but unlike the prefs above, changing
+# it fires no wipecache. Its only change handler clears an in-memory query cache.
+# Entries it now excludes stay in the library until a rescan, so say that.
+- name: Warn that ignoreDirRE was corrected without a rescan
+  ansible.builtin.debug:
+    msg: >-
+      Corrected LMS ignoreDirRE. LMS queues NO rescan for this pref: files and
+      folders it now excludes stay in the library until a full rescan runs.
+  when:
+    - not ansible_check_mode
+    - "'ignoreDirRE' in lms_prefs_drift_before"
+    - "'ignoreDirRE' not in lms_prefs_drift"
+
 # The read-back is from the running server, so it proves LMS accepted each value.
 # It does not prove the value reached disk: LMS saves server.prefs 10 s later.
 # If the container stops inside that window, the next run sees the drift again

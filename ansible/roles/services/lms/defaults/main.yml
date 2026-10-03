@@ -46,6 +46,14 @@ lms_server_prefs:
   mediadirs:
     - /music
 
+  # Skip mcl's `extras/` folders (cue sheets, rip logs, bonus material) in the
+  # scan, in artwork lookup and in Music Folder browsing. Matched against each
+  # file and folder NAME, not its path: an unanchored, case-sensitive Perl
+  # regex, so it hides `extras` but not `Extras`. A change queues NO rescan.
+  # Entries already scanned stay in the library until the next rescan
+  # (SERVER_PREFS.md).
+  ignoreDirRE: "^extras$"
+
   # Per-artist release grouping: Album / EP / Single / Compilation. Display only;
   # a change needs no rescan.
   groupArtistAlbumsByReleaseType: "1"
