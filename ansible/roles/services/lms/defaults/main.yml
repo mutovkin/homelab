@@ -1,0 +1,51 @@
+---
+# Lyrion server preferences pinned by tasks/server_prefs.yml. Set through LMS's
+# own `pref` command over JSON-RPC (never by editing server.prefs) and read back
+# afterwards. What each one does in the LMS 9.1.2 code, with source citations:
+# SERVER_PREFS.md beside this role.
+#
+# Shape (asserted): every scalar is a QUOTED string, because LMS hands scalars
+# back as strings ("0"). Lists are lists of strings. Order matters: the pins are
+# applied top to bottom, so dontTriggerScanOnPrefChange must come first. It makes
+# any splitList/useTPE2AsAlbumArtist/mediadirs correction QUEUE its wipecache
+# instead of starting it. A misspelt name is NOT caught: LMS reads an unknown
+# pref as null, and `pref` would then create it.
+lms_server_prefs:
+  # Guards this role's own side effects. "1" is the LMS default and the live value.
+  dontTriggerScanOnPrefChange: "1"
+
+  # Artist list: album artists only. With useUnifiedArtistsList "0" the four
+  # *InArtists flags do not change the browse menus (SERVER_PREFS.md).
+  useUnifiedArtistsList: "0"
+  trackartistInArtists: "0"
+  composerInArtists: "0"
+  conductorInArtists: "0"
+  bandInArtists: "0"
+
+  # Which roles make an album link on artist pages. These, not *InArtists, drive
+  # the links, and Settings > Behaviour rewrites all of them on every save.
+  # Pinned at their live values (2026-10-02).
+  artistAlbumLink: "1"
+  albumartistAlbumLink: "1"
+  trackartistAlbumLink: "0"
+  composerAlbumLink: "0"
+  conductorAlbumLink: "0"
+  bandAlbumLink: "0"
+
+  # Compilations. variousArtistsString is pinned to the text the retag writes
+  # into ALBUMARTIST. Left unset, the VA name follows the server language, and a
+  # language change would split tagged VA albums into a second contributor.
+  variousArtistAutoIdentification: "1"
+  variousArtistsString: "Various Artists"
+
+  # Tag reading (scan-time). A change queues a full wipecache rescan.
+  useTPE2AsAlbumArtist: "1"
+  splitList: ";"
+
+  # Library scope. NFS share, mounted read-only into the container.
+  mediadirs:
+    - /music
+
+  # Per-artist release grouping: Album / EP / Single / Compilation. Display only;
+  # a change needs no rescan.
+  groupArtistAlbumsByReleaseType: "1"
