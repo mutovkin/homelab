@@ -54,11 +54,11 @@ so a container stop inside that window loses it, and the next run puts it back.
 | Pref | Pinned | LMS default | Read at | Changing it… |
 | ---- | ------ | ----------- | ------- | ------------ |
 | `dontTriggerScanOnPrefChange` | `1` | `1` | change time | 1→0 runs any queued scan now |
-| `useUnifiedArtistsList` | `0` | `0` | browse | rebuilds menus, clears caches |
-| `trackartistInArtists` | `0` | `0` | browse (unified only) | clears caches |
-| `composerInArtists` | `0` | `0` | browse (unified only) | clears caches |
-| `conductorInArtists` | `0` | `0` | browse (unified only) | clears caches |
-| `bandInArtists` | `0` | `0` | browse (unified only) | clears caches |
+| `useUnifiedArtistsList` | `1` | `0` | browse | rebuilds menus, clears caches |
+| `trackartistInArtists` | `0` | `0` | browse (live: unified is on) | clears caches |
+| `composerInArtists` | `0` | `0` | browse (live: unified is on) | clears caches |
+| `conductorInArtists` | `0` | `0` | browse (live: unified is on) | clears caches |
+| `bandInArtists` | `0` | `0` | browse (live: unified is on) | clears caches |
 | `artistAlbumLink`, `albumartistAlbumLink` | `1` | `1` | browse | clears caches |
 | `trackartist`/`composer`/`conductor`/`bandAlbumLink` | `0` | derived (below) | browse | clears caches |
 | `variousArtistAutoIdentification` | `1` | `1` | browse | clears caches |
@@ -71,7 +71,8 @@ so a container stop inside that window loses it, and the next run puts it back.
 
 The first apply changed only `variousArtistsString` (unset → `Various Artists`)
 and `groupArtistAlbumsByReleaseType` (0 → 1). `ignoreDirRE` was added later
-(empty → `^extras$`, 2026-10-03). The rest pin values that were already live.
+(empty → `^extras$`, 2026-10-03), and `useUnifiedArtistsList` was switched 0 → 1
+the same day (next section). The rest pin values that were already live.
 
 ## dontTriggerScanOnPrefChange
 
@@ -97,8 +98,36 @@ its own. The role prints a warning instead, and the operator decides when to res
 
 ## The artist list: useUnifiedArtistsList and the four *InArtists flags
 
-**`useUnifiedArtistsList` is the master switch**, and at `0` it makes the four
-`*InArtists` flags almost irrelevant.
+**`useUnifiedArtistsList` is the master switch.** At `0` it makes the four
+`*InArtists` flags almost irrelevant. At `1`, the pinned value since 2026-10-03,
+they decide which extra roles join the list.
+
+**Pinned at `1`: one "Artists" list of album owners.** The owner asked for this,
+relayed by the music-cleanup session. Measured after the post-retag full rescan,
+before the switch: "All Artists" listed 854 contributors and "Album Artists" 194.
+The other 660 were guests, track artists on compilations and composers.
+
+- **Which roles.** The unified list uses `activeContributorRoles(0)`
+  (`Queries.pm:1116-1120`): ARTIST plus ALBUMARTIST, plus any role whose
+  `*InArtists` flag is `1` (all four are pinned `0`), plus active user-defined
+  roles (there are none). TRACKARTIST is not included unless
+  `trackartistInArtists` is `1` (`Contributor.pm:158-168`).
+- **Compilations.** With `variousArtistAutoIdentification` on, `$va_pref` is
+  true (`Queries.pm:1039`). Contributors are then counted only through
+  non-compilation albums (`:1212`), and one synthetic Various Artists entry is
+  added (`:1273-1280`, `:1416-1432`). Its name follows `variousArtistsString`.
+- **Menus.** The single "Artists" node (`BrowseLibrary.pm:508`) replaces "Album
+  Artists" and "All Artists" (`:516-546`). ExtendedBrowseModes rebuilds its
+  menus on the change (`Plugin/ExtendedBrowseModes/Plugin.pm:56`).
+- **Genre drill-down and New/Recently Played Artists** drop their
+  `role_id:ALBUMARTIST` filter in unified mode (`BrowseLibrary.pm:1312`,
+  `Plugin.pm:292,306`), so they also follow `activeContributorRoles`.
+- **Switching it starts no scan.** The change handlers are in-memory only:
+  `initializeRoles`, `Slim::Schema->wipeCaches`, the XMLBrowser cache and the
+  ExtendedBrowseModes menu rebuild.
+
+The rest of this section describes the two-menu mode, what each role means and
+why the flags are pinned.
 
 - **Menus.** At `0` the home menu shows **Album Artists** (`role_id:ALBUMARTIST`)
   and **All Artists** (no role filter) (`Slim/Menu/BrowseLibrary.pm:516-546`). The
@@ -139,10 +168,10 @@ its own. The role prints a warning instead, and the operator decides when to res
   `Schema.pm:2302-2323`) and a menu-cache clear (`Web/XMLBrowser.pm:43-46`).
   **No rescan.** The scanner reads none of them.
 
-**Why the role pins them anyway.** At `0` they barely matter. But
-`useUnifiedArtistsList` can be switched on by anyone using the Settings page, and
-from that moment the flags decide the artist list. Pinning both keeps the list
-album-artists-only either way.
+**Why the flags are pinned.** With `useUnifiedArtistsList` at `1` they are live.
+A Settings → Behaviour save writes all four, and any `1` would add that whole role
+(every guest, composer, conductor or band) to the Artists list. Pinned at `0`,
+the list stays album owners only.
 
 ## Album links on artist pages: the *AlbumLink prefs
 
