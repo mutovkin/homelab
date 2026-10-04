@@ -14,9 +14,14 @@ lms_server_prefs:
   # Guards this role's own side effects. "1" is the LMS default and the live value.
   dontTriggerScanOnPrefChange: "1"
 
-  # Artist list: album artists only. With useUnifiedArtistsList "0" the four
-  # *InArtists flags do not change the browse menus (SERVER_PREFS.md).
-  useUnifiedArtistsList: "0"
+  # Artist list: one "Artists" menu holding album owners only, ARTIST plus
+  # ALBUMARTIST roles. Contributors whose only albums are compilations are
+  # excluded, and a single Various Artists entry is added. This replaces the
+  # "Album Artists" + "All Artists" pair (the latter had 854 entries, of which
+  # 194 were album artists). In unified mode the four *InArtists flags below are
+  # LIVE: each "1" would add that role to the list. Changed "0" -> "1" on
+  # 2026-10-03 at the owner's request, relayed by the music-cleanup session.
+  useUnifiedArtistsList: "1"
   trackartistInArtists: "0"
   composerInArtists: "0"
   conductorInArtists: "0"
