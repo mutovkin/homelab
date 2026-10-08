@@ -166,7 +166,12 @@ Hard-won lessons — check here before debugging from scratch.
   postgres 18.6→18.6, identical down to the `18.6-1.pgdg13+2` pgdg revision). Adopt them
   anyway — base-layer CVE patching is the value — but with no application delta the risk is
   the RUNTIME, not the changelog: a rebuilt image is a new `/usr/bin/ping`, so the
-  setuid/fscaps carve-out above is precisely what to re-verify.
+  setuid/fscaps carve-out above is precisely what to re-verify. **Nor is a moved index
+  digest even a moved image:** watchtower, Hub and the containerd store's local `.Id` all
+  speak the multi-arch INDEX digest, which moves when ANY platform is repushed — #296's
+  notified `postgres:18` was a riscv64-only repush over a byte-identical amd64 image. Compare
+  the linux/amd64 config digest from the registry before calling anything a rebuild (and
+  before rejecting a rollback tag whose index differs).
   See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md)
   and [docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md](docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md).
 - **nftables `hook input` is inert for docker-published ports.** Docker DNATs published
