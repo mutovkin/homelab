@@ -1,19 +1,16 @@
 ---
 title: "A Watchtower notification names what it staged, not what a deploy will adopt"
 date: 2026-09-17
-last_updated: 2026-09-20
+last_updated: 2026-10-08
 category: integration-issues
 module: containers
 problem_type: integration_issue
 component: tooling
 symptoms:
   - "the version a deploy lands is newer than the version watchtower's mail reported"
-  - "docker image inspect <repo>:latest shows an older version than a fresh pull adopts"
-  - "release notes were reviewed for one version but a different version went live"
-  - "two services in one deploy land a version ahead of the notification, three land exactly on it"
-  - "a pre-bump review misses removals because it read the wrong release's notes"
-  - "a bump log records a version change that never happened"
+  - "docker image inspect <repo>:latest corroborates the notification while the registry has already moved on"
   - "watchtower reports a new digest but the application version is unchanged"
+  - "watchtower reports a new digest but the linux/amd64 manifest and config digests are identical to the running image"
   - "the superseded image has no upstream tag to roll back to"
 root_cause: incorrect_assumption
 resolution_type: workaround
@@ -24,16 +21,16 @@ related_components:
   - services/_deploy
   - community.docker.docker_compose_v2
   - services/observability
+  - services/postgresql
 tags:
   - docker
   - watchtower
   - image-updates
-  - latest-tag
   - registry
-  - deploy
-  - verification
   - rebuild
   - rollback
+  - containerd
+  - multi-arch
 ---
 
 # A Watchtower notification names what it staged, not what a deploy will adopt
@@ -104,6 +101,20 @@ curl -s https://hub.docker.com/v2/repositories/grafana/grafana/tags/latest \
 *before* the deploy, both *after* the scan that produced the mail. The three that matched
 simply had not been repushed in that window. So the failure is silent and intermittent: most
 images agree most of the time, which is precisely what makes the assumption survive.
+
+**It recurred in #296 (2026-10-08, eq12_docker), on two of seven adopted images.** This time
+the further-on image was a rebuild at the same version, not a newer release:
+
+| Image | Notification said | Deploy landed |
+| --- | --- | --- |
+| `telegraf:latest` | 1.40.1, built 2026-09-21 (`90da3a5b8142`) | **1.40.1, built 2026-10-06** (`e91237482edc`; amd64 `09c3f2a6e398`, config `b06095d88197`) |
+| `postgres:18` | `5a5a84b19854`, not a new image at all (see [below](#a-new-index-digest-is-not-a-new-image-296-2026-10-08)) | **18.6, built 2026-10-06** (`74935e722416`; amd64 config `29754c7520f4`) |
+
+The other five (VictoriaMetrics, VictoriaLogs, vector, grafana, vaultwarden) landed as notified.
+Registry digests were resolved at 03:24Z and again at 03:32Z, immediately before the apply, with
+no drift between the two checks. Same-version drift still matters: the runtime checks for a
+rebuild (`getcap /usr/bin/ping`, the metric-name set) have to run against the image that
+LANDED, built 10-06, not the 09-21 build the mail named.
 
 ## Why it matters more than a version-number nit
 
@@ -212,9 +223,99 @@ would roll back to now points at the image you just adopted:
 
 Measured after #282's apply: all three report `containers=0`, `RepoTags=[]`,
 `RepoDigests=[]` — plain dangling images the next `docker_prune` deletes, after which the
-rebuild-class ones are unrecoverable. So for a rebuild, record honestly that the image-side
-rollback is local-only and time-limited, and lean on the data-side fallback where one exists
+rebuild-class ones have no TAG left to pull. They are not necessarily gone: measured in #296
+(2026-10-08), `library/postgres@sha256:4ef4dbc939d6…`, `library/telegraf@sha256:c25bff1bb4bf…`
+and `library/postgres@sha256:86c951e05bf5…` all still served their manifest and config by
+digest — but upstream makes no promise to keep an untagged index, so treat by-digest pulls as
+best-effort. So for a rebuild, record honestly that the image-side rollback is untagged and
+time-limited, and lean on the data-side fallback where one exists
 (the verified `pg_dumpall` for postgres). Tracked as #284.
+
+## A new index digest is not a new image (#296, 2026-10-08)
+
+The two errors above form a chain: "the tag moved" does not mean "the version moved". #296
+measured one more step down: **the tag moved, but nothing for our platform moved at all.**
+
+Every digest the #275 and #282 sections quote (watchtower's, Docker Hub's `digest`, the local
+`.Id` on the containerd store) is the multi-arch **index** (manifest-list) digest. The index lists
+one manifest per platform, and its digest changes whenever any entry or annotation changes,
+including entries for platforms we never pull. Measured on eq12_docker, from the registry API
+and `docker image inspect`:
+
+| | Index digest | linux/amd64 manifest | config | `Created` | `PG_VERSION` |
+| --- | --- | --- | --- | --- | --- |
+| `postgres:18` running | `86c951e05bf5` | `0377e72c5289` | `662db3da228c` | 2026-09-19T00:36:15.60117931Z | `18.6-1.pgdg13+2` |
+| `postgres:18` notified | **`5a5a84b19854`** | `0377e72c5289` | `662db3da228c` | 2026-09-19T00:36:15.60117931Z | `18.6-1.pgdg13+2` |
+| `postgres:18` at deploy (landed) | `74935e722416` | `885953109528` | **`29754c7520f4`** | 2026-10-06T01:33Z | `18.6-1.pgdg13+2` |
+
+Both indexes have 16 entries (8 platforms, each with its attestation manifest), and diffed
+entry by entry they differ ONLY in `linux/riscv64` (`7a77e12ff4d5` → `8e8f50c979fc`) and that
+platform's attestation; no top-level annotation moved. The notified "update" was an index-only
+repush: a different index digest over the byte-identical amd64 image. The digest→tag lookup in the #282 section
+would have classified it as a rebuild at 18.6. It was not even that. By the deploy the registry
+had moved again, to a real 2026-10-06 base-layer rebuild, and that is what landed.
+
+So there are three levels. A level-1 change alone changes nothing that runs; level 2 does even
+without level 3 (that is a rebuild — the landed postgres and telegraf here); level 3 is a
+version bump:
+
+| Level | What moved | How to tell |
+| --- | --- | --- |
+| 1. Index | the tag's index digest | Hub `digest`, watchtower's mail, local `.Id` |
+| 2. Platform image | linux/amd64 manifest + config digest | the registry API recipe below |
+| 3. Application | the version inside the image | digest→tag lookup (#282 section), then the running binary |
+
+**Why the false level-1 positive is not free.** The containerd store records the container's
+`.Image` as the index digest, so a deploy that adopted `5a5a84b19854` would have looked to
+compose like a new image and recreated postgres. That is an inference from the measured digests
+(the registry moved before it could be tested): a client-visible restart of the primary database,
+plus the `pg_dumpall` the compose file mandates before any postgres bump
+(`roles/services/postgresql/files/compose.yaml`, #83), for zero bytes of change on amd64.
+
+**The rollback check has the same blind spot, in the opposite direction.** After #296,
+`timberio/vector:0.58.0-distroless-static` resolved upstream to index `f41132f36751`, while the
+previously running image was `385a8e948b32`. Both carry amd64 manifest `3e60640c2a00` and config
+`0f797d9892bf`, so it is the same image. (A different shape from postgres: here no platform image
+was repushed at all — only the attestation manifests changed.) A check of "does the rollback tag's digest equal the
+running image?" done at the index level fails here, and reports a valid rollback tag as missing.
+`docker_host`'s prune comment depends on exactly this check ("an immutable upstream tag whose
+digest was verified against the running image"), so it must be done at level 2.
+
+**Recipe: compare at level 2.** This uses no `jq` and nothing beyond python3's stdlib, so it runs
+on both operator platforms. It works for official images (`library/<repo>`) and namespaced ones,
+and for refs that are tags or FULL digests (a truncated digest is an HTTP 400). It expects an
+index: on a single-arch ref there is no `manifests[]` and the script dies with `IndexError` at
+`amd[0]`.
+
+```python
+# manifests.py: print index, linux/amd64 manifest, and config digest per ref
+import json, sys, urllib.request
+repo = sys.argv[1]
+tok = json.load(urllib.request.urlopen(f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"))["token"]
+ACC = ",".join(["application/vnd.oci.image.index.v1+json","application/vnd.docker.distribution.manifest.list.v2+json","application/vnd.oci.image.manifest.v1+json","application/vnd.docker.distribution.manifest.v2+json"])
+def get(ref):
+    r = urllib.request.Request(f"https://registry-1.docker.io/v2/{repo}/manifests/{ref}", headers={"Authorization": "Bearer "+tok, "Accept": ACC})
+    with urllib.request.urlopen(r) as resp: return resp.headers.get("Docker-Content-Digest"), json.load(resp)
+for ref in sys.argv[2:]:
+    d, idx = get(ref)
+    amd = [m for m in idx.get("manifests", []) if m.get("platform", {}).get("architecture") == "amd64" and m["platform"].get("os") == "linux"]
+    _, man = get(amd[0]["digest"])
+    print(f"{ref:12} list={d[7:19]} amd64={amd[0]['digest'][7:19]} config={man['config']['digest'][7:19]}")
+```
+
+```bash
+running=$(ssh root@<host> "docker inspect -f '{{.Image}}' postgres")   # full index digest — on the containerd image store only
+python3 -I manifests.py library/postgres "$running" sha256:<notified-full-digest> 18
+# overlay2 instead: .Image is the CONFIG digest, which the registry cannot resolve. Take the
+# index digest from the image's RepoDigests (outer single quotes: the $(...) runs on the host).
+# A dangling image has RepoDigests=[] and this fails with "index out of range" -> empty $running.
+#   running=$(ssh root@<host> 'docker image inspect -f "{{index .RepoDigests 0}}" "$(docker inspect -f "{{.Image}}" postgres)"' | cut -d@ -f2)
+```
+
+Read the output this way. Same `config` means the same image: skip the bump (and the
+recreate). Different `config` means a real image change: map it to a version and run the
+rebuild or version-bump checks above. The same command with the rollback tag in place of
+`18` verifies a rollback path.
 
 ## Fix
 
@@ -234,16 +335,24 @@ rollback is local-only and time-limited, and lean on the data-side fallback wher
    overlay2 docker reports a container's `.Image` as the config-blob digest, and those
    two never match. This host runs the **containerd image store** (`docker info` →
    `driver=overlayfs`, with the real bulk under `/var/lib/containerd`), which records
-   the image by its manifest digest instead — so they are equal. Measured on stable
+   the image by its index (manifest-list) digest instead — so they are equal. Measured on stable
    pinned tags: `postgres:18` Hub list digest `86c951e05bf5…` = local `.Id`
    `86c951e05bf5…`; `dpage/pgadmin4:9` `c332c5f6dfba…` = `c332c5f6dfba…`; likewise all
    five images in the table above. The portable form, correct on either storage
    backend, is `docker image inspect <repo>:<tag> --format '{{index .RepoDigests 0}}'`.
 
+   **Equal proves identity, but unequal does not prove a difference.** Every digest in this
+   comparison, `RepoDigests` included, is an index digest, and an index can be repushed over a
+   byte-identical amd64 image (measured #296: `postgres:18` `5a5a84b19854` vs running
+   `86c951e05bf5`, same amd64 config `662db3da228c`). On a mismatch, run the level-2 recipe in
+   [A new index digest is not a new image](#a-new-index-digest-is-not-a-new-image-296-2026-10-08)
+   before concluding anything changed.
+
    A worked non-match: `searxng:latest` resolved locally to `0e8d3a8df66b…` against a
    Hub digest of `547fdc19b455…`. That is not a digest-type mismatch — searxng is
    `enable`-only and auto-updates, so its tag had simply moved on again. A mismatch
-   here means "the tag moved", which is the signal you are looking for.
+   here means "the tag moved" — the signal to look closer, but not yet proof that
+   the amd64 image moved (see the paragraph above).
 2. After the deploy, read the landed version out of the **running container** and record it:
    ```bash
    docker exec grafana grafana server -v
@@ -260,6 +369,10 @@ rollback is local-only and time-limited, and lean on the data-side fallback wher
 
 - **Inspecting the local `:latest` tag.** It shows Watchtower's staged image. This is the
   specific check that looks like independent confirmation and is not.
+- **Comparing index digests to decide "same image or not".** It is right only when they are
+  equal. An index-only repush gives a new index digest over an unchanged amd64 image, which in
+  #296 made a no-op look like a postgres update and made a valid vector rollback tag look like
+  a different image. Compare the linux/amd64 config digest.
 - **Pinning to the notified digest to "lock in" what you reviewed.** Pinning any image to an
   immutable reference opts it out of *all* Watchtower notifications, because Watchtower only
   checks the reference the container runs

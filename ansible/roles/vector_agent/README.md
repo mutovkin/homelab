@@ -289,10 +289,14 @@ from.
 ### Version skew with the container
 
 eq12_docker's Vector container runs `timberio/vector:latest-distroless-static` —
-a floating tag, updated by watchtower. This role pins `0.57.0`. They are equal
-*today* (both measured 0.57.0 on 2026-08-19) and that is a coincidence of timing,
-not a mechanism: the container floats and this does not, so they will drift.
-Tracked as its own follow-up issue.
+a floating tag with the `enable` + `monitor-only` watchtower posture, so watchtower
+only REPORTS a new image and a deliberate `task deploy:service` adopts it. This role
+pins `0.57.0`. The two were equal on 2026-08-19 by coincidence of timing, and have
+since drifted as expected: the container went to 0.58.0 in #216 and to 0.59.0 in #296
+(2026-10-08), while this pin stayed. Before moving the pin, review every release in
+between: 0.58.0 (the one that REMOVED `buffer_byte_size`) is written up in
+[removed-metric-did-not-go-nodata-mixed-version-fleet.md](../../../docs/solutions/integration-issues/removed-metric-did-not-go-nodata-mixed-version-fleet.md),
+0.59.0 in the observability role's bump log.
 
 ## Docker log collection
 
