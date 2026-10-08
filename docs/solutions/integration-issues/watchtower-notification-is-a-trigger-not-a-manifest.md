@@ -306,8 +306,10 @@ for ref in sys.argv[2:]:
 ```bash
 running=$(ssh root@<host> "docker inspect -f '{{.Image}}' postgres")   # full index digest — on the containerd image store only
 python3 -I manifests.py library/postgres "$running" sha256:<notified-full-digest> 18
-# overlay2 instead: .Image is the CONFIG digest, which the registry cannot resolve; use
-#   docker image inspect "$(docker inspect -f '{{.Image}}' postgres)" --format '{{index .RepoDigests 0}}' | cut -d@ -f2
+# overlay2 instead: .Image is the CONFIG digest, which the registry cannot resolve. Take the
+# index digest from the image's RepoDigests (outer single quotes: the $(...) runs on the host).
+# A dangling image has RepoDigests=[] and this fails with "index out of range" -> empty $running.
+#   running=$(ssh root@<host> 'docker image inspect -f "{{index .RepoDigests 0}}" "$(docker inspect -f "{{.Image}}" postgres)"' | cut -d@ -f2)
 ```
 
 Read the output this way. Same `config` means the same image: skip the bump (and the
