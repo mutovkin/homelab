@@ -223,8 +223,12 @@ would roll back to now points at the image you just adopted:
 
 Measured after #282's apply: all three report `containers=0`, `RepoTags=[]`,
 `RepoDigests=[]` — plain dangling images the next `docker_prune` deletes, after which the
-rebuild-class ones are unrecoverable. So for a rebuild, record honestly that the image-side
-rollback is local-only and time-limited, and lean on the data-side fallback where one exists
+rebuild-class ones have no TAG left to pull. They are not necessarily gone: measured in #296
+(2026-10-08), `library/postgres@sha256:4ef4dbc939d6…`, `library/telegraf@sha256:c25bff1bb4bf…`
+and `library/postgres@sha256:86c951e05bf5…` all still served their manifest and config by
+digest — but upstream makes no promise to keep an untagged index, so treat by-digest pulls as
+best-effort. So for a rebuild, record honestly that the image-side rollback is untagged and
+time-limited, and lean on the data-side fallback where one exists
 (the verified `pg_dumpall` for postgres). Tracked as #284.
 
 ## A new index digest is not a new image (#296, 2026-10-08)
@@ -232,8 +236,8 @@ rollback is local-only and time-limited, and lean on the data-side fallback wher
 The two errors above form a chain: "the tag moved" does not mean "the version moved". #296
 measured one more step down: **the tag moved, but nothing for our platform moved at all.**
 
-Every digest this doc has quoted so far (watchtower's, Docker Hub's `digest`, the local `.Id`
-on the containerd store) is the multi-arch **index** (manifest-list) digest. The index lists
+Every digest the #275 and #282 sections quote (watchtower's, Docker Hub's `digest`, the local
+`.Id` on the containerd store) is the multi-arch **index** (manifest-list) digest. The index lists
 one manifest per platform, and its digest changes whenever any entry or annotation changes,
 including entries for platforms we never pull. Measured on eq12_docker, from the registry API
 and `docker image inspect`:
@@ -271,7 +275,8 @@ plus the `pg_dumpall` the compose file mandates before any postgres bump
 **The rollback check has the same blind spot, in the opposite direction.** After #296,
 `timberio/vector:0.58.0-distroless-static` resolved upstream to index `f41132f36751`, while the
 previously running image was `385a8e948b32`. Both carry amd64 manifest `3e60640c2a00` and config
-`0f797d9892bf`, so it is the same image. A check of "does the rollback tag's digest equal the
+`0f797d9892bf`, so it is the same image. (A different shape from postgres: here no platform image
+was repushed at all — only the attestation manifests changed.) A check of "does the rollback tag's digest equal the
 running image?" done at the index level fails here, and reports a valid rollback tag as missing.
 `docker_host`'s prune comment depends on exactly this check ("an immutable upstream tag whose
 digest was verified against the running image"), so it must be done at level 2.
@@ -299,8 +304,10 @@ for ref in sys.argv[2:]:
 ```
 
 ```bash
-running=$(ssh root@<host> "docker inspect -f '{{.Image}}' postgres")   # full index digest on the containerd image store; on overlay2 .Image is the config digest — use RepoDigests
+running=$(ssh root@<host> "docker inspect -f '{{.Image}}' postgres")   # full index digest — on the containerd image store only
 python3 -I manifests.py library/postgres "$running" sha256:<notified-full-digest> 18
+# overlay2 instead: .Image is the CONFIG digest, which the registry cannot resolve; use
+#   docker image inspect "$(docker inspect -f '{{.Image}}' postgres)" --format '{{index .RepoDigests 0}}' | cut -d@ -f2
 ```
 
 Read the output this way. Same `config` means the same image: skip the bump (and the

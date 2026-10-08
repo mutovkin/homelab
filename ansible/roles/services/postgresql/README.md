@@ -243,8 +243,8 @@ deliberately unrecorded. Same convention as `roles/services/watchtower/README.md
 2. **Resolve the notified digest to a VERSION.** A moved tag is not a new PostgreSQL
    release; official images are rebuilt for base-layer patches under the same version tags.
    And check first that the linux/amd64 config digest moved at all: #296's notified digest
-   was an index-only repush over the running image, and adopting it would have bounced the
-   database for nothing. Recipe:
+   was an index-only repush over the running image, and adopting it would (by inference — the
+   registry moved before it could be tested) have recreated the database for nothing. Recipe:
    [watchtower-notification-is-a-trigger-not-a-manifest.md](../../../../docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md#a-new-index-digest-is-not-a-new-image-296-2026-10-08).
 3. **Record object counts on both sides of the apply.** "The database is there" is not a
    verification — tables/indexes per database plus a row count in the real application
