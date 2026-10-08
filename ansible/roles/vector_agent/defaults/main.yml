@@ -13,10 +13,12 @@
 # changing BOTH lines; see roles/vector_agent/README.md for the procedure and for
 # why watchtower does not cover this package.
 #
-# 0.57.0 is also what the eq12_docker CONTAINER runs today
-# (timberio/vector:latest-distroless-static, measured 2026-08-19). That equality is
-# a coincidence of timing, not a mechanism — the container floats and this pin does
-# not, so they WILL drift. Tracked as its own follow-up issue.
+# The eq12_docker CONTAINER (timberio/vector:latest-distroless-static) floats and
+# this pin does not, so they drift: equal at 0.57.0 on 2026-08-19, the container
+# went to 0.58.0 in #216 and to 0.59.0 in #296 (2026-10-08). Before moving this
+# pin, run the #216 removed-metric grep against every version in between — the
+# container's bump log (roles/services/observability/README.md) records which
+# releases were reviewed.
 vector_agent_version: "0.57.0"
 vector_agent_deb_sha256: "ee24ecf72292ce965b2fefc5439efa9281c75a982c4a90a2295e30561311e88e"
 vector_agent_deb_url: "https://github.com/vectordotdev/vector/releases/download/v{{ vector_agent_version }}/vector_{{ vector_agent_version }}-1_amd64.deb"
