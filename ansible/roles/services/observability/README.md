@@ -1304,7 +1304,9 @@ tag does not imply a new application version: official images are rebuilt for ba
 patches under the same version tags, so the tag moves while the application does not. If
 the digest also carries `1.40.0`, the bump is a rebuild and the honest row says so —
 measured on 2026-09-20 (#282), where two of three "updates" were rebuilds at the running
-version. Runnable digest→tag recipe (namespaced, paginated) and the reasoning:
+version. And a moved digest may not even be a moved image: an index-only repush
+(#296) changes the digest over a byte-identical amd64 image, so compare the linux/amd64
+config digest first. Runnable digest→tag and platform-manifest recipes (namespaced, paginated) and the reasoning:
 [watchtower-notification-is-a-trigger-not-a-manifest.md](../../../../docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md#the-sibling-error-a-moved-digest-is-not-a-version-bump-282-2026-09-20).
 
 | Date | From → To | Notes |

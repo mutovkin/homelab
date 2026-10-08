@@ -661,6 +661,19 @@ rather than about the system, so the question to ask of every asserted field is 
 value it would hold if the fault were present — if that is the value it already
 holds, the control is decoration however carefully the rest of it is built.
 
+### Bump log
+The per-service record of what a floating-tag container actually runs after each
+deliberate update — the only memory a fleet of moving tags has of its own versions.
+
+A row is written from what LANDED, read out of the running container after the deploy,
+never from what an update notification named: the notification is a trigger raised at
+some earlier scan, and the image a deploy adopts may be further on, the same version
+rebuilt, or byte-identical to what was already running. So a row distinguishes a version
+bump from a rebuild from a no-op, and records the rollback path as it actually exists for
+that class — a rebuild has no upstream tag to return to. Applies to Monitor-only
+containers, whose updates are deliberate; a container that updates itself unattended
+has no row to write.
+
 ### Pre-deploy dump
 A backup a service role takes of its own data immediately before handing that data to a
 possibly newer image, so a one-way schema migration always has something to go back to.
