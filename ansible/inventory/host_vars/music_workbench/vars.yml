@@ -60,6 +60,11 @@ linuxbrew_replaces_apt_packages:
   # the purge is declared, not a side effect of libchromaprint-tools going.
   - picard
 
+# roles/sacd_extract (#301): SACD ISO -> DSF for mcl. No package carries it
+# (archive or brew), so the role builds it from a pinned commit; the pin lives
+# in the role's defaults.
+sacd_extract_enabled: true
+
 # Directories the workbench needs on the bound NFS share (#258). Siblings of
 # lossless/compressed inside the ONE exported dataset — plain directories, not
 # datasets, so a move between any two of them stays a rename (#256). Created

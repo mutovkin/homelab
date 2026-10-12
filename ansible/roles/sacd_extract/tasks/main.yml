@@ -1,0 +1,115 @@
+---
+# sacd_extract (#301), built from source at a pinned SHA. Opt-in per host with
+# `sacd_extract_enabled: true` in host_vars.
+
+- name: Install sacd_extract build dependencies
+  ansible.builtin.apt:
+    name: "{{ sacd_extract_build_packages }}"
+    state: present
+
+# Full clone, not shallow: the build stamps `git describe --tags` into the
+# binary, and that needs the tags.
+- name: Check out sacd-ripper at the pinned SHA
+  ansible.builtin.git:
+    repo: "{{ sacd_extract_repo }}"
+    dest: "{{ sacd_extract_src_dir }}"
+    version: "{{ sacd_extract_sha }}"
+    force: true
+  register: sacd_extract_checkout
+
+# The two pins must agree: the release tag has to point at the pinned SHA. If
+# only the SHA is bumped, to an untagged commit, the binary reports
+# `<release>-N-g<hash>`, which a loose version match would pass. The tag is
+# resolved on the REMOTE, not in the checkout, so a --check of a pin bump (the
+# run this exists for) evaluates it too: the checkout has not moved in a dry
+# run. Peeled `^{}` line first (annotated tag), plain line otherwise
+# (lightweight, which 0.3.9.3b is).
+- name: Resolve the release tag on the remote
+  ansible.builtin.command:
+    argv:
+      - git
+      - ls-remote
+      - "{{ sacd_extract_repo }}"
+      - "refs/tags/{{ sacd_extract_release }}"
+      - "refs/tags/{{ sacd_extract_release }}^{}"
+  register: sacd_extract_tag
+  changed_when: false
+  check_mode: false
+
+- name: Assert the release tag is the pinned SHA
+  ansible.builtin.assert:
+    that:
+      - sacd_extract_tag_sha == sacd_extract_sha
+    fail_msg: >-
+      sacd_extract_release={{ sacd_extract_release }} resolves to
+      "{{ sacd_extract_tag_sha | default('<no such tag>', true) }}" on
+      {{ sacd_extract_repo }}, not sacd_extract_sha={{ sacd_extract_sha }}.
+      Bump both pins together.
+    quiet: true
+  vars:
+    sacd_extract_tag_lines: "{{ sacd_extract_tag.stdout_lines | map('split', '\t') | list }}"
+    sacd_extract_tag_peeled: "{{ sacd_extract_tag_lines | selectattr(1, 'equalto', 'refs/tags/' ~ sacd_extract_release ~ '^{}') | map('first') | list }}"
+    sacd_extract_tag_plain: "{{ sacd_extract_tag_lines | selectattr(1, 'equalto', 'refs/tags/' ~ sacd_extract_release) | map('first') | list }}"
+    sacd_extract_tag_sha: "{{ (sacd_extract_tag_peeled + sacd_extract_tag_plain) | first | default('') }}"
+
+- name: Create the sacd_extract install directory
+  ansible.builtin.file:
+    path: "{{ sacd_extract_install_dir }}"
+    state: directory
+    mode: "0755"
+
+# The install path is keyed on the SHA, so `creates:` means "this commit is
+# already built": an unchanged pin is `ok` and a bumped pin builds. The binary
+# is installed under a temporary name and renamed into place, so an interrupted
+# build or copy never leaves a partial file that `creates:` would trust forever.
+- name: Build sacd_extract
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      rm -rf build
+      cmake -S tools/sacd_extract -B build -DCMAKE_BUILD_TYPE=Release
+      cmake --build build -j "$(nproc)"
+      install -m 0755 build/sacd_extract {{ sacd_extract_install_dir }}/.sacd_extract.tmp
+      mv -f {{ sacd_extract_install_dir }}/.sacd_extract.tmp {{ sacd_extract_install_dir }}/sacd_extract
+    chdir: "{{ sacd_extract_src_dir }}"
+    creates: "{{ sacd_extract_install_dir }}/sacd_extract"
+    executable: /bin/bash
+
+- name: Read the built binary's state
+  ansible.builtin.stat:
+    path: "{{ sacd_extract_install_dir }}/sacd_extract"
+  register: sacd_extract_bin
+
+# --check on a pin bump: the checkout, install dir and build report changed,
+# and the tag assert above still runs. Nothing is built, though, so this link
+# task and the version check below are skipped: the dry-run never shows the link
+# moving and cannot test the new binary. On a converged host both run under
+# --check.
+- name: Link sacd_extract onto PATH
+  ansible.builtin.file:
+    src: "{{ sacd_extract_install_dir }}/sacd_extract"
+    dest: "{{ sacd_extract_link }}"
+    state: link
+  # In --check on a first install nothing is built, and a link to a missing
+  # source fails. A converged host still dry-runs it for real.
+  when: sacd_extract_bin.stat.exists or not ansible_check_mode
+
+# Runs the binary the PATH entry reaches, so a dangling link, a missing library
+# or a wrong build fails here, at deploy time, not at mcl's first extraction.
+# The build stamps `git describe --tags --dirty`. At the pinned (tagged) commit
+# that is exactly the release name; a dirty tree or an untagged commit adds a
+# suffix, and a failed describe stamps `NA`. The match is anchored, so all
+# three go red. It runs from the root-owned install dir, because the tool reads
+# a `sacd_extract.cfg` from its working directory and /tmp is world-writable.
+# Read-only, so it also runs under --check once the pinned build exists.
+- name: Check sacd_extract loads and reports the pinned release
+  ansible.builtin.command:
+    argv: ["{{ sacd_extract_link }}", --version]
+    chdir: "{{ sacd_extract_install_dir }}"
+  register: sacd_extract_version
+  changed_when: false
+  failed_when: >-
+    sacd_extract_version.rc != 0
+    or sacd_extract_version.stdout is not search('(?m)^sacd_extract client ' ~ (sacd_extract_release | regex_escape) ~ '$')
+  check_mode: false
+  when: sacd_extract_bin.stat.exists or not ansible_check_mode
