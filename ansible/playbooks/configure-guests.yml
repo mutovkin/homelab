@@ -55,6 +55,8 @@
     - linuxbrew
     - workbench_env # /etc/mcl/env — before the tool roles that read it
     - mcl_snap      # TrueNAS snapshot wrapper (#262)
+    - role: sacd_extract # SACD ISO extractor (#301), opt-in per host
+      when: sacd_extract_enabled | default(false) | bool
   post_tasks:
     # Directories on the bound NAS share (`workbench_share_dirs`, host_vars).
     # Gated on the parent being a LIVE NFS mount: the hookscript refuses to
