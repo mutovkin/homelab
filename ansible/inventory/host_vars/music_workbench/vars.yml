@@ -13,6 +13,15 @@ common_extra_packages:
   - rsync
   - tmux
   - mp3guessenc # MPEG encoder identification from the bitstream (#273); archive 0.27.6~beta = current upstream, no brew formula
+  # Archive extractors for `mcl plan extract` (#299); without them RAR/7z
+  # archives are held as tool_missing. unzip and tar are already on the box.
+  # RAR goes through unrar: this dfsg 7zip lists the Rar/Rar5 FORMATS in `7z i`
+  # but has zero RAR codecs (those ship in 7zip-rar), so it can detect a RAR
+  # and cannot extract one (measured 2026-10-12).
+  # unrar is MULTIVERSE, which the CT template's ubuntu.sources enables — no role
+  # manages apt components, so a template without it fails this install loudly.
+  - unrar
+  - 7zip
 
 # roles/linuxbrew (#258). Formula names, not apt names: mediainfo is
 # `media-info`, fpcalc ships in `chromaprint`.
