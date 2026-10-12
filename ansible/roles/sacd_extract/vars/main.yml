@@ -1,0 +1,14 @@
+---
+# Role-critical, so in vars/ (which outranks inventory) rather than defaults/:
+# an inventory list of the same name would REPLACE it (CLAUDE.md, variable
+# precedence).
+#
+# Build-time packages. They stay installed, because a pin bump rebuilds. Every
+# one is declared here, even though roles/linuxbrew also installs
+# build-essential and git: that is incidental, and its comment calls
+# build-essential a bottle fallback.
+sacd_extract_build_packages:
+  - build-essential
+  - cmake
+  - git
+  - libxml2-dev

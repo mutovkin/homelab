@@ -1,0 +1,24 @@
+---
+# sacd_extract (#301): SACD ISO -> DSF/DFF extractor for the music-cleanup tool.
+# Not in the Ubuntu archive or Homebrew. Source is EuFlo/sacd-ripper (GPL-2.0),
+# the maintained fork: upstream sacd-ripper/sacd-ripper last released 0.3.9.3
+# in 2023-01, while the fork cut 0.3.9.3b on 2025-12-03.
+#
+# BUILT FROM SOURCE, not the release's prebuilt linux binary. That binary links
+# libxml2.so.2, and Ubuntu 26.04 ships only libxml2.so.16 (package libxml2-16;
+# the old SONAME has no package at all). Measured 2026-10-12: the prebuilt build
+# 173 installed cleanly and `ldd` reported `libxml2.so.2 => not found`. A .so.2
+# symlink to .so.16 would be an ABI lie, so the role compiles against the
+# system libxml2 instead.
+#
+# Pinned by full commit SHA, which git verifies by content, in ONE place. This
+# is the commit the 0.3.9.3b tag points at. Bump both lines together.
+sacd_extract_release: "0.3.9.3b"
+sacd_extract_sha: c9af7d40a2a186aee1763ddc4c73f60c32270f8c
+sacd_extract_repo: https://github.com/EuFlo/sacd-ripper.git
+
+sacd_extract_src_dir: /usr/local/src/sacd-ripper
+# Keyed on the SHA, so a bump builds beside the old binary and the symlink
+# switches over. Remove the old directory by hand once the new build is proven.
+sacd_extract_install_dir: "/opt/sacd_extract/{{ sacd_extract_sha[:12] }}"
+sacd_extract_link: /usr/local/bin/sacd_extract
