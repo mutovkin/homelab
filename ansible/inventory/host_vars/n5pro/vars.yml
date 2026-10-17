@@ -255,8 +255,9 @@ proxmox_lxcs:
     nfs_enabled: true
     # order=2 boots after TrueNAS (order=1). The wait for TrueNAS lives on the
     # TrueNAS guest's up= delay, not here (Proxmox up= delays the NEXT guest in
-    # order, so a delay on this guest would do nothing useful). See issue #36.
-    startup: "order=2"
+    # order). See issue #36. This guest's own up=60 is CT 202's (order=3) margin
+    # after the NAS's 180 s (#304) — it delays nothing else; nothing else follows.
+    startup: "order=2,up=60"
     gpu_sharing: true # /dev/dri + /dev/kfd bind-mount for VAAPI and ROCm
     onboot: true
     started: true
@@ -326,22 +327,25 @@ proxmox_lxcs:
       mp0: "/mnt/nfs/music,mp=/music"
     hookscript: local:snippets/nfs-bind-prestart.sh
     # Starts on host boot (#304): after the 2026-10-15 power loss it stayed down
-    # through three host boots because it was `onboot: false`. Boot order needs no
-    # `startup:` here — PVE starts unordered guests after every ordered one, so
-    # TrueNAS (order=1, up=180) and CT 201 (order=2) come first, and the hookscript
-    # then waits up to NFS_BIND_WAIT for /mnt/nfs/music and refuses the start if
-    # the NAS is down. pve-guests (and multi-user.target) sit in that wait, then
-    # carry on — nothing is ordered after this CT. up=180 is a fixed delay, not a
-    # readiness check: if TrueNAS is not serving NFS ~6 min after VM 200's start,
-    # this CT stays down (one "Starting CT 202 failed" journal line) until started.
+    # through three host boots because it was `onboot: false`. Boot sequence (owner,
+    # 2026-10-16: "only after NAS VM is up and may be 1 minute after"): VM 200
+    # starts, its up=180 elapses, CT 201 starts, CT 201's up=60 elapses, THEN this
+    # CT starts — ~240 s after the NAS VM. (up= delays the NEXT order, so the 60 s
+    # has to live on CT 201; this CT's own up= would delay nothing.) The hookscript
+    # stays the safety net: it then waits up to NFS_BIND_WAIT for /mnt/nfs/music and
+    # refuses the start if the NAS is down — pve-guests (and multi-user.target) sit
+    # in that wait, then carry on; nothing is ordered after this CT. up= is a fixed
+    # delay, not a readiness check: if TrueNAS is not serving NFS ~7 min after VM
+    # 200's start, this CT stays down (one "Starting CT 202 failed" journal line).
+    # Shutdown runs the HIGHEST order first, so order=3 stops this CT before CT 201
+    # and VM 200 — it releases the share before the NAS stops (templates/nfs.mount.j2).
+    startup: "order=3"
     onboot: true
     # `started: true` means every infra:hosts run asks for it running, which invokes
     # the NFS start gate: with TrueNAS unreachable the play waits up to NFS_BIND_WAIT
     # (180 s, or ~30 s per stat if the share was already mounted) and then FAILS on
     # this host — loudly, by design. Flip to `started: false` while the NAS is down
     # or on a from-scratch rebuild before the TrueNAS share exists.
-    # No `startup:` order, deliberately — PVE also STOPS unordered guests first, so
-    # this CT releases the share before VM 200 shuts down; see templates/nfs.mount.j2.
     started: true
     tags:
       - workbench
