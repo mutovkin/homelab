@@ -329,8 +329,11 @@ proxmox_lxcs:
     # through three host boots because it was `onboot: false`. Boot order needs no
     # `startup:` here — PVE starts unordered guests after every ordered one, so
     # TrueNAS (order=1, up=180) and CT 201 (order=2) come first, and the hookscript
-    # then waits up to NFS_BIND_WAIT for /mnt/nfs/music and refuses the start
-    # (pve-guests carries on; nothing is ordered after this CT) if the NAS is down.
+    # then waits up to NFS_BIND_WAIT for /mnt/nfs/music and refuses the start if
+    # the NAS is down. pve-guests (and multi-user.target) sit in that wait, then
+    # carry on — nothing is ordered after this CT. up=180 is a fixed delay, not a
+    # readiness check: if TrueNAS is not serving NFS ~6 min after VM 200's start,
+    # this CT stays down (one "Starting CT 202 failed" journal line) until started.
     onboot: true
     # `started: true` means every infra:hosts run asks for it running, which invokes
     # the NFS start gate: with TrueNAS unreachable the play waits up to NFS_BIND_WAIT
