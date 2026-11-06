@@ -4,7 +4,7 @@ apiVersion: 1
 #
 # WHY THIS EXISTS: CT 101's 24G rootfs climbed for six weeks with telegraf
 # exporting every sample and no rule reading any of them —
-# disk_used_percent{host="eq12_docker",path="/"}: 61% (09-22), 79% (10-16),
+# disk_used_percent for eq12_docker, path "/": 61% (09-22), 79% (10-16),
 # 84% (10-22), 92% (10-28), 97% (11-03), 100% at 2026-11-05 12:30Z when a
 # watchtower pull filled it. Host logging stopped, `docker exec` failed, and
 # Ansible itself could no longer run on the guest (#314). An 80% rule would
@@ -135,19 +135,27 @@ groups:
       # ({host="eq12"} 1), so one rule yields one instance per missing host and
       # an empty result when all are reporting — hence noDataState: OK here (the
       # healthy state IS empty), the inverse of the rule above.
-      # THE COST, as in telegraf-health.yaml: each host is pinned by name, so a
-      # new disk-reporting agent is unmonitored until added here. The set is
+      # THE COST, as in telegraf-health.yaml: each host is pinned by name. The
+      # observability role asserts the pinned set equals the telegraf agent set
+      # ("Verify the disk absence rule's pinned host selectors"), so adding a
+      # host to telegraf_agents FAILS the deploy until it is added here. The set is
       # every host that exported disk_used_percent on 2026-11-06 (eq12,
       # eq12_docker, n5pro); n5pro_docker exports none and is covered only via
       # n5pro's subvol series.
       # severity warning: losing a warning-level signal should not page louder
       # than the signal itself; a dead AGENT is already critical elsewhere.
+      # If obs-disk-usage-high is ever raised to critical, raise this with it —
+      # no guard enforces that pairing (it is outside the telegraf-health.yaml
+      # grading guard's view).
       - uid: obs-disk-metrics-absent
         title: Disk capacity metrics missing for a host
         condition: C
         for: 15m
         noDataState: OK
-        execErrState: Alerting
+        # Query errors are owned by obs-disk-usage-high (execErrState Alerting,
+        # with an "UNMONITORED" summary). Alerting here too would send a
+        # duplicate whose summary has no host to name.
+        execErrState: OK
         isPaused: false
         annotations:
           summary: "No disk_used_percent from {{ $labels.host }} for 10+ minutes — its filesystems are unmonitored and any disk alert it had has silently resolved."
