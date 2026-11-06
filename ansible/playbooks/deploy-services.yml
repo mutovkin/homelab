@@ -95,3 +95,20 @@
       loop_control:
         loop_var: service
       tags: always
+
+  # Reap what this deploy just superseded (#316). `pull: always` moves each
+  # service's tag onto the image it adopts, leaving the previous image dangling;
+  # before this, nothing on the deploy path ever removed it, and with watchtower
+  # pulling nightly candidates on top, eq12_docker's rootfs reached 100%. Same
+  # task list as the docker_host role (one file, no drift); dangling-only scope —
+  # tagged images, including not-yet-adopted watchtower candidates, survive.
+  # `always` on both the include and its tasks so a single-service
+  # `--tags <svc>` deploy, the common case, prunes too.
+  post_tasks:
+    - name: Prune dangling images superseded by this deploy
+      ansible.builtin.include_role:
+        name: docker_host
+        tasks_from: prune.yml
+        apply:
+          tags: always
+      tags: always

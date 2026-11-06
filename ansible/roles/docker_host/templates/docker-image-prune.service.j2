@@ -1,0 +1,22 @@
+# {{ ansible_managed }} — roles/docker_host (#316)
+# -> /etc/systemd/system/docker-image-prune.service
+#
+# Removes DANGLING images only (untagged and unused): superseded watchtower
+# candidates and the previous image of a service a deploy has moved past.
+# Tagged images — including a candidate watchtower has pulled but nobody has
+# deployed yet — are never touched, so adopting it later re-downloads nothing.
+# An image a container still runs is refused by docker itself. Volumes, networks,
+# containers and build cache are out of scope. Same scope as tasks/prune.yml.
+#
+# Triggered by docker-image-prune.timer; not enabled on its own.
+
+[Unit]
+Description=Prune dangling docker images (superseded pulls)
+After=docker.service
+# Requisite, not Requires: if dockerd is down this run fails visibly in the
+# journal rather than starting docker as a side effect of housekeeping.
+Requisite=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker image prune --force --filter dangling=true
