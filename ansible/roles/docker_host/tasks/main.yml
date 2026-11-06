@@ -722,20 +722,118 @@
     state: present
   when: nfs_enabled | default(false)
 
-# --- Image retention (#276, #316) ---------------------------------------------
-# The prune itself lives in prune.yml so service deploys can run the identical
-# task list (playbooks/deploy-services.yml). Rationale for dangling-only scope and
-# what it deletes is documented there.
-- name: Prune dangling docker images
-  ansible.builtin.import_tasks: prune.yml
+# --- Image retention (#276) ---------------------------------------------------
+# Why the fleet needs its own prune (written when superseded images were only
+# reaped by this task, i.e. only when someone ran infra:guests; #316 added the
+# daily docker-image-prune.timer below). WATCHTOWER_CLEANUP=true only reaps images from updates
+# WATCHTOWER ITSELF performed; every stateful service here is `monitor-only`, so
+# its images are adopted by a deliberate `task deploy:service` run — a path
+# watchtower never cleans. Watchtower also PULLS a candidate image on every scan to
+# compare digests, so it manufactures superseded images for services it will never
+# update.
+#
+# Measured on eq12_docker 2026-09-17, after the #275 bumps: 44 images, 28 of them
+# dangling, with the root subvol at 95% (1.5 GB free). The real consumer was
+# /var/lib/containerd at 20 GB — 15 GB of it the overlayfs SNAPSHOTTER, only 6.2 GB
+# the content blob store — against /var/lib/docker at 2.5 GB. This daemon uses the
+# containerd image store (`docker info` -> driver=overlayfs), so anything reasoning
+# about /var/lib/docker sizes on this fleet is reading the wrong directory.
+#
+# DANGLING ONLY, and deliberately not `prune -a`. `-a` removes every image no
+# container currently uses, which here would take deliberately-retained references
+# (a pinned watchtower rollback tag, the newest :latest a deploy has not adopted
+# yet) for no gain — the space is in the untagged ones.
+#
+# WHAT THIS DELETES, stated plainly because it is the rollback: the immediately
+# previous image of each service. For a VERSION bump the rollback path is an
+# immutable upstream tag whose digest was verified before the bump and recorded in
+# the role's bump log (roles/services/{observability,joplin,vaultwarden}/README.md).
+# For a REBUILD-class bump (same version tag, new image — telegraf/postgres in
+# #282/#310/#314) NO upstream tag survives (#284): the local superseded image is
+# the only quick rollback, and it lives until the next prune — at most until the
+# 05:00 timer below. That window is why deploys deliberately do NOT prune (#316,
+# operator decision). Postgres' durable fallback is the verified pre-bump
+# pg_dumpall its README mandates. A `docker image
+# prune --filter until=<age>` does NOT protect that image: the filter reads image
+# CREATION time, not when it became superseded, and a just-replaced image is
+# usually weeks old. Do not add one believing it buys a grace period.
+#
+# Volumes are never pruned. Named volumes are where data lives, and a prune that
+# can delete data is not hygiene.
+- name: Read docker disk usage before pruning
+  ansible.builtin.command: docker system df --format '{{ "{{" }}.Type{{ "}}" }}={{ "{{" }}.Reclaimable{{ "}}" }}'
+  register: docker_df_before
+  changed_when: false
+  check_mode: false
   tags: [docker_prune]
 
-# Scheduled prune (#316). The two Ansible paths above only run when someone runs
-# Ansible; watchtower pulls candidate images every night regardless, and on
-# 2026-11-05 that filled CT 101's rootfs to 100% — at which point Ansible itself
-# could not run on the guest (no usable temp dir), so the in-role prune was
-# unreachable exactly when it was needed. A systemd timer has no such
-# dependency: it needs only dockerd.
+# `docker_prune` is necessarily skipped in check mode, which would otherwise leave
+# a dry-run reporting changed=0 for a task that is about to delete gigabytes. Count
+# the candidates with a read-only query instead, so --check says what an apply would
+# take. (The lesson from #275: a dry-run that structurally cannot preview its change
+# must SAY so rather than report a clean recap.)
+- name: Count the dangling images an apply would remove (check mode)
+  ansible.builtin.command: docker images -f dangling=true --format '{{ "{{" }}.ID{{ "}}" }}'
+  register: docker_dangling_preview
+  changed_when: false
+  check_mode: false
+  when: ansible_check_mode
+  tags: [docker_prune]
+
+- name: Report what an apply would prune (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      CHECK MODE: an apply WOULD remove
+      {{ docker_dangling_preview.stdout_lines | default([]) | length }} dangling
+      image(s) on {{ inventory_hostname }}. Reclaimable now:
+      {{ docker_df_before.stdout | default('n/a') }}. changed=0 below means the
+      prune was skipped, NOT that there is nothing to reclaim. Images a container
+      references are never removed, so this count is an upper bound.
+  when: ansible_check_mode
+  tags: [docker_prune]
+
+- name: Prune dangling (untagged, superseded) docker images
+  community.docker.docker_prune:
+    images: true
+    images_filters:
+      dangling: true
+    # Everything else off by name rather than by omission, so a future reader can
+    # see the scope was chosen and not inherited from the module's defaults.
+    containers: false
+    networks: false
+    volumes: false
+    builder_cache: false
+  register: docker_prune_result
+  # An image an existing container references is never removed by prune — docker
+  # refuses — so this cannot pull an image out from under a running service. That
+  # matters more than it looks: a floating tag can move while a container keeps
+  # running the old image, which leaves the RUNNING container's image dangling
+  # (measured: eq12_docker's telegraf ran c25bff1bb4bf while telegraf:latest had
+  # already moved to 777cdbf33325).
+  when: not ansible_check_mode
+  tags: [docker_prune]
+
+- name: Report the space image pruning reclaimed
+  ansible.builtin.debug:
+    msg: >-
+      Pruned {{ docker_prune_result.images | default([]) | length }} dangling
+      image(s), reclaiming
+      {{ ((docker_prune_result.images_space_reclaimed | default(0)) / 1024 / 1024)
+         | round(1) }} MB on {{ inventory_hostname }}.
+      Reclaimable before this run: {{ docker_df_before.stdout | default('n/a') }}
+    verbosity: 0
+  when: not ansible_check_mode
+  tags: [docker_prune]
+
+# --- Scheduled prune (#316) ---------------------------------------------------
+# The task above only runs when someone runs infra:guests. Watchtower pulls
+# candidate images every night regardless, and on 2026-11-05 that filled CT 101's
+# 24G rootfs to 100% — after which Ansible itself could not run on the guest (no
+# usable temp dir), so this role's prune was unreachable exactly when it was
+# needed. A systemd timer needs only dockerd. Daily at
+# docker_image_prune_on_calendar (05:00 host time, after watchtower's 04:30 scan).
+# Deliberately NOT also run at the end of service deploys: that would delete a
+# rebuild-class bump's only rollback seconds after the deploy (see above, #284).
 - name: Deploy the scheduled dangling-image prune service
   ansible.builtin.template:
     src: docker-image-prune.service.j2
@@ -752,6 +850,8 @@
   register: docker_prune_timer_unit
   tags: [docker_prune]
 
+# Gated on `changed` like the role's other unit reloads (rsyslog_structured,
+# vector_agent, telegraf_agent).
 - name: Reload systemd for the prune units
   ansible.builtin.systemd_service:
     daemon_reload: true
@@ -760,12 +860,65 @@
     - docker_prune_service_unit.changed or docker_prune_timer_unit.changed
   tags: [docker_prune]
 
-# UNGATED on `changed` (same reasoning as the rsyslog_structured heartbeat): a
-# timer disabled or stopped outside Ansible must be healed by an ordinary run.
+# UNGATED on `changed` so a timer disabled or stopped outside Ansible is healed by
+# an ordinary run — and NOT skipped wholesale in check mode, so a dry-run of that
+# drift reports `changed` instead of `skipping` (#316 review). Only the first run,
+# when the unit file does not exist yet, cannot be dry-run.
+# `restarted` when the timer file changed, so an OnCalendar edit takes effect now
+# rather than after the next reboot (daemon-reload alone does not re-arm it).
 - name: Ensure the scheduled dangling-image prune timer is enabled and running
   ansible.builtin.systemd_service:
     name: docker-image-prune.timer
     enabled: true
+    state: "{{ 'restarted' if docker_prune_timer_unit.changed else 'started' }}"
+  when: not (ansible_check_mode and docker_prune_timer_unit.changed)
+  tags: [docker_prune]
+
+# PROVE THE UNIT, do not just arm it (#316 review: "a guard you have not seen
+# fail is not a guard"). Enabling a timer only schedules ExecStart; without this
+# the prune command's first-ever execution would be 05:00, unobserved. Type=oneshot
+# blocks until ExecStart exits, so a broken unit (wrong path, sandbox quirk,
+# daemon error) fails THIS task. Proven on a genuinely dangling image when the
+# timer landed: a single-tag image whose tag was moved was removed, a tagged image
+# kept (3.986 MB reclaimed, eq12_docker 2026-11-06).
+- name: Run the scheduled prune once to prove the unit works
+  ansible.builtin.systemd_service:
+    name: docker-image-prune.service
     state: started
+  # Starting a oneshot always reports changed; the space actually reclaimed is
+  # reported by the module prune above. Without this every converged run would
+  # show changed=1 and hide real drift.
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [docker_prune]
+
+# No `state:` — the module then only reads the unit and returns its properties
+# in `.status`, changing nothing.
+- name: Read the prune timer's state and next scheduled run
+  ansible.builtin.systemd_service:
+    name: docker-image-prune.timer
+  register: docker_prune_timer_state
+  check_mode: false
+  when: not ansible_check_mode
+  tags: [docker_prune]
+
+- name: Assert the prune timer is enabled, active and has a next run scheduled
+  vars:
+    _timer: "{{ docker_prune_timer_state.status | default({}) }}"
+  ansible.builtin.assert:
+    that:
+      - _timer.ActiveState == 'active'
+      - _timer.UnitFileState == 'enabled'
+      - (_timer.NextElapseUSecRealtime | default('')) | length > 0
+    fail_msg: >-
+      docker-image-prune.timer on {{ inventory_hostname }} is not armed:
+      ActiveState={{ _timer.ActiveState | default('?') }}
+      UnitFileState={{ _timer.UnitFileState | default('?') }}
+      NextElapseUSecRealtime={{ _timer.NextElapseUSecRealtime | default('?') }}.
+      Without it nothing reaps superseded images between
+      infra:guests runs, and watchtower's nightly pulls fill the rootfs (#314).
+      Check `systemctl status docker-image-prune.timer` and
+      `systemctl list-timers docker-image-prune.timer`.
+    quiet: true
   when: not ansible_check_mode
   tags: [docker_prune]

@@ -13,10 +13,15 @@
 [Unit]
 Description=Prune dangling docker images (superseded pulls)
 After=docker.service
-# Requisite, not Requires: if dockerd is down this run fails visibly in the
-# journal rather than starting docker as a side effect of housekeeping.
+# Requisite, not Requires: housekeeping must never START docker. Note what a
+# missed run looks like if dockerd is down: the job ends with result
+# `dependency`, the unit stays inactive (not `failed`), and the journal gets a
+# "Dependency failed" line — dockerd being down is caught by every other alert.
 Requisite=docker.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker image prune --force --filter dangling=true
+# A oneshot has no start timeout by default; a hung dockerd would leave this unit
+# `activating` forever and turn every later timer firing into a silent no-op.
+TimeoutStartSec=30min
