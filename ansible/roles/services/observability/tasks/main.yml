@@ -218,6 +218,49 @@
           so. Do not delete the guard to get past it.
         quiet: true
 
+# Same guard, for the disk-input absence rule (#315). obs-disk-usage-high covers
+# a new host automatically through `by (host, path)`, but its absence owner pins
+# hosts by name — so without this a new agent gets capacity alerts whose loss
+# silently RESOLVES them, while every deploy stays green. Same expected set,
+# same count-first then set-equality shape, same literal anchor (the usage
+# rule's `{fstype!~...}` selector does not match it, by design).
+- name: Verify the disk absence rule's pinned host selectors
+  vars:
+    _disk_rule_hosts: >-
+      {{ lookup('file', role_path ~ '/files/data/grafana/provisioning/alerting/disk-health.yaml')
+         | regex_findall('disk_used_percent\{host="([^"]+)"') }}
+    _disk_expected_hosts: "{{ ([inventory_hostname] + groups['telegraf_agents']) | unique | sort }}"
+  block:
+    - name: Assert the disk absence rule exposes one pinned host selector per agent
+      ansible.builtin.assert:
+        that:
+          - _disk_rule_hosts | length == _disk_expected_hosts | length
+        fail_msg: >-
+          Expected {{ _disk_expected_hosts | length }} `disk_used_percent{host="..."`
+          selectors in files/data/grafana/provisioning/alerting/disk-health.yaml
+          (obs-disk-metrics-absent), one per agent host {{ _disk_expected_hosts }},
+          but found {{ _disk_rule_hosts | length }}: {{ _disk_rule_hosts }}.
+          TOO FEW: a host has no absence branch, or the expr changed shape (a regex
+          matcher host=~"a|b" is invisible to this literal anchor). TOO MANY: a
+          comment now quotes a selector verbatim — reword it, since a first-match
+          reader would trust the comment. Fix in the same change; do not delete
+          the guard to get past it.
+        quiet: true
+
+    - name: Assert the disk absence rule covers exactly the expected agent hosts
+      ansible.builtin.assert:
+        that:
+          - _disk_rule_hosts | sort == _disk_expected_hosts
+        fail_msg: >-
+          obs-disk-metrics-absent in disk-health.yaml is pinned to
+          {{ _disk_rule_hosts | sort }}, but the agents exporting
+          disk_used_percent are {{ _disk_expected_hosts }} (inventory group
+          `telegraf_agents` plus this stack's host). An unmatched host's disk
+          input can stop and every disk alert it was firing RESOLVES silently.
+          Add an `absent_over_time(...{host="<name>"}[10m])` branch to that expr
+          in the same change that adds the host.
+        quiet: true
+
 # #194: the RAPL absence rules carry a DOMAIN COUNT threshold (`lt 3` for eq12,
 # `lt 1` for n5pro) that duplicates `telegraf_agent_rapl_expected_domains` in
 # host_vars, and nothing at runtime reconciled the two — the #188 matched-pair
