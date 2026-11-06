@@ -91,7 +91,12 @@ proxmox_lxcs:
     ostemplate: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
     cores: 2
     memory: 4096
-    root_disk_size: 24
+    # 24 -> 32 (#314): the containerd image store lives on rootfs
+    # (/var/lib/containerd), and a watchtower pull on 2026-11-05 04:30 filled the
+    # 24G disk to 100% — Ansible could no longer create a temp dir, so the
+    # docker_host dangling-image prune that would have fixed it was deadlocked.
+    # Grown via the `pct resize` reconcile below; ZFS cannot shrink it back.
+    root_disk_size: 32
     storage: local-zfs
     mounts:
       # Allocation form (like CT 201): `mounts` is consumed at CREATE only

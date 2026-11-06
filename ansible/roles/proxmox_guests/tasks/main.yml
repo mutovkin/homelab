@@ -1803,6 +1803,12 @@
     + proxmox_lxcs | rejectattr('started', 'defined') | list }}
   loop_control:
     label: "CT {{ item.vmid }} ({{ item.hostname }})"
+  # Tagged so the resize can run on its own (#314): `pct resize` runs over SSH on
+  # the Proxmox host and needs no API, whereas the provisioning tasks above call
+  # the Proxmox HTTP API from the control machine. A full rootfs is exactly the
+  # moment the API path may be unavailable, and an untagged task cannot be reached
+  # without running provisioning first.
+  tags: [lxc_resize]
 
 - name: Configure GPU device sharing for LXC containers
   ansible.builtin.include_tasks: lxc-gpu-passthrough.yml
