@@ -93,7 +93,9 @@ Two honest caveats on the deliberate-update story:
 - **Pending images accumulate.** Watchtower still *pulls* the candidate image for a
   monitor-only container in order to compare digests, and `WATCHTOWER_CLEANUP=true`
   only removes the old image after an update it actually performed. Superseded pulls
-  become dangling and are reclaimed by a periodic `docker image prune -f`; what remains
+  become dangling and are reclaimed by the dangling-only prune: daily at 05:00 by
+  `docker-image-prune.timer` (#316, after this 04:30 scan; deploys deliberately do not
+  prune, to keep a rebuild's rollback until then — #284); what remains
   is at most one pending tagged image per monitor-only service, which is bounded and
   disappears the moment the update is deployed. Suppressing the pull with a no-pull
   label stays **rejected**, and this is now verified rather than assumed — see below.
