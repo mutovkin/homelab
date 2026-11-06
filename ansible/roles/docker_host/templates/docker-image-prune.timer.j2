@@ -1,0 +1,19 @@
+# {{ ansible_managed }} — roles/docker_host (#316)
+# -> /etc/systemd/system/docker-image-prune.timer
+#
+# Daily, after watchtower's scan (docker_image_prune_on_calendar, host timezone).
+# Runs without Ansible on purpose: when the rootfs filled on 2026-11-05, Ansible
+# could not run on the guest at all, so only a host-local schedule can keep the
+# image store from reaching that state.
+
+[Unit]
+Description=Daily dangling docker image prune
+
+[Timer]
+OnCalendar={{ docker_image_prune_on_calendar }}
+# Persistent=true, unlike the heartbeat: a prune is idempotent housekeeping, so
+# catching up a run missed while the host was down is exactly right.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

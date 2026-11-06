@@ -3,6 +3,14 @@
 docker_log_driver: "json-file"
 docker_log_max_size: "10m"
 docker_log_max_file: "3"
+
+# Scheduled dangling-image prune (#316). systemd OnCalendar, evaluated in the
+# HOST's timezone — the same zone watchtower's cron runs in (both containers and
+# hosts are America/Los_Angeles; watchtower_schedule is "0 30 4 * * *"). 05:00
+# leaves the 04:30 scan time to finish pulling, so the prune reaps the candidate
+# that scan just SUPERSEDED rather than racing it. It never removes the candidate
+# itself: that image holds the tag, and dangling-only scope skips tagged images.
+docker_image_prune_on_calendar: "*-*-* 05:00:00"
 # Fleet default pool. This MUST stay in defaults/ — do NOT "promote" it to
 # roles/docker_host/vars/main.yml on the strength of the CLAUDE.md precedence
 # gotcha: vars/main.yml outranks inventory, so it would silently override
