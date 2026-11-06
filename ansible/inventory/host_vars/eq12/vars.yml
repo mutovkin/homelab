@@ -95,7 +95,8 @@ proxmox_lxcs:
     # (/var/lib/containerd), and a watchtower pull on 2026-11-05 04:30 filled the
     # 24G disk to 100% — Ansible could no longer create a temp dir, so the
     # docker_host dangling-image prune that would have fixed it was deadlocked.
-    # Grown via the `pct resize` reconcile below; ZFS cannot shrink it back.
+    # Grown via the `pct resize` reconcile in roles/proxmox_guests/tasks/main.yml
+    # (`--tags lxc_resize` runs it alone); ZFS cannot shrink it back.
     root_disk_size: 32
     storage: local-zfs
     mounts:
