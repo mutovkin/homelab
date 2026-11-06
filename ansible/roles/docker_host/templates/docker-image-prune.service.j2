@@ -6,7 +6,8 @@
 # Tagged images — including a candidate watchtower has pulled but nobody has
 # deployed yet — are never touched, so adopting it later re-downloads nothing.
 # An image a container still runs is refused by docker itself. Volumes, networks,
-# containers and build cache are out of scope. Same scope as tasks/prune.yml.
+# containers and build cache are out of scope. Same scope as the "Prune dangling"
+# task in roles/docker_host/tasks/main.yml.
 #
 # Triggered by docker-image-prune.timer; not enabled on its own.
 

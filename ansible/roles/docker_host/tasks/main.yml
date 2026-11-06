@@ -850,28 +850,79 @@
   register: docker_prune_timer_unit
   tags: [docker_prune]
 
-# Gated on `changed` like the role's other unit reloads (rsyslog_structured,
-# vector_agent, telegraf_agent).
+# Read BOTH units before reconciling (#316 review round 2). Two consumers:
+#  * NeedDaemonReload is DURABLE state — a run that dies between writing a unit
+#    file and the daemon-reload leaves `changed` spent forever, and a later run
+#    would neither reload nor restart while systemd kept the OLD schedule (the
+#    "arm from durable state, not a one-shot changed" gotcha). Keying the reload
+#    and restart on it as well closes that gap; the final assert re-checks it.
+#  * the service's last Result, so a failing 05:00 run surfaces in the next
+#    apply instead of being silently overwritten by the prove-run below.
+# No `state:` — the module only reads and returns properties in `.status`.
+# A unit that does not exist yet (first run, --check) reads LoadState=not-found.
+- name: Read the prune units' state before reconciling
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+  loop:
+    - docker-image-prune.service
+    - docker-image-prune.timer
+  register: docker_prune_units_before
+  check_mode: false
+  tags: [docker_prune]
+
 - name: Reload systemd for the prune units
+  vars:
+    _stale: >-
+      {{ docker_prune_units_before.results | map(attribute='status')
+         | map(attribute='NeedDaemonReload', default='no')
+         | select('equalto', 'yes') | list | length > 0 }}
   ansible.builtin.systemd_service:
     daemon_reload: true
   when:
     - not ansible_check_mode
-    - docker_prune_service_unit.changed or docker_prune_timer_unit.changed
+    - docker_prune_service_unit.changed or docker_prune_timer_unit.changed or (_stale | bool)
   tags: [docker_prune]
 
 # UNGATED on `changed` so a timer disabled or stopped outside Ansible is healed by
 # an ordinary run — and NOT skipped wholesale in check mode, so a dry-run of that
-# drift reports `changed` instead of `skipping` (#316 review). Only the first run,
-# when the unit file does not exist yet, cannot be dry-run.
-# `restarted` when the timer file changed, so an OnCalendar edit takes effect now
-# rather than after the next reboot (daemon-reload alone does not re-arm it).
+# drift reports `changed` instead of `skipping` (#316 review). Any run that
+# CHANGES the timer file cannot dry-run this task (the unit on disk is not the
+# one being evaluated), so it is skipped only then.
+# `restarted` when the timer file changed or was left un-reloaded: belt-and-braces
+# so a new OnCalendar is certainly in effect now. (Untested whether
+# daemon-reload alone recomputes a waiting timer's next elapse; the restart is
+# harmless either way and the assert below reads the result.)
 - name: Ensure the scheduled dangling-image prune timer is enabled and running
+  vars:
+    _timer_stale: >-
+      {{ (docker_prune_units_before.results[1].status.NeedDaemonReload
+          | default('no')) == 'yes' }}
   ansible.builtin.systemd_service:
     name: docker-image-prune.timer
     enabled: true
-    state: "{{ 'restarted' if docker_prune_timer_unit.changed else 'started' }}"
+    state: >-
+      {{ 'restarted' if (docker_prune_timer_unit.changed or (_timer_stale | bool))
+         else 'started' }}
   when: not (ansible_check_mode and docker_prune_timer_unit.changed)
+  tags: [docker_prune]
+
+# Surface the LAST scheduled run's outcome before the prove-run replaces it.
+# Not fatal: the prove-run right after is the live test of the unit, and a
+# transient nightly failure (e.g. a prune collision) should not fail a deploy.
+# Never-run units report Result=success, so this is quiet on a fresh host.
+- name: Warn if the last scheduled prune did not succeed
+  vars:
+    _svc: "{{ docker_prune_units_before.results[0].status | default({}) }}"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the last docker-image-prune.service run on {{ inventory_hostname }}
+      ended Result={{ _svc.Result | default('?') }}
+      (ActiveState={{ _svc.ActiveState | default('?') }}). The nightly prune is
+      failing; this apply's prove-run will overwrite that state. Read
+      `journalctl -u docker-image-prune.service -n 50` now.
+  when:
+    - _svc.LoadState | default('') == 'loaded'
+    - (_svc.Result | default('success')) != 'success' or _svc.ActiveState | default('') == 'failed'
   tags: [docker_prune]
 
 # PROVE THE UNIT, do not just arm it (#316 review: "a guard you have not seen
@@ -910,11 +961,15 @@
       - _timer.ActiveState == 'active'
       - _timer.UnitFileState == 'enabled'
       - (_timer.NextElapseUSecRealtime | default('')) | length > 0
+      - (_timer.NeedDaemonReload | default('yes')) == 'no'
     fail_msg: >-
       docker-image-prune.timer on {{ inventory_hostname }} is not armed:
       ActiveState={{ _timer.ActiveState | default('?') }}
       UnitFileState={{ _timer.UnitFileState | default('?') }}
-      NextElapseUSecRealtime={{ _timer.NextElapseUSecRealtime | default('?') }}.
+      NextElapseUSecRealtime={{ _timer.NextElapseUSecRealtime | default('?') }}
+      NeedDaemonReload={{ _timer.NeedDaemonReload | default('?') }}
+      (yes = systemd is still running an OLD copy of the timer file; run
+      `systemctl daemon-reload && systemctl restart docker-image-prune.timer`).
       Without it nothing reaps superseded images between
       infra:guests runs, and watchtower's nightly pulls fill the rootfs (#314).
       Check `systemctl status docker-image-prune.timer` and
