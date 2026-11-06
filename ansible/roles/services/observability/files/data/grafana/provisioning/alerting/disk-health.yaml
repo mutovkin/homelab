@@ -1,0 +1,215 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — filesystem capacity (#315).
+#
+# WHY THIS EXISTS: CT 101's 24G rootfs climbed for six weeks with telegraf
+# exporting every sample and no rule reading any of them —
+# disk_used_percent for eq12_docker, path "/": 61% (09-22), 79% (10-16),
+# 84% (10-22), 92% (10-28), 97% (11-03), 100% at 2026-11-05 12:30Z when a
+# watchtower pull filled it. Host logging stopped, `docker exec` failed, and
+# Ansible itself could no longer run on the guest (#314). An 80% rule would
+# have warned ~2 weeks ahead.
+#
+# COVERAGE comes mostly from the Proxmox HOSTS' native telegraf agents, not the
+# guests: inputs.disk on eq12/n5pro sees every guest subvol mounted under
+# /rpool/data (CT 101 root + /data, CT 104, CT 102, CT 201 root + /data,
+# CT 202), and ZFS reports each subvol against its refquota, so the percentage
+# is the guest's own df. n5pro_docker exports no disk series at all and is
+# covered only this way. eq12_docker's container telegraf reports its own `/`,
+# which is the SAME disk as eq12's subvol-101-disk-0 — kept, not deduplicated,
+# because it is the one view that survives the host agent dying; the cost is
+# that CT 101's rootfs crossing 80% sends two notifications (one per host label).
+# NOT usefully covered, stated so the instance count is not mistaken for
+# coverage: the host-level ZFS datasets (/rpool, /rpool/ROOT, /rpool/data, and
+# the hosts' own / and /var/lib/vz) hold almost nothing themselves and report
+# against the WHOLE POOL's free space — measured 2026-11-06, ~1% on /rpool*, and
+# n5pro's / would cross 80% only with ~3G of 3.2T left. So of the 17 instances,
+# ~6 can never fire usefully, POOL fullness is not alerted here, and neither are
+# zvol-backed VM disks (HA VM 100, TrueNAS VM 200's boot disk), which only show
+# up at pool level. Pool capacity is tracked separately (see the follow-up issue
+# referenced in #315). TrueNAS data pools are out of scope.
+#
+# EXCLUDED fstypes, each from the live series (enumerated 2026-11-06), not
+# guessed: `efivarfs` is firmware NVRAM (51% on eq12 in perfect health, fixed
+# size, meaningless as capacity), `fuse` is /etc/pve (pmxcfs, reports 0).
+# tmpfs/devtmpfs/overlay/squashfs are already dropped by inputs.disk's
+# ignore_fs in telegraf.conf; repeated here so a change there cannot quietly
+# turn a RAM disk into a page.
+#
+# `by (host, path)`, never an unlabelled aggregate (#216): a max() without
+# labels would page once for "some disk" and resolve while another disk was
+# still full.
+#
+# noDataState: Alerting — deliberately the opposite of the counter rules (#151).
+# disk_used_percent is a CONTINUOUS gauge from three agents; the whole query
+# coming back empty means inputs.disk (or the fstype filter) broke everywhere,
+# which is capacity blindness, not health. That only catches ALL agents going
+# dark at once: if ONE host's disk input stops, its series go stale and any
+# alert it was firing RESOLVES — silently (the #216 lost-member shape, per host).
+# obs-telegraf-metrics-absent watches system_uptime, i.e. the agent, not this
+# input. Hence the second rule below, obs-disk-metrics-absent.
+#
+# for: 15m — disks fill over days; 15 minutes keeps a transient (a large pull
+# that is then pruned, #316) from paging, and costs nothing at this timescale.
+#
+# severity: warning routes to the default receiver (homelab-email), per
+# grafana-notification-policies.yaml.j2. The notification policy groups by
+# host, so several full disks on one host arrive as one email.
+
+groups:
+  - orgId: 1
+    name: disk-capacity
+    folder: Observability
+    interval: 1m
+    rules:
+      - uid: obs-disk-usage-high
+        title: Disk usage above 80%
+        condition: C
+        for: 15m
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          # NoData/Error instances carry no host/path and no $values.B; without
+          # the branch the summary rendered "  is 0% full" — the most misleading
+          # possible text for exactly the blind-to-capacity case.
+          summary: "{{ if $labels.path }}{{ $labels.host }} {{ $labels.path }} is {{ humanize $values.B.Value }}% full (threshold 80%).{{ else }}Disk capacity is UNMONITORED: the disk_used_percent query returned no data or errored.{{ end }}"
+          description: |-
+            Find what is growing before it reaches 100% — at 100% a guest can no longer write logs, run `docker exec`, or be managed by Ansible (#314).
+            On a docker host the usual cause is superseded images: check `docker system df` and whether docker-image-prune.timer ran (`systemctl list-timers docker-image-prune.timer`, #316).
+            For a guest subvol on a Proxmox host, the size is `root_disk_size` / the mount size in that host's host_vars — compare against `pct config <vmid> --current` first (CT 202's declared size does not match live, #305); growing it is a one-way `pct resize` via proxmox_guests (`--tags lxc_resize`).
+        labels:
+          severity: warning
+          component: disk-capacity
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: 'max by (host, path) (disk_used_percent{fstype!~"efivarfs|fuse|tmpfs|devtmpfs|overlay|squashfs"})'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 80
+
+      # PER-HOST absence of the disk input (#315 review). absent_over_time() over
+      # an equality matcher returns a series CARRYING that label
+      # ({host="eq12"} 1), so one rule yields one instance per missing host and
+      # an empty result when all are reporting — hence noDataState: OK here (the
+      # healthy state IS empty), the inverse of the rule above.
+      # THE COST, as in telegraf-health.yaml: each host is pinned by name. The
+      # observability role asserts the pinned set equals the telegraf agent set
+      # ("Verify the disk absence rule's pinned host selectors"), so adding a
+      # host to telegraf_agents FAILS the deploy until it is added here. The set is
+      # every host that exported disk_used_percent on 2026-11-06 (eq12,
+      # eq12_docker, n5pro); n5pro_docker exports none and is covered only via
+      # n5pro's subvol series.
+      # severity warning: losing a warning-level signal should not page louder
+      # than the signal itself; a dead AGENT is already critical elsewhere.
+      # If obs-disk-usage-high is ever raised to critical, raise this with it —
+      # no guard enforces that pairing (it is outside the telegraf-health.yaml
+      # grading guard's view).
+      - uid: obs-disk-metrics-absent
+        title: Disk capacity metrics missing for a host
+        condition: C
+        for: 15m
+        noDataState: OK
+        # Query errors are owned by obs-disk-usage-high (execErrState Alerting,
+        # with an "UNMONITORED" summary). Alerting here too would send a
+        # duplicate whose summary has no host to name.
+        execErrState: OK
+        isPaused: false
+        annotations:
+          summary: "No disk_used_percent from {{ $labels.host }} for 10+ minutes — its filesystems are unmonitored and any disk alert it had has silently resolved."
+          description: |-
+            The agent may be alive (obs-telegraf-metrics-absent watches system_uptime) while inputs.disk is not reporting.
+            Check `telegraf --test --input-filter disk` on that host, and inputs.disk ignore_fs in its telegraf.conf.
+        labels:
+          severity: warning
+          component: disk-capacity
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: 'absent_over_time(disk_used_percent{host="eq12"}[10m]) or absent_over_time(disk_used_percent{host="eq12_docker"}[10m]) or absent_over_time(disk_used_percent{host="n5pro"}[10m])'
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0

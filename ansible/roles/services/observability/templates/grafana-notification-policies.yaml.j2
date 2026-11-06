@@ -135,6 +135,11 @@ policies:
       # type is added (an icmp probe, a cert-expiry check) the split is already
       # correct rather than silently merging on first use.
       - check_type
+      # `path` — obs-disk-usage-high (disk-health.yaml, #315) aggregates
+      # `by (host, path)`. Without this key two filesystems crossing 80% on one
+      # host (eq12 carries every CT 10x subvol) would merge into one [FIRING:2]
+      # naming neither.
+      - path
     # 30s: long enough to batch instances of the same rule that trip together,
     # short enough that a real outage is not sat on.
     group_wait: 30s
