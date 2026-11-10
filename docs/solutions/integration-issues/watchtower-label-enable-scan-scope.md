@@ -171,8 +171,8 @@ load-bearing the moment you pin:
 - Moving tags — `:latest`, `:stable`, `:release`, `:lts`, and major lines like
   `postgres:18` or `redis:7-alpine` — keep notifying, because patch releases republish
   the same tag.
-- An immutable tag like `watchtower:1.21.0` notifies about nothing but a re-push of that
-  exact tag. A published `1.21.1` is simply invisible.
+- An immutable tag like `watchtower:1.24.0` notifies about nothing but a re-push of that
+  exact tag. A published `1.24.1` is simply invisible.
 
 So `pin + monitor-only` does not mean "we will be told and can decide". It means the
 unattended path is closed and **a human must check the releases page**. Pair every

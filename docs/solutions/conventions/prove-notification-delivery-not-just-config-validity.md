@@ -74,7 +74,7 @@ happened, and prefer a forcing mechanism that does **not** depend on a report te
 
 For Watchtower, that is the **startup message**: production sets
 `WATCHTOWER_NO_STARTUP_MESSAGE=true`, and a throwaway probe simply omits it, so the
-startup notification is queued and flushed through shoutrrr at shutdown.
+startup notification is queued and flushed through shoutrrr at shutdown (1.21.0; on 1.24.0 the send is asynchronous and was measured both before the scan and at shutdown, #325).
 
 ```bash
 # Take the URL from the RUNNING container — that is the value the service actually uses,
@@ -200,6 +200,11 @@ Mail successfully sent to "REDACTED-ADDR"!
 level=debug msg="Notification send completed successfully" total_urls=1
 PROBE_EXIT=0
 ```
+
+That is the 1.21.0 wording. **From 1.24.0 (#325) shoutrrr logs `Shoutrrr: mail sent … service=smtp`
+instead**, and the line can precede `Update session completed`. The string changes with
+shoutrrr, so re-check it at every bump; the current form lives in the watchtower README's
+evidence list.
 
 `scanned=12` / `scanned=3` match the labelled counts measured the same run, so scan scope
 is proved alongside delivery. Both live watchtower containers were untouched (still Up,
