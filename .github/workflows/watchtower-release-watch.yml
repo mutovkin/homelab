@@ -1,10 +1,10 @@
 ---
 # Watchtower release watch (#121b)
 #
-# Watchtower is pinned to an immutable tag (`nickfedor/watchtower:1.21.0`) because it
+# Watchtower is pinned to an immutable tag (`nickfedor/watchtower:1.24.0`) because it
 # holds docker.sock read-write on every host. That pin has a cost: Watchtower compares
 # digests for the EXACT reference a container runs, so it can only ever report a re-push
-# of `1.21.0` — a published `1.21.1` is invisible to it, and the one container nothing
+# of `1.24.0` — a published `1.24.1` is invisible to it, and the one container nothing
 # else watches is the one that watches everything else.
 #
 # This comment names the current pin only as an illustration; the JOB never reads it —
