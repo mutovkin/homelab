@@ -145,7 +145,7 @@ it immediately, which is what you want right after changing labels:
 docker run --rm \
   --security-opt apparmor=unconfined \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  nickfedor/watchtower:1.21.0 \
+  nickfedor/watchtower:1.24.0 \
   --run-once --monitor-only --label-enable --no-startup-message 2>&1 \
   | grep 'Update session completed'
 ```

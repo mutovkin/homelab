@@ -93,7 +93,7 @@ export WATCHTOWER_NOTIFICATION_URL=$(docker inspect watchtower \
     --security-opt apparmor=unconfined \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -e WATCHTOWER_NOTIFICATION_URL \
-    nickfedor/watchtower:1.21.0 \
+    nickfedor/watchtower:1.24.0 \
     --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1
   echo "PROBE_EXIT=$?"
 } | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
