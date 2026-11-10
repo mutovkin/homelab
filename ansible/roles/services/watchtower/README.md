@@ -134,17 +134,17 @@ still carries the `IsNoPull` gate on both entry points, ahead of
 
 ### Watchtower's own image is pinned
 
-`image: nickfedor/watchtower:1.21.0` — not `:latest`. This container holds
+`image: nickfedor/watchtower:1.24.0` — not `:latest`. This container holds
 `/var/run/docker.sock` read-write and can restart every other container on the host, and
 it is a community fork of an upstream archived in 2025-12. Letting it pull and execute
 its own new `latest` unattended makes the whole fleet trust an unreviewed image. Pinned,
 a version bump is a compose edit in git.
 
-`1.21.0` is an immutable release tag, so — unlike every other monitor-only service —
+`1.24.0` is an immutable release tag, so — unlike every other monitor-only service —
 **Watchtower will not email us about its own new releases.** It only ever checks
-`nickfedor/watchtower:1.21.0`; a published `1.21.1` is invisible to it. Its
+`nickfedor/watchtower:1.24.0`; a published `1.24.1` is invisible to it. Its
 `monitor-only` label is there to cover the one residual unattended path the pin leaves
-open (a re-pushed `1.21.0`), not to provide notifications.
+open (a re-pushed `1.24.0`), not to provide notifications.
 
 Checking for a new version is therefore a deliberate step against
 <https://github.com/nicholas-fedor/watchtower/releases> — automated as a reminder by
@@ -165,13 +165,14 @@ break notification delivery while leaving the container healthy, and that failur
 invisible until an update you needed to hear about goes unreported (#145). Record both
 results in the bump log. (Digest-pinning instead of a tag was considered and not taken: it
 costs readability and `monitor-only` already prevents the unattended path. A deliberate
-deploy would still adopt a re-pushed `1.21.0`.)
+deploy would still adopt a re-pushed `1.24.0`.)
 
 #### Bump log
 
 | Date | From → To | Notes |
 | ---- | --------- | ----- |
 | 2026-08-19 | 1.20.3 → 1.21.0 | First bump driven by the release-watch job, which went red the day it landed. Release delta is fixes plus one behavioural change worth knowing: **logging moved from logrus to zerolog** (#2128), so log *format* changed — the `Update session completed … scanned=N` line survives it (re-verified by probe on both hosts), but anything parsing watchtower logs by shape should be re-checked. Notification field validation was tightened (#2124) and shoutrrr went to v0.17.1; our `smtp://` URL still starts clean. No change to `enable` / `monitor-only` / `WATCHTOWER_LABEL_ENABLE` semantics, so the posture model above is untouched. **Delivery probed 2026-08-20 03:24–03:25 UTC on BOTH hosts (#145)** — one real mail each, `Mail successfully sent`, probe exit 0, `scanned=12`/`scanned=3` matching the labelled counts, no live container touched. Startup-message forcing worked on both; the session-report path rendered an empty message on n5pro_docker and was skipped, which is exactly why the probe must not rely on it. |
+| 2026-11-10 | 1.21.0 → 1.24.0 (#325) | Index digest `e96976bcbeaf` at pin time. Release notes 1.21.1 through 1.24.0 were read in full. **The behavioural changes that matter here:** 1.23.2 and 1.24.0 validate notification URLs at startup and **refuse to start** on one that shoutrrr v0.22.1/v0.23.0 cannot use (our `smtp://` URL starts clean on both hosts, `RestartCount 0`). 1.22.0 adds optional disk-usage thresholds (unused). 1.23.0 adds Git-repo monitoring and OCI-version changelog links (unused). Also many registry-auth hardening fixes (no token on cross-origin manifest redirects, https→http bearer downgrade rejected) and self-update and recreate fixes. None changes `enable` / `monitor-only` / `WATCHTOWER_LABEL_ENABLE` semantics. **Delivery probed 2026-11-10 on BOTH hosts (#145):** eq12_docker 06:56:44Z and n5pro_docker 06:56:34Z, each with `Shoutrrr: mail sent` + `Notification send completed successfully … total_urls=1`, `PROBE_EXIT=0`, and `scanned=12`/`scanned=3` equal to the labelled counts. **The positive-confirmation string changed:** shoutrrr now logs `Shoutrrr: mail sent` (debug), not `Mail successfully sent to "…"!`, so evidence item 1 below is updated. A probe grepping for the old string reads a successful send as silence. **The send is asynchronous, not "at shutdown":** on eq12_docker it landed BEFORE the scan finished (sent 06:56:44Z, `Update session completed` 06:56:45Z), on n5pro_docker after it (06:56:33Z scan done, 06:56:34Z sent). The first eq12 run was filtered through `tail -15`, which cut off the early send and looked like no send at all. Filter for the send lines; do not tail. |
 
 ### Verification
 
@@ -200,7 +201,7 @@ This is the check to use right after a label change:
 docker run --rm \
   --security-opt apparmor=unconfined \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  nickfedor/watchtower:1.21.0 \
+  nickfedor/watchtower:1.24.0 \
   --run-once --monitor-only --label-enable --no-startup-message 2>&1 \
   | grep 'Update session completed'
 ```
@@ -245,7 +246,7 @@ export WATCHTOWER_NOTIFICATION_URL=$(docker inspect watchtower \
     --security-opt apparmor=unconfined \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -e WATCHTOWER_NOTIFICATION_URL \
-    nickfedor/watchtower:1.21.0 \
+    nickfedor/watchtower:1.24.0 \
     --run-once --monitor-only --label-enable --debug --notification-log-stdout 2>&1
   echo "PROBE_EXIT=$?"
 } | sed -E 's#(smtps?)://[^[:space:]"]+#\1://REDACTED#g'
@@ -257,7 +258,7 @@ were actually produced with.)
 
 **How it forces a send at `updated=0`:** production sets
 `WATCHTOWER_NO_STARTUP_MESSAGE=true`; the probe simply omits it, so watchtower queues its
-startup notification and flushes it through shoutrrr at shutdown. That path does **not**
+startup notification and sends it through shoutrrr asynchronously — at shutdown on 1.21.0, anywhere from before the scan to shutdown on 1.24.0 (#325). That path does **not**
 depend on the report template rendering anything — which is the point. Measured on
 2026-08-20, the report path behaved differently on the two hosts (`msg_length=54` on
 eq12_docker, `msg_length=0` and `Message empty, skipping send` on n5pro_docker) and yet
@@ -282,8 +283,11 @@ would misdiagnose a quoting bug as a shoutrrr regression.
 
 What counts as evidence, in order of strength:
 
-1. `Mail successfully sent to "…"!` — shoutrrr's own positive confirmation. This is what
-   to look for; the 1.21.0 build does print it.
+1. `Shoutrrr: mail sent … service=smtp` (1.24.0; 1.21.0 printed
+   `Mail successfully sent to "…"!`) — shoutrrr's own positive confirmation. This is what
+   to look for, and the wording changes with shoutrrr: re-check it at every bump. The
+   send is asynchronous and can land anywhere from before the scan to shutdown (#325
+   measured both), so filter for it — a `tail` of the output can cut it off.
 2. `Notification send completed successfully … total_urls=1` and `PROBE_EXIT=0` — read
    that line, never a bare `$?`, for the reason in the command's comment above.
 3. `Update session completed … scanned=N` with N equal to the labelled count.
