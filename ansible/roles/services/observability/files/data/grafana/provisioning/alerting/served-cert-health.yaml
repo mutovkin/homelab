@@ -38,7 +38,7 @@ groups:
         execErrState: Alerting
         isPaused: false
         annotations:
-          summary: "{{ if lt $values.B.Value 0.0 }}The certificate the reverse proxy serves EXPIRED {{ humanizeDuration (mul $values.B.Value -1) }} ago.{{ else }}The certificate the reverse proxy serves expires in {{ humanizeDuration $values.B.Value }}.{{ end }}"
+          summary: '{{ if lt $values.B.Value 0.0 }}The certificate the reverse proxy serves EXPIRED {{ reReplaceAll "^-" "" (humanizeDuration $values.B.Value) }} ago.{{ else }}The certificate the reverse proxy serves expires in {{ humanizeDuration $values.B.Value }}.{{ end }}'
           description: |-
             NPM renews within 30 days of expiry, so 14 days left means renewal has been failing for over two weeks, or renewal succeeded and the proxy never loaded the new file (#329).
             Compare the served notAfter with the file on disk.
