@@ -198,7 +198,7 @@ Nothing listens on 587 here; egress to it must stay open or alerting silently
 stops delivering. Rules, routing and the shared-relay coupling:
 [README.md → Alerting](README.md#alerting).
 
-> Every Grafana **API** call by IP must send `-H 'Host: grafana.moutovkin.com'`.
+> Every Grafana **API** call by IP must send `-H 'Host: grafana.<domain>'`.
 > `grafana.ini` sets `enforce_domain = true`, so anything else gets a 301 to the
 > configured domain. `/api/health` is the one exemption.
 

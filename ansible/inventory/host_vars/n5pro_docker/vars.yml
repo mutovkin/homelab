@@ -92,7 +92,7 @@ lms_advertise_addr: "192.168.30.15"  # Docker host LAN IP — visible to Squeeze
 # Per-host since #140: this used to live in the role's defaults, so this host
 # inherited eq12_docker's NPM grant (192.168.25.20/32) without anyone choosing
 # it. Pre-check on 2026-08-19 established NPM (CT 104) has exactly ONE upstream
-# on this host — lms.moutovkin.com -> n5pro-docker.lan:9001 — and no proxy host,
+# on this host — lms.<domain> -> n5pro-docker.lan:9001 — and no proxy host,
 # stream host, dead host or redirection for :9000; ss/conntrack showed no live
 # 9000 sessions and the Portainer instance here has never been initialised. The
 # inherited 192.168.25.20/32 grant was therefore removed.

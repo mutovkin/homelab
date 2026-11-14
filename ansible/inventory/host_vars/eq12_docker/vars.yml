@@ -105,7 +105,7 @@ observability_firewall:
     # fact, each verified:
     #
     #  * NPM was VERIFIED against CT 104's own proxy_host table rather than
-    #    inherited (#140's lesson): id 10, vm.moutovkin.com -> deb-docker.lan:8428,
+    #    inherited (#140's lesson): id 10, vm.<domain> -> deb-docker.lan:8428,
     #    enabled=1, is_deleted=0, read read-only 2026-08-22. Deleting that proxy
     #    host is what would make this grant stale.
     #  * Home Assistant pushes its metrics here since #133; this grant replaces the
@@ -120,7 +120,7 @@ observability_firewall:
     #  * (was: the three native vector agents write logs only. #160 CHANGED THAT
     #    and added them below, which is what that note asked for.)
     8428:
-      - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vm.moutovkin.com -> deb-docker.lan:8428 (verified 2026-08-22)
+      - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vm.<domain> -> deb-docker.lan:8428 (verified 2026-08-22)
       - 192.168.25.10/32  # Home Assistant VM (VM 100) — influxdb push (#133)
       - 192.168.48.0/24   # operator workstation subnet — vmui
       # The three native Vector agents, added by #160: roles/vector_agent now has an
@@ -154,7 +154,7 @@ observability_firewall:
     #    group vector_agents in hosts.yml);
     #  * NPM was VERIFIED, not assumed — #140 taught that inherited NPM grants in this
     #    repo have been wrong before, so this was checked the same way: CT 104's own
-    #    proxy_host table, read read-only, holds id 11 `vl.moutovkin.com` ->
+    #    proxy_host table, read read-only, holds id 11 `vl.<domain>` ->
     #    deb-docker.lan:9428 with is_deleted=0. Unlike #140's portainer case the answer
     #    came back YES. Removing that proxy host is what would make this grant stale.
     #  * operators reach the VictoriaLogs UI at /select/vmui directly by IP.
@@ -193,7 +193,7 @@ observability_firewall:
       - 192.168.25.5/32   # eq12 hypervisor — native vector agent (#134)
       - 192.168.30.5/32   # n5pro hypervisor — native vector agent (#134)
       - 192.168.30.15/32  # n5pro_docker (CT 201) — native vector agent (#134)
-      - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vl.moutovkin.com -> deb-docker.lan:9428 (verified 2026-08-20)
+      - 192.168.25.20/32  # NPM LXC (CT 104) — proxies vl.<domain> -> deb-docker.lan:9428 (verified 2026-08-20)
       - 192.168.48.0/24   # operator workstation subnet — VictoriaLogs UI (/select/vmui)
 
 # Scoped fail-open nftables allowlists for the portainer (#80) and vaultwarden
@@ -203,8 +203,8 @@ observability_firewall:
 # assert instead of silently borrowing another host's proxy IP.
 #
 # The 192.168.25.20/32 grant here is CHOSEN, not inherited: verified 2026-08-19
-# against NPM's own proxy_host table in CT 104 — portainer.moutovkin.com ->
-# deb-docker.lan:9000 and bw/wv.moutovkin.com -> deb-docker.lan:8086, where
+# against NPM's own proxy_host table in CT 104 — portainer.<domain> ->
+# deb-docker.lan:9000 and bw/wv.<domain> -> deb-docker.lan:8086, where
 # deb-docker.lan resolves to this host (192.168.25.15).
 #
 # Per-port shape ({port: [source, ...]}, #114): a source approved for one port
@@ -213,10 +213,10 @@ observability_firewall:
 portainer_firewall:
   ports:
     9000:
-      - 192.168.25.20/32 # NPM LXC (CT 104) — proxies portainer.moutovkin.com -> deb-docker.lan:9000
+      - 192.168.25.20/32 # NPM LXC (CT 104) — proxies portainer.<domain> -> deb-docker.lan:9000
       - 192.168.48.0/24 # operator workstation subnet
 vaultwarden_firewall:
   ports:
     8086:
-      - 192.168.25.20/32 # NPM LXC (CT 104) — proxies bw/wv.moutovkin.com -> deb-docker.lan:8086
+      - 192.168.25.20/32 # NPM LXC (CT 104) — proxies bw/wv.<domain> -> deb-docker.lan:8086
       - 192.168.48.0/24 # operator workstation subnet
