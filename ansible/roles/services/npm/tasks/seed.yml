@@ -140,6 +140,9 @@
     - name: Stat every referenced certificate file in the seeded letsencrypt tree
       ansible.builtin.stat:
         path: "{{ npm_seed_dest }}/letsencrypt/{{ item | regex_replace('^/etc/letsencrypt/', '') }}"
+        # live/<name>/*.pem are SYMLINKS into archive/. Without follow, stat is lstat and a
+        # dangling link reports exists=true, so a seed missing archive/ would pass (#336 review).
+        follow: true
       loop: "{{ npm_seed_cert_refs.stdout_lines }}"
       register: npm_seed_cert_stats
 
@@ -150,6 +153,8 @@
           - (npm_seed_source_rows.stdout | from_json | selectattr('kind', 'eq', 'proxy_host') | list | length) > 0
           - npm_seed_cert_refs.stdout_lines | length > 0
           - npm_seed_cert_stats.results | rejectattr('stat.exists') | list | length == 0
+          - npm_seed_cert_stats.results | rejectattr('stat.isreg', 'defined') | list | length == 0
+          - npm_seed_cert_stats.results | rejectattr('stat.isreg') | list | length == 0
         fail_msg: >-
           The staged NPM database does not reproduce CT {{ npm_seed_source_vmid }}'s live
           proxy hosts and certificates (compared by name), or a certificate file a seeded
@@ -163,7 +168,7 @@
         src: "{{ _stage }}/database.sqlite"
         dest: "{{ npm_seed_dest }}/data/database.sqlite"
         remote_src: true
-        mode: "0644"
+        mode: "0600"  # holds the DNS-provider token; NPM runs as root in the container
       diff: false
 
   always:

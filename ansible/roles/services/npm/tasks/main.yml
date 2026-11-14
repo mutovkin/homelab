@@ -61,13 +61,24 @@
     pull: always
   register: npm_pulled
   check_mode: false
-  when: npm_container.exists
+  when: npm_container.exists or npm_db.stat.exists
 
 - name: Determine whether this deploy would change NPM's image
   ansible.builtin.set_fact:
+    # Keyed on the DATA, not the container (vaultwarden's #107 lesson): with the container
+    # gone and the tag bumped, compose would otherwise start the new image straight onto the
+    # existing database and its one-way migrations would run with no backup.
     npm_upgrade_pending: >-
-      {{ npm_container.exists
-         and npm_pulled.image.Id | default('') != npm_container.container.Image }}
+      {{ npm_db.stat.exists
+         and (not npm_container.exists
+              or npm_pulled.image.Id | default('') != npm_container.container.Image) }}
+
+- name: Assert NPM backup retention keeps at least one archive
+  ansible.builtin.assert:
+    that:
+      - npm_backup_retention | int >= 1
+    fail_msg: "npm_backup_retention must be >= 1 (0 would prune the archive just taken), got {{ npm_backup_retention }}"
+    quiet: true
 
 - name: Back up NPM before its image changes
   when: npm_upgrade_pending | bool
@@ -76,6 +87,7 @@
       community.docker.docker_container:
         name: npm
         state: stopped
+      when: npm_container.exists
 
     - name: Create the backup directory
       ansible.builtin.file:
@@ -122,6 +134,7 @@
       community.docker.docker_container:
         name: npm
         state: started
+      when: npm_container.exists
     - name: Refuse to upgrade without a verified backup
       ansible.builtin.fail:
         msg: >-
