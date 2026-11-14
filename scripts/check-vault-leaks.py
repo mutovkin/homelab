@@ -10,6 +10,10 @@ Modes:
   (default)            the WORKING TREE copy of every tracked file
   --staged             the INDEX (what a commit would contain); the pre-commit hook mode
   --message-file PATH  a commit message; the commit-msg hook mode
+  --pre-push REMOTE    every commit a push would publish (message + ADDED lines), read
+                       from git's pre-push stdin; the last gate before GitHub. Catches
+                       commits that skipped the other hooks (--no-verify, rebases,
+                       cherry-picks, other machines).
 
 Exit codes: 0 clean, 1 leak found, 2 the check could not run (fail closed).
 
@@ -74,7 +78,9 @@ def leaves(val, key):
 
 
 def load_allowlist():
-    path = ROOT / "scripts" / "vault-leak-allow.txt"
+    # The installed hooks run a SNAPSHOT of this script from the hooks dir (independent of
+    # whatever branch is checked out) and point this at the allowlist snapshot beside it.
+    path = pathlib.Path(os.environ.get("VAULT_LEAK_ALLOW") or ROOT / "scripts" / "vault-leak-allow.txt")
     if not path.exists():
         return set()
     return {l.split("#")[0].strip() for l in path.read_text(encoding="utf-8").splitlines()
@@ -155,6 +161,49 @@ def vault_needles(mode):
     return needles
 
 
+def push_revs(remote):
+    """Rev arguments for each ref git is about to push (pre-push hook stdin)."""
+    out = []
+    for line in sys.stdin.read().splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            die(f"unexpected pre-push input line ({len(parts)} fields)")
+        _lref, lsha, _rref, rsha = parts
+        if set(lsha) == {"0"}:
+            continue  # deleting a remote ref publishes nothing
+        known = set(rsha) != {"0"} and subprocess.run(
+            ["git", "-C", str(ROOT), "cat-file", "-e", rsha + "^{commit}"],
+            capture_output=True).returncode == 0
+        # New ref, or a force-push over a commit we do not have: check every commit the
+        # remote does not already have (over-inclusive is safe; under-inclusive is not).
+        out.append([f"{rsha}..{lsha}"] if known else [lsha, "--not", f"--remotes={remote}"])
+    return out
+
+
+def push_sources(remote):
+    """Yield (label, text) per commit: its message, and each file's ADDED lines."""
+    for revs in push_revs(remote):
+        try:
+            raw = git("log", "-p", "--text", "--no-color", "--no-ext-diff", "--format=%x00COMMIT %H%n%B%x00ENDMSG", *revs)
+        except subprocess.CalledProcessError:
+            die("cannot list the commits being pushed; refusing")
+        text = raw.decode("utf-8", "replace")
+        for chunk in text.split("\x00COMMIT ")[1:]:
+            sha, _, rest = chunk.partition("\n")
+            msg, _, patch = rest.partition("\x00ENDMSG")
+            yield f"commit {sha[:12]} message", msg
+            current, added = None, []
+            for line in patch.splitlines():
+                if line.startswith("diff --git "):
+                    if current and added:
+                        yield f"commit {sha[:12]} {current}", "\n".join(added)
+                    current, added = line.split(" b/", 1)[-1], []
+                elif line.startswith("+") and not line.startswith("+++"):
+                    added.append(line[1:])
+            if current and added:
+                yield f"commit {sha[:12]} {current}", "\n".join(added)
+
+
 def sources(mode, msg_file):
     """Yield (label, text) for everything to search; unreadable inputs are errors."""
     if mode == "message":
@@ -193,9 +242,12 @@ def main(argv):
         mode = "staged"
     elif argv[:1] == ["--message-file"] and len(argv) == 2:
         mode, msg_file = "message", argv[1]
+    elif argv[:1] == ["--pre-push"] and len(argv) == 2:
+        mode, msg_file = "push", argv[1]
     elif argv:
-        die("usage: check-vault-leaks.py [--staged | --message-file PATH]")
-    needles = vault_needles(mode)
+        die("usage: check-vault-leaks.py [--staged | --message-file PATH | --pre-push REMOTE]")
+    # A push is checked against the vault as it stands in the working tree.
+    needles = vault_needles("worktree" if mode == "push" else mode)
     if not needles:
         die("no vault values loaded; refusing to report a clean tree")
     order = sorted(needles, key=len, reverse=True)
@@ -204,12 +256,13 @@ def main(argv):
     # reported, so matching on the folded copy loses nothing.
     pat = re.compile("|".join(re.escape(n) for n in order))
     hits = 0
-    for label, text in sources(mode, msg_file):
+    srcs = push_sources(msg_file) if mode == "push" else sources(mode, msg_file)
+    for label, text in srcs:
         for n, line in enumerate(text.splitlines(), 1):
             for m in pat.finditer(line.casefold()):
                 hits += 1
                 key = needles.get(m.group(0).casefold(), "an unidentified vault key")
-                where = label if mode == "message" else f"{label}:{n}"
+                where = label if mode in ("message", "push") else f"{label}:{n}"
                 print(f"LEAK {where}  (matches vault key {key})")
     print(f"checked {len(needles)} vault-derived needles ({mode}); {hits} leak(s)")
     return 1 if hits else 0

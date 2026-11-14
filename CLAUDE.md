@@ -28,8 +28,11 @@ Everything deploys via `task deploy:full` (= `ansible-playbook playbooks/site.ym
    is private too: write `<domain>` in prose and use `vault_base_domain` (or a
    service-specific `vault_*_domain`) in config, never the literal — the same applies to
    issue/PR text, which is public as well. `task lint:vault-leaks` fails if ANY vault value
-   appears in a tracked file (prints file:line + key, never the value); run it before every
-   push (`task hooks:install` makes it a pre-commit hook). Non-private keys are allowlisted
+   appears in a tracked file (prints file:line + key, never the value). `task hooks:install`
+   (once per clone, on BOTH operator machines, and again after changing the guard) adds
+   pre-commit, commit-msg and **pre-push** hooks; pre-push is the last gate before GitHub and
+   scans every commit being published, including ones made with `--no-verify`. Never bypass
+   it with `git push --no-verify`. Non-private keys are allowlisted
    BY NAME with a reason in `scripts/vault-leak-allow.txt` (#333). A NEW private domain
    needs its own vault key (the guard matches whole values; only `vault_base_domain` is
    matched as a bare domain), and `task test:vault-leaks` must stay green.

@@ -70,6 +70,27 @@ ansible-vault encrypt --vault-password-file .vault_password ansible/inventory/ho
 VALUES="$VALUES FakeStagedPlain006"
 out=$(run --staged); check "plaintext vault staged, encrypted on disk" 1 "$out" $? "NOT ansible-vault encrypted"
 git rm -q -f --cached ansible/inventory/host_vars/zz/vault.yml; rm -rf ansible/inventory/host_vars/zz
+# --pre-push: the last gate before GitHub. Real bare remote, git's real stdin format.
+git init -q --bare "$T/remote.git"; git remote add origin "$T/remote.git"; git push -q origin HEAD:refs/heads/master
+Z=0000000000000000000000000000000000000000
+pp() { printf '%s %s %s %s\n' "refs/heads/$1" "$(git rev-parse HEAD)" "refs/heads/$1" "$2" | run --pre-push origin; }
+base=$(git rev-parse HEAD)
+printf 'clean\n' > p1.txt; git add p1.txt; git commit -qm "clean change"
+out=$(pp master "$base"); check "push: clean commit passes" 0 "$out" $? "needles"
+git reset -q --hard "$base"
+printf 'x %s\n' FakePlainSecret001 > p2.txt; git add p2.txt; git commit -q --no-verify -m "sneaky"
+out=$(pp master "$base"); check "push: leak in a file (committed --no-verify)" 1 "$out" $? "p2.txt"
+git reset -q --hard "$base"
+printf 'ok\n' > p3.txt; git add p3.txt; git commit -qm "body mentions FakeNestedUser004"
+out=$(pp master "$base"); check "push: leak only in the commit message" 1 "$out" $? "message"
+git reset -q --hard "$base"
+git checkout -q -b newbranch; printf 'x %s\n' FakeListItem005 > p4.txt; git add p4.txt; git commit -qm b
+out=$(pp newbranch "$Z"); check "push: NEW branch carrying a leak" 1 "$out" $? "p4.txt"
+git checkout -q master; git branch -q -D newbranch
+printf 'x %s\n' FakePlainSecret001 > p5.txt; git add p5.txt; git commit -q --no-verify -m add; git push -q origin HEAD:refs/heads/master
+mid=$(git rev-parse HEAD); git rm -q p5.txt; git commit -qm "remove the leaked line"
+out=$(pp master "$mid"); check "push: a commit that only REMOVES a leak passes" 0 "$out" $? "needles"
+git reset -q --hard "$base"; git push -q -f origin HEAD:refs/heads/master
 # Broken vault YAML must fail closed AND withhold its content.
 printf 'vault_broken: "FakePlainSecret001\n' > b.yml
 ansible-vault encrypt --vault-password-file .vault_password b.yml --output ansible/inventory/group_vars/all/vault.yml >/dev/null; rm b.yml
