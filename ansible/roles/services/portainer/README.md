@@ -46,8 +46,8 @@ today:
 
 | Host | Sources allowed on tcp/9000 |
 | ---- | --------------------------- |
-| `eq12_docker` (192.168.25.15) | `192.168.25.20/32` — NPM LXC (CT 104), which proxies `portainer.moutovkin.com` -> `deb-docker.lan:9000`; `192.168.48.0/24` — operator workstation subnet |
-| `n5pro_docker` (192.168.30.15) | `192.168.48.0/24` — operator workstation subnet only. NPM has no proxy host for this port (its only n5pro-docker upstream is `lms.moutovkin.com` -> `:9001`), so the inherited NPM grant was removed in #140 |
+| `eq12_docker` (192.168.25.15) | `192.168.25.20/32` — NPM LXC (CT 104), which proxies `portainer.<domain>` -> `deb-docker.lan:9000`; `192.168.48.0/24` — operator workstation subnet |
+| `n5pro_docker` (192.168.30.15) | `192.168.48.0/24` — operator workstation subnet only. NPM has no proxy host for this port (its only n5pro-docker upstream is `lms.<domain>` -> `:9001`), so the inherited NPM grant was removed in #140 |
 
 Loopback is always allowed on both.
 

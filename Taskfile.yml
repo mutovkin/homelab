@@ -87,6 +87,24 @@ tasks:
       - ansible-playbook playbooks/configure-guests.yml -e apt_dist_upgrade=true {{.CLI_ARGS}}
 
   # === Ansible Utilities ===
+  lint:vault-leaks:
+    desc: Fail if any ansible-vault value appears in plaintext in a tracked file (public repo, #333)
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # Runs under the Python that runs Ansible (it needs PyYAML, which that env has) and puts
+      # that env first on PATH so `ansible-vault` resolves to the same install on either
+      # operator platform.
+      - |
+        PY=$(head -1 "$(command -v ansible-vault)" | sed 's/^#!//')
+        PATH="$(dirname "$PY"):$PATH" "$PY" -I scripts/check-vault-leaks.py
+
+  hooks:install:
+    desc: Install the opt-in pre-commit hook that runs lint:vault-leaks
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - printf '#!/bin/sh\nexec task lint:vault-leaks\n' > .git/hooks/pre-commit
+      - chmod +x .git/hooks/pre-commit
+
   ansible:lint:
     desc: Lint all Ansible playbooks and roles
     dir: '{{.ANSIBLE_DIR}}'

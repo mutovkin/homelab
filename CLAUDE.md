@@ -22,9 +22,15 @@ Everything deploys via `task deploy:full` (= `ansible-playbook playbooks/site.ym
    mutate state by hand. SSH is for read-only diagnostics only.
 2. **Support both operator platforms.** This repo is driven from a Mac (Homebrew, zsh)
    and an Arch/Omarchy PC (`pacman`/`yay`, zsh). Any install instructions must cover both.
-3. **Secrets live in ansible-vault.** Never commit plaintext secrets. `.env` files are
-   templated at deploy time from `vault.yml` vars and never committed. `.vault_password`
-   is gitignored.
+3. **Secrets live in ansible-vault — and so does anything private: this repo is PUBLIC.**
+   Never commit plaintext secrets. `.env` files are templated at deploy time from
+   `vault.yml` vars and never committed. `.vault_password` is gitignored. The base domain
+   is private too: write `<domain>` in prose and use `vault_base_domain` (or a
+   service-specific `vault_*_domain`) in config, never the literal — the same applies to
+   issue/PR text, which is public as well. `task lint:vault-leaks` fails if ANY vault value
+   appears in a tracked file (prints file:line + key, never the value); run it before every
+   push (`task hooks:install` makes it a pre-commit hook). Non-private keys are allowlisted
+   BY NAME with a reason in `scripts/vault-leak-allow.txt` (#333).
 4. **`become: false` on `synchronize` tasks.** Minimal Debian LXCs lack `sudo`; we
    connect as `root`. With `become: true`, Ansible injects `--rsync-path='sudo …'` and
    rsync fails. See [Gotchas](#gotchas).

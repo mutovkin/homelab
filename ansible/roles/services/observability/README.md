@@ -841,7 +841,7 @@ identities: changing one re-points every dashboard and alert that uses it.
 > purpose: `grafana.ini` sets `enforce_domain = true`, so every request that does
 > not use the configured domain is redirected. Do not "fix" the bad-status rule by
 > narrowing it to 2xx. The same setting means every Grafana **API** call by IP must
-> send `-H 'Host: grafana.moutovkin.com'` (`/api/health` is exempt, which is why the
+> send `-H 'Host: grafana.<domain>'` (`/api/health` is exempt, which is why the
 > role's readiness gate works without it).
 
 ## Firewall (:8089 and :9428)
@@ -904,7 +904,7 @@ sample that size would have "proved" nothing needs access.
 | `192.168.25.5/32` | eq12 agent | writer, `roles/vector_agent` |
 | `192.168.30.5/32` | n5pro agent | writer, `roles/vector_agent` |
 | `192.168.30.15/32` | n5pro_docker agent | writer, `roles/vector_agent` |
-| `192.168.25.20/32` | NPM | **verified**: CT 104's `proxy_host` row id 11, `vl.moutovkin.com` → `deb-docker.lan:9428`, `is_deleted=0` |
+| `192.168.25.20/32` | NPM | **verified**: CT 104's `proxy_host` row id 11, `vl.<domain>` → `deb-docker.lan:9428`, `is_deleted=0` |
 | `192.168.48.0/24` | operators | VictoriaLogs UI at `/select/vmui` |
 
 NPM was checked, not assumed — #140 established that inherited NPM grants in this

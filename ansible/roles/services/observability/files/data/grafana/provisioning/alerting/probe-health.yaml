@@ -136,7 +136,7 @@ groups:
       # Catches the reachable-but-unhealthy cases: 5xx, 401, 404.
       # NOTE: 301 is IN range on purpose. `http://grafana:3000` reports 301
       # because grafana.ini sets `enforce_domain = true`, so every request by
-      # IP/service-name is redirected to grafana.moutovkin.com. That is
+      # IP/service-name is redirected to grafana.<domain>. That is
       # expected and must not be "fixed" by narrowing the range to 2xx.
       - uid: obs-http-probe-bad-status
         title: HTTP probe returning a bad status

@@ -71,7 +71,7 @@ These are the controls the role actually enforces, not aspirations:
   `inventory/host_vars/<host>/vars.yml` (#140) — the role default is `{}`, so a host
   that deploys this role without declaring one fails the `nft_scoped_fw` assert rather
   than silently inheriting another host's reverse-proxy IP. Vaultwarden runs on
-  `eq12_docker` only today, where NPM proxies `bw/wv.moutovkin.com` ->
+  `eq12_docker` only today, where NPM proxies `bw/wv.<domain>` ->
   `deb-docker.lan:8086`. Every real (non-check) deploy
   probes the kernel for the table, reloads inline when it is missing or the ruleset
   changed, and hard-asserts — a `RemainAfterExit` oneshot reports "active" even after an
