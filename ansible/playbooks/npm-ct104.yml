@@ -4,7 +4,10 @@
 #
 #   --tags cutover   disable + stop NPM inside CT 104 (an eq12 reboot can no longer
 #                    resurrect it and reopen the two-NPMs-renew-one-cert race)
-#   --tags rollback  enable + start it again (then repoint DNS back to it)
+#   --tags rollback  enable + start it again (then repoint DNS back to it). After
+#                    `standby` the CT itself is stopped: first set CT 104 back to
+#                    `onboot: true` + `started: true` in host_vars/eq12 and apply
+#                    `task infra:hosts -- --limit eq12`, THEN run --tags rollback.
 #   --tags standby   stop the CT itself and assert it is a non-autostarting standby.
 #                    Requires `cutover` first (asserted). `onboot`/`started` are NOT set
 #                    here: proxmox_guests reconciles BOTH from host_vars/eq12, and
@@ -51,7 +54,17 @@
         quiet: true
       tags: [cutover, rollback, never]
 
+    - name: Read CT 104's run state before stopping it
+      ansible.builtin.command:
+        argv: [pct, status, "{{ npm_ct }}"]
+      register: npm_ct_status_pre
+      changed_when: false
+      tags: [standby, never]
+
+    # Only checkable while the CT runs (pct exec needs it). A re-run on an already-stopped
+    # standby skips this, which is safe: a stopped CT with `started: false` cannot start NPM.
     - name: Read NPM's units inside CT 104 before stopping it
+      when: "'running' in npm_ct_status_pre.stdout"
       ansible.builtin.command:
         argv: [pct, exec, "{{ npm_ct }}", --, systemctl, is-enabled, npm, openresty]
       register: npm_ct_units_pre
@@ -60,6 +73,7 @@
       tags: [standby, never]
 
     - name: Assert cutover ran first (NPM units disabled inside CT 104)
+      when: "'running' in npm_ct_status_pre.stdout"
       ansible.builtin.assert:
         that:
           - (npm_ct_units_pre.stdout_lines | unique) == ['disabled']
