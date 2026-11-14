@@ -1,0 +1,167 @@
+apiVersion: 1
+
+# Grafana file-provisioned alerting — the certificate the reverse proxy SERVES (#331)
+#
+# The failure this exists for (#329): NPM renewed the wildcard certificate on time and
+# the file on disk was valid throughout, but every nginx reload had been failing for
+# months (`mkdir() "/tmp/nginx/body" failed`), so the certificate actually SERVED expired
+# on 2026-11-08 and every proxied site broke for five days. Nothing alerted, because
+# nothing looked. A probe of the file on disk would have stayed green the whole time,
+# which is why the probe in files/data/telegraf/telegraf.conf ([[inputs.x509_cert]]) is a
+# TLS handshake BY NAME against the proxy.
+#
+# Aggregated `by (check_type)` only: `check_type` is in the notification policy's
+# group_by (the deploy-time group_by guard enforces that), and the `source` tag carries
+# the probed hostname, which this public repo must not spell out (#333).
+#
+# NO DEEP LINKS: no dashboard plots x509_cert_*, so there is nothing honest to link to
+# (and a half-paired link is boot-fatal; see probe-health.yaml).
+
+groups:
+  - orgId: 1
+    name: served-cert
+    folder: Observability
+    # telegraf collects every 60s. Certificate lifetime is measured in days, so the
+    # cadence is about detection of the PROBE dying, not of the cert.
+    interval: 1m
+    rules:
+      # WHERE TO LOOK: `openssl s_client -connect <proxy>:443 -servername <name>` from a
+      # LAN host, and compare its notAfter with the file NPM holds on disk. If disk is
+      # newer than served, the proxy is failing to reload (#329's exact shape): run
+      # `nginx -t` inside it.
+      - uid: obs-served-cert-expiring
+        title: Served TLS certificate expires within 14 days
+        condition: C
+        for: 10m
+        # Absence is owned by obs-served-cert-absent below, exactly once.
+        noDataState: OK
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: "The certificate the reverse proxy serves expires in {{ humanizeDuration $values.B.Value }}."
+          description: |-
+            NPM renews within 30 days of expiry, so 14 days left means renewal has been failing for over two weeks, or renewal succeeded and the proxy never loaded the new file (#329).
+            Compare the served notAfter with the file on disk.
+        labels:
+          severity: critical
+          component: served-cert
+        data:
+          # A: the leaf is the soonest-expiring cert in the chain (roots are excluded at
+          # the probe), so `min` picks it.
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "min by (check_type) (x509_cert_expiry)"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          # B: dropNN, not replaceNN: a null must never read as "0 seconds left" or as
+          # healthy (#108).
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          # C: 14 days = 1209600 s.
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: lt
+                    params:
+                      - 1209600
+
+      # Absence: a probe that cannot connect (DNS wrong, proxy down, TLS refused) emits
+      # NO series at all, so the expiry rule above would sit at NoData -> OK. This rule
+      # is what turns "the probe went silent" into a page. Same lag() shape as
+      # obs-http-probe-absent, and it also fires before the first sample ever lands.
+      - uid: obs-served-cert-absent
+        title: Served TLS certificate probe stopped reporting
+        condition: C
+        for: 5m
+        noDataState: Alerting
+        execErrState: Alerting
+        isPaused: false
+        annotations:
+          summary: The served-certificate probe has produced no samples for over 10 minutes.
+          description: |-
+            Either the proxy is not completing TLS handshakes for the probed name (check it from a LAN host first), or telegraf on eq12_docker is down (`docker logs telegraf`).
+        labels:
+          severity: critical
+          component: served-cert
+        data:
+          - refId: A
+            datasourceUid: P4169E866C3094E38
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: A
+              datasource:
+                type: victoriametrics-metrics-datasource
+                uid: P4169E866C3094E38
+              expr: "min by (check_type) (lag(x509_cert_expiry[24h]))"
+              instant: true
+              range: false
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: B
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 86400
+              to: 0
+            model:
+              refId: C
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 600
