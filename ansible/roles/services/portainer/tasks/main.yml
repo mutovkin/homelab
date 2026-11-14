@@ -14,6 +14,9 @@
     nft_fw_name: portainer
     nft_fw_description: Portainer UI firewall (Ansible-managed nftables table inet portainer_fw)
     nft_fw_ports: "{{ portainer_firewall.ports }}"
+    # Docker-bridge hairpin (#331 R#1). Optional per host: a host whose portainer_firewall has
+    # no lan_iface keeps the previous behaviour (no local-container accept).
+    nft_fw_lan_iface: "{{ portainer_firewall.lan_iface | default('') }}"
 
 - name: Deploy Portainer via the shared service pipeline
   ansible.builtin.include_role:
