@@ -87,7 +87,7 @@
       ansible.builtin.command:
         argv: [pct, shutdown, "{{ npm_ct }}", --timeout, "60"]
       register: npm_ct_shutdown
-      changed_when: true
+      changed_when: npm_ct_shutdown.rc == 0
       failed_when: npm_ct_shutdown.rc != 0 and 'not running' not in npm_ct_shutdown.stderr
       tags: [standby, never]
 
