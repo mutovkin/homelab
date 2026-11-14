@@ -16,13 +16,14 @@
         │           │           │       │   │           │
    ┌────┴────┐ ┌────┴─────┐ ┌───┴───┐  ┌┴───┴──┐  ┌─────┴──────┐
    │ VM-100  │ │ CT-101   │ │CT-104 │  │VM-200 │  │ CT-201     │
-   │ Home    │ │deb-docker│ │ NPM   │  │TrueNAS│  │n5pro-docker│
-   │Assistant│ │(Docker)  │ │       │  │       │  │(Docker)    │
+   │ Home    │ │deb-docker│ │old NPM│  │TrueNAS│  │n5pro-docker│
+   │Assistant│ │(Docker)  │ │stopped│  │       │  │(Docker)    │
    └─────────┘ └────┬─────┘ └───────┘  └───────┘  └────┬───────┘
                     │                                  │
     ┌───────┬───────┼───────┬──────┬──────┬──────┐     │
     │       │       │       │      │      │      │     ├──LMS
    PG    Obs    Vault    SearX  Joplin  Port  Watch    ├──Port
+                                         + NPM (#331)
                                                        └──Watch
                                                   (planned #91: Immich, Frigate,
                                                    NextCloud, PG)
@@ -124,7 +125,7 @@ eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 
 | Range | Role | Notes |
 | ----- | ---- | ----- |
-| 192.168.25.0/24 | EQ12 infrastructure | `pve` .5, deb-docker (CT 101) .15, NPM (CT 104) .20 |
+| 192.168.25.0/24 | EQ12 infrastructure | `pve` .5, deb-docker (CT 101) .15 (also NPM since #331), old NPM CT 104 .20 (stopped standby) |
 | 192.168.30.0/24 | N5 Pro infrastructure | `n5pro` .5, n5pro-docker (CT 201) .15, music-workbench (CT 202) .16 |
 | 192.168.48.0/24 | Operator workstations | Static/infra range, **not** a DHCP pool. Permanent grant in every scoped nftables allowlist (postgres/portainer/vaultwarden) and in PostgreSQL's `pg_hba.conf`, so an operator can reach the admin surfaces directly (#79, #114). |
 

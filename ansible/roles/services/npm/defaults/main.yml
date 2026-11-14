@@ -1,0 +1,24 @@
+---
+# Nginx Proxy Manager on a docker host (#331). See README.md.
+
+# Bind root: <npm_data_dir>/data -> /data, <npm_data_dir>/letsencrypt -> /etc/letsencrypt.
+npm_data_dir: "{{ data_mount }}/npm"
+
+# Pre-upgrade backups (tasks/main.yml) kept in {{ data_mount }}/backups.
+npm_backup_retention: 5
+
+# --- One-shot seed from the helper-script LXC this role replaces (tasks/seed.yml) ---
+# Armed only by `-e npm_seed_from_ct104=true` AND an absent destination database, so a
+# routine deploy can never re-seed over live data.
+npm_seed_from_ct104: false
+# Where the seed lands. Point it elsewhere for the scratch rehearsal the plan requires
+# before the real run, together with npm_seed_only=true.
+npm_seed_dest: "{{ npm_data_dir }}"
+# Stop the role right after seeding (no firewall, no deploy): the rehearsal mode.
+npm_seed_only: false
+# The Proxmox host that runs both CTs, and their ids. CT 104 is not in the inventory;
+# every step that touches it is delegated to this host and uses `pct`, so the TLS keys
+# and the DNS-provider token never transit the operator machine.
+npm_seed_proxmox_host: eq12
+npm_seed_source_vmid: 104
+npm_seed_target_vmid: 101

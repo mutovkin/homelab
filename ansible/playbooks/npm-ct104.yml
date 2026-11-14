@@ -1,0 +1,111 @@
+---
+# Cutover / rollback switch for the helper-script NPM LXC (CT 104) that the services/npm
+# role replaced (#331). CT 104 is a COLD STANDBY: never destroyed (operator decision).
+#
+#   --tags cutover   disable + stop NPM inside CT 104 (an eq12 reboot can no longer
+#                    resurrect it and reopen the two-NPMs-renew-one-cert race)
+#   --tags rollback  enable + start it again (then repoint DNS back to it). After
+#                    `standby` the CT itself is stopped: first set CT 104 back to
+#                    `onboot: true` + `started: true` in host_vars/eq12 and apply
+#                    `task infra:hosts -- --limit eq12`, THEN run --tags rollback.
+#   --tags standby   stop the CT itself and assert it is a non-autostarting standby.
+#                    Requires `cutover` first (asserted). `onboot`/`started` are NOT set
+#                    here: proxmox_guests reconciles BOTH from host_vars/eq12, and
+#                    `started: true` makes it START the CT on every run. So set CT 104 to
+#                    `onboot: false` AND `started: false` there and apply
+#                    `task infra:hosts -- --limit eq12` (never n5pro while #303 is
+#                    unmerged), or the next site run silently revives it.
+#
+# Every task is delegated through the Proxmox host because CT 104 is not in the inventory.
+- name: Switch the helper-script NPM LXC (CT 104)
+  hosts: eq12
+  become: true
+  gather_facts: false
+  vars:
+    npm_ct: 104
+  tasks:
+    - name: Disable and stop NPM inside CT 104
+      ansible.builtin.command:
+        argv: [pct, exec, "{{ npm_ct }}", --, systemctl, disable, --now, npm, openresty]
+      changed_when: true
+      tags: [cutover, never]
+
+    - name: Enable and start NPM inside CT 104
+      ansible.builtin.command:
+        argv: [pct, exec, "{{ npm_ct }}", --, systemctl, enable, --now, openresty, npm]
+      changed_when: true
+      tags: [rollback, never]
+
+    - name: Read CT 104's units after the switch
+      ansible.builtin.command:
+        argv: [pct, exec, "{{ npm_ct }}", --, systemctl, is-enabled, npm, openresty]
+      register: npm_ct_enabled
+      changed_when: false
+      failed_when: false
+      tags: [cutover, rollback, never]
+
+    - name: Assert the units ended in the requested state
+      ansible.builtin.assert:
+        that:
+          - >-
+            (npm_ct_enabled.stdout_lines | unique)
+            == (['disabled'] if 'cutover' in ansible_run_tags else ['enabled'])
+        fail_msg: "CT {{ npm_ct }} units are {{ npm_ct_enabled.stdout_lines }} after the switch"
+        quiet: true
+      tags: [cutover, rollback, never]
+
+    - name: Read CT 104's run state before stopping it
+      ansible.builtin.command:
+        argv: [pct, status, "{{ npm_ct }}"]
+      register: npm_ct_status_pre
+      changed_when: false
+      tags: [standby, never]
+
+    # Only checkable while the CT runs (pct exec needs it). A re-run on an already-stopped
+    # standby skips this, which is safe: a stopped CT with `started: false` cannot start NPM.
+    - name: Read NPM's units inside CT 104 before stopping it
+      when: "'running' in npm_ct_status_pre.stdout"
+      ansible.builtin.command:
+        argv: [pct, exec, "{{ npm_ct }}", --, systemctl, is-enabled, npm, openresty]
+      register: npm_ct_units_pre
+      changed_when: false
+      failed_when: false
+      tags: [standby, never]
+
+    - name: Assert cutover ran first (NPM units disabled inside CT 104)
+      when: "'running' in npm_ct_status_pre.stdout"
+      ansible.builtin.assert:
+        that:
+          - (npm_ct_units_pre.stdout_lines | unique) == ['disabled']
+        fail_msg: >-
+          NPM inside CT {{ npm_ct }} is {{ npm_ct_units_pre.stdout_lines }}. Run --tags cutover
+          first, so a later start of the standby CT cannot bring a second NPM up.
+        quiet: true
+      tags: [standby, never]
+
+    - name: Stop CT 104
+      ansible.builtin.command:
+        argv: [pct, shutdown, "{{ npm_ct }}", --timeout, "60"]
+      register: npm_ct_shutdown
+      changed_when: npm_ct_shutdown.rc == 0
+      failed_when: npm_ct_shutdown.rc != 0 and 'not running' not in npm_ct_shutdown.stderr
+      tags: [standby, never]
+
+    - name: Read CT 104's live onboot and status
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        pct config {{ npm_ct }} --current | awk -F': ' '$1=="onboot"{print $2}';
+        pct status {{ npm_ct }} | awk '{print $2}'
+      args:
+        executable: /bin/bash
+      register: npm_ct_state
+      changed_when: false
+      tags: [standby, never]
+
+    - name: Assert CT 104 is a stopped, non-autostarting standby
+      ansible.builtin.assert:
+        that:
+          - npm_ct_state.stdout_lines == ['0', 'stopped']
+        fail_msg: "CT {{ npm_ct }} onboot/status is {{ npm_ct_state.stdout_lines }}, wanted ['0', 'stopped']"
+        quiet: true
+      tags: [standby, never]
