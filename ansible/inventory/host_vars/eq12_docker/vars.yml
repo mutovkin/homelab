@@ -13,6 +13,9 @@ services:
   - searxng
   - joplin
   - portainer
+  # Reverse proxy for every <domain> service (#331). Replaces the helper-script LXC
+  # CT 104, kept as a stopped cold standby (operator decision, never deleted).
+  - npm
   - watchtower
 
 # Docker network subnets (must match compose files)
@@ -25,6 +28,9 @@ docker_networks:
   portainer: "172.23.0.0/24"
   vaultwarden: "172.24.0.0/24"
   watchtower: "172.25.0.0/24"
+  # 172.17, not the next 172.16 slot: part of 172.16.0.0/16 is routed LAN space (the UniFi
+  # controller upstream resolves into it), and a docker route would shadow it (#331 R#2).
+  npm: "172.17.0.0/24"
 
 # Scoped fail-open nftables allowlist for the postgresql role's published
 # ports (#79, per-port since #114). Sources NOT listed for a port are dropped
@@ -211,12 +217,26 @@ observability_firewall:
 # gets no access to the others. Entries must be IPv4 CIDRs of prefix /1../32
 # (asserted by roles/nft_scoped_fw).
 portainer_firewall:
+  # lan_iface enables the docker-bridge hairpin accept (#331 R#1): without it a LOCAL
+  # container (the NPM container on this host) reaching :9000 via the host address was
+  # dropped. Measured before the fix: a sibling container timed out on :9000 and :8086.
+  lan_iface: eth0
   ports:
     9000:
       - 192.168.25.20/32 # NPM LXC (CT 104) — proxies portainer.<domain> -> deb-docker.lan:9000
       - 192.168.48.0/24 # operator workstation subnet
 vaultwarden_firewall:
+  lan_iface: eth0  # docker-bridge hairpin for the local NPM container (#331 R#1)
   ports:
     8086:
       - 192.168.25.20/32 # NPM LXC (CT 104) — proxies bw/wv.<domain> -> deb-docker.lan:8086
       - 192.168.48.0/24 # operator workstation subnet
+
+# NPM admin UI (:81) allowlist (#331). 80/443 are deliberately NOT governed: they are the
+# LAN-wide front door, as they were on CT 104. host_addr scoping as for postgres.
+npm_firewall:
+  host_addr: 192.168.25.15
+  lan_iface: eth0
+  ports:
+    81:
+      - 192.168.48.0/24  # operator workstation subnet

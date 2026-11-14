@@ -54,7 +54,9 @@ services:
 
 # Docker network subnets — n5pro allocation plan (#84).
 # Fleet-wide 172.16.0.0/12 map (keep every row disjoint):
-#   172.16–172.17   unassigned
+#   172.16          OFF-LIMITS: part of it is routed LAN space (the UniFi upstream);
+#                   a docker route there would shadow it (#331)
+#   172.17          eq12: npm (pinned in host_vars/eq12_docker, #331)
 #   172.18–172.19   FLEET-WIDE auto-allocation pool, both hosts (#126) —
 #                   docker_default_address_pools in group_vars/docker_hosts.yml.
 #                   docker0 draws from it too, and unlike a user-defined network it

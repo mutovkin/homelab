@@ -1,0 +1,188 @@
+---
+# One-shot seed of NPM's state from the helper-script LXC (CT 104) this role replaces (#331).
+#
+# Gate: `npm_seed_from_ct104=true` (checked by the caller) AND no database at the
+# destination. ORDERING IS THE SAFETY PROPERTY (plan review R#3): the database is the
+# signal that spends the gate, so it is placed LAST, after everything it references (the
+# certificates under letsencrypt/, the generated nginx confs under data/nginx/). A run that
+# dies anywhere before that leaves the gate armed and the next run starts over; it can
+# never leave a database whose confs point at certificates that were never unpacked.
+#
+# CT 104 is not in the inventory, so every step touching it is delegated to the Proxmox
+# host and uses `pct`. The payload (TLS private keys, the DNS-provider token in the DB)
+# moves CT 104 -> eq12 -> CT 101 and never reaches the operator machine; every task that
+# handles it sets diff: false, and nothing ever prints file contents.
+#
+# --check cannot exercise any of this (every step is a command); its first live run is its
+# first test. The plan therefore requires a rehearsal into a scratch destination first:
+#   -e npm_seed_from_ct104=true -e npm_seed_only=true -e npm_seed_dest=/data/npm-seedtest
+
+- name: Stat the NPM database at the seed destination
+  ansible.builtin.stat:
+    path: "{{ npm_seed_dest }}/data/database.sqlite"
+  register: npm_seed_db
+
+- name: Seed NPM state from the source CT
+  when: not npm_seed_db.stat.exists
+  vars:
+    _stage: /root/npm-seed-331
+  block:
+    - name: Read the source's live proxy hosts and certificates (what the seed must reproduce)
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ npm_seed_source_vmid }}"
+          - --
+          - sqlite3
+          - -json
+          - /data/database.sqlite
+          - >-
+            SELECT 'proxy_host' AS kind, domain_names AS name FROM proxy_host WHERE is_deleted = 0
+            UNION ALL
+            SELECT 'certificate', domain_names FROM certificate WHERE is_deleted = 0
+            ORDER BY 1, 2
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+      register: npm_seed_source_rows
+      changed_when: false
+
+    - name: Package the source state on the source CT (consistent DB copy via .backup)
+      ansible.builtin.command:
+        argv:
+          - pct
+          - exec
+          - "{{ npm_seed_source_vmid }}"
+          - --
+          - sh
+          - -c
+          - >-
+            set -eu; umask 077; d={{ _stage }}; rm -rf "$d"; mkdir "$d";
+            sqlite3 /data/database.sqlite ".backup $d/database.sqlite";
+            tar -C / --exclude=data/logs --exclude=data/nginx/temp
+            --exclude='data/database.sqlite*' -czf "$d/data.tgz" data;
+            tar -C /etc -czf "$d/letsencrypt.tgz" letsencrypt
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+      changed_when: true
+      diff: false
+
+    - name: Create the staging directory on the Proxmox host
+      ansible.builtin.file:
+        path: "{{ _stage }}"
+        state: directory
+        mode: "0700"
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+
+    - name: Create the staging directory on the target CT
+      ansible.builtin.file:
+        path: "{{ _stage }}"
+        state: directory
+        mode: "0700"
+
+    # Loop items are bare FILE NAMES, never content, so nothing secret can reach a
+    # failure dump or a -v log (CLAUDE.md, loop_control.label hides nothing).
+    - name: Pull each payload file from the source CT to the Proxmox host
+      ansible.builtin.command:
+        argv: [pct, pull, "{{ npm_seed_source_vmid }}", "{{ _stage }}/{{ item }}", "{{ _stage }}/{{ item }}", --perms, "0600"]
+      loop: [database.sqlite, data.tgz, letsencrypt.tgz]
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+      changed_when: true
+      diff: false
+
+    - name: Push each payload file into the target CT
+      ansible.builtin.command:
+        argv: [pct, push, "{{ npm_seed_target_vmid }}", "{{ _stage }}/{{ item }}", "{{ _stage }}/{{ item }}", --perms, "0600"]
+      loop: [database.sqlite, data.tgz, letsencrypt.tgz]
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+      changed_when: true
+      diff: false
+
+    - name: Create the seed destination
+      ansible.builtin.file:
+        path: "{{ npm_seed_dest }}"
+        state: directory
+        mode: "0755"
+
+    # Everything the database REFERENCES lands first (see the header).
+    - name: Unpack the certificates (letsencrypt/) and the non-database state (data/)
+      ansible.builtin.command:
+        argv: [tar, -C, "{{ npm_seed_dest }}", -xzf, "{{ _stage }}/{{ item }}"]
+      loop: [letsencrypt.tgz, data.tgz]
+      changed_when: true
+      diff: false
+
+    - name: Read the staged database's proxy hosts and certificates
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json, sqlite3, sys
+            db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+            rows = db.execute(
+                "SELECT 'proxy_host', domain_names FROM proxy_host WHERE is_deleted = 0 "
+                "UNION ALL SELECT 'certificate', domain_names FROM certificate WHERE is_deleted = 0 "
+                "ORDER BY 1, 2").fetchall()
+            print(json.dumps([{"kind": k, "name": n} for k, n in rows]))
+          - "{{ _stage }}/database.sqlite"
+      register: npm_seed_staged_rows
+      changed_when: false
+
+    - name: Read the certificate paths the seeded nginx confs reference
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        grep -rhoE 'ssl_certificate(_key)? +/etc/letsencrypt/[^;]+' {{ npm_seed_dest }}/data/nginx/proxy_host/*.conf
+        | awk '{print $2}' | sort -u
+      args:
+        executable: /bin/bash
+      register: npm_seed_cert_refs
+      changed_when: false
+
+    - name: Stat every referenced certificate file in the seeded letsencrypt tree
+      ansible.builtin.stat:
+        path: "{{ npm_seed_dest }}/letsencrypt/{{ item | regex_replace('^/etc/letsencrypt/', '') }}"
+        # live/<name>/*.pem are SYMLINKS into archive/. Without follow, stat is lstat and a
+        # dangling link reports exists=true, so a seed missing archive/ would pass (#336 review).
+        follow: true
+      loop: "{{ npm_seed_cert_refs.stdout_lines }}"
+      register: npm_seed_cert_stats
+
+    - name: Assert the staged database matches the source, by name, and its certificates are all present
+      ansible.builtin.assert:
+        that:
+          - (npm_seed_source_rows.stdout | from_json) == (npm_seed_staged_rows.stdout | from_json)
+          - (npm_seed_source_rows.stdout | from_json | selectattr('kind', 'eq', 'proxy_host') | list | length) > 0
+          - npm_seed_cert_refs.stdout_lines | length > 0
+          - npm_seed_cert_stats.results | rejectattr('stat.exists') | list | length == 0
+          - npm_seed_cert_stats.results | rejectattr('stat.isreg', 'defined') | list | length == 0
+          - npm_seed_cert_stats.results | rejectattr('stat.isreg') | list | length == 0
+        fail_msg: >-
+          The staged NPM database does not reproduce CT {{ npm_seed_source_vmid }}'s live
+          proxy hosts and certificates (compared by name), or a certificate file a seeded
+          nginx conf references is missing from the unpacked letsencrypt tree. The database
+          was NOT placed, so the gate is still armed; fix the cause and re-run.
+        quiet: true
+
+    # LAST: placing the database is what spends the gate.
+    - name: Place the database (spends the seed gate)
+      ansible.builtin.copy:
+        src: "{{ _stage }}/database.sqlite"
+        dest: "{{ npm_seed_dest }}/data/database.sqlite"
+        remote_src: true
+        mode: "0600"  # holds the DNS-provider token; NPM runs as root in the container
+      diff: false
+
+  always:
+    - name: Remove the staging copy on the source CT
+      ansible.builtin.command:
+        argv: [pct, exec, "{{ npm_seed_source_vmid }}", --, rm, -rf, "{{ _stage }}"]
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+      changed_when: true
+    - name: Remove the staging copy on the Proxmox host
+      ansible.builtin.file:
+        path: "{{ _stage }}"
+        state: absent
+      delegate_to: "{{ npm_seed_proxmox_host }}"
+    - name: Remove the staging copy on the target CT
+      ansible.builtin.file:
+        path: "{{ _stage }}"
+        state: absent

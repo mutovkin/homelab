@@ -1,0 +1,59 @@
+services:
+  npm:
+    # PINNED to an exact release, never `:2` / `:latest` (#331 plan, review R#5). NPM runs
+    # one-way knex migrations on start (2.13.3's notes call its migration not easily
+    # reversible), and the shared _deploy role runs `pull: always`: a floating tag would
+    # turn every routine deploy into an unreviewed schema upgrade of the single entry
+    # point for every proxied service. Bump deliberately, behind the role's pre-upgrade
+    # backup gate (tasks/main.yml), and record it in README.md's bump log.
+    #
+    # Consequence: watchtower can never report a new NPM release for an immutable tag.
+    # Checking for one is a manual step (README.md, "Updates").
+    #
+    # 2.12.6 first, as a like-for-like hop from the helper-script install on CT 104 that
+    # this replaces (same app version, so the seeded database needs no migration).
+    image: jc21/nginx-proxy-manager:2.12.6
+    container_name: npm
+    restart: unless-stopped
+    security_opt:
+      - "apparmor:unconfined"
+      - "no-new-privileges:true"
+    labels:
+      # enable + monitor-only: stateful (SQLite schema), holds the TLS keys, and is the
+      # front door for every proxied service. With the exact-version pin above this
+      # reports only a re-push of the same tag; see the image comment.
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
+    ports:
+      # 80/443: LAN-wide, the same exposure CT 104 had. Public DNS points the domain at a
+      # PRIVATE address, so nothing outside the LAN can reach these (#331).
+      - "80:80"
+      - "443:443"
+      # 81: NPM's admin UI. Scoped to the operator subnet by the role's nftables table
+      # (`inet npm_fw`), not open to the LAN.
+      - "81:81"
+    volumes:
+      # The image declares only /data as a volume; /etc/letsencrypt must be mounted
+      # explicitly or every certificate lives in the container layer and dies with it.
+      - ${NPM_DATA_DIR:?required}/data:/data
+      - ${NPM_DATA_DIR:?required}/letsencrypt:/etc/letsencrypt
+    environment:
+      TZ: ${TIMEZONE:-UTC}
+    # The image declares NO healthcheck (verified on 2.12.6's config, review R#4), so this
+    # is the only health state the container has. /usr/bin/check-health ships in the image
+    # (a healthcheck needs its binary inside the image; CLAUDE.md).
+    healthcheck:
+      test: ["CMD", "/usr/bin/check-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - npm_network
+
+networks:
+  npm_network:
+    name: npm_network
+    ipam:
+      config:
+        - subnet: ${NPM_NETWORK_SUBNET:?required - pinned in host_vars docker_networks.npm}

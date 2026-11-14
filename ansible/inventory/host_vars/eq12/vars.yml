@@ -157,11 +157,16 @@ proxmox_lxcs:
     netif:
       net0: "name=eth0,bridge=vmbr0,gw=192.168.23.1,hwaddr=5E:E1:3E:81:01:5F,ip=192.168.25.20/18,type=veth"
     nesting: false
-    onboot: true
-    started: true
+    # COLD STANDBY since #331: NPM now runs as the services/npm role on eq12_docker.
+    # Operator decision: never delete this CT; keep it stopped and not autostarting.
+    # proxmox_guests reconciles BOTH keys (`started: true` would START it on every run).
+    # To revive it as a rollback: set both to true, apply `task infra:hosts -- --limit
+    # eq12`, then `playbooks/npm-ct104.yml --tags rollback` and repoint DNS.
+    onboot: false
+    started: false
     tags:
       - nginx-proxy-manager
-    description: "Nginx Proxy Manager — reverse proxy and SSL management"
+    description: "Nginx Proxy Manager (helper-script LXC) — STOPPED cold standby since #331"
 
 # --- telegraf_agent (#186) ---------------------------------------------------
 # eq12 is the one host with ACPI fan objects (five, binary cur_state 0/1 —

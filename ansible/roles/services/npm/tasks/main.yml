@@ -1,0 +1,152 @@
+---
+# Nginx Proxy Manager (#331). Order matters: firewall, then the optional one-shot seed,
+# then the unconditional "a database exists" gate, then the pre-upgrade backup, then the
+# shared deploy. See README.md and docs/superpowers/plans/2026-11-14-npm-docker-migration.md.
+
+- name: Restrict NPM's admin UI port to approved sources
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: npm
+    nft_fw_description: NPM admin UI firewall (Ansible-managed nftables table inet npm_fw)
+    nft_fw_ports: "{{ npm_firewall.ports }}"
+    nft_fw_scope_guard: host_addr
+    nft_fw_host_addr: "{{ npm_firewall.host_addr }}"
+    nft_fw_lan_iface: "{{ npm_firewall.lan_iface }}"
+    nft_fw_drop_ipv6: true
+  when: not (npm_seed_only | bool)
+
+- name: Seed NPM state from the helper-script LXC (one-shot, explicitly armed)
+  ansible.builtin.include_tasks: seed.yml
+  when: npm_seed_from_ct104 | bool
+
+- name: Stop here in seed-rehearsal mode
+  ansible.builtin.meta: end_role
+  when: npm_seed_only | bool
+
+# UNCONDITIONAL (plan review R#3): independent of the seed flag. Without a database, a
+# first start would make NPM create a fresh schema and its DEFAULT ADMIN account on the
+# LAN-facing admin port. A routine `--tags npm` against an empty directory must fail red.
+# The one exception is --check, where the seed (all commands) cannot have run.
+- name: Stat the NPM database
+  ansible.builtin.stat:
+    path: "{{ npm_data_dir }}/data/database.sqlite"
+  register: npm_db
+
+- name: Assert NPM has a database before anything starts it
+  ansible.builtin.assert:
+    that:
+      - npm_db.stat.exists or ansible_check_mode
+    fail_msg: >-
+      {{ npm_data_dir }}/data/database.sqlite does not exist. Starting NPM now would create
+      an empty schema and a default admin account. Seed it first
+      (`-e npm_seed_from_ct104=true`, see README.md) or restore a backup into
+      {{ npm_data_dir }}.
+    quiet: true
+
+# --- Pre-upgrade backup gate (vaultwarden's pattern, review R#5) ---
+- name: Inspect the running NPM container
+  community.docker.docker_container_info:
+    name: npm
+  register: npm_container
+  check_mode: false
+
+- name: Read the NPM image reference from the compose file
+  ansible.builtin.set_fact:
+    npm_image: "{{ (lookup('file', role_path ~ '/files/compose.yaml') | from_yaml).services.npm.image }}"
+
+- name: Pull the NPM image to compare against the running container
+  community.docker.docker_image_pull:
+    name: "{{ npm_image }}"
+    pull: always
+  register: npm_pulled
+  check_mode: false
+  when: npm_container.exists or npm_db.stat.exists
+
+- name: Determine whether this deploy would change NPM's image
+  ansible.builtin.set_fact:
+    # Keyed on the DATA, not the container (vaultwarden's #107 lesson): with the container
+    # gone and the tag bumped, compose would otherwise start the new image straight onto the
+    # existing database and its one-way migrations would run with no backup.
+    npm_upgrade_pending: >-
+      {{ npm_db.stat.exists
+         and (not npm_container.exists
+              or npm_pulled.image.Id | default('') != npm_container.container.Image) }}
+
+- name: Assert NPM backup retention keeps at least one archive
+  ansible.builtin.assert:
+    that:
+      - npm_backup_retention | int >= 1
+    fail_msg: "npm_backup_retention must be >= 1 (0 would prune the archive just taken), got {{ npm_backup_retention }}"
+    quiet: true
+
+- name: Back up NPM before its image changes
+  when: npm_upgrade_pending | bool
+  block:
+    - name: Stop NPM so its SQLite database is archived consistently
+      community.docker.docker_container:
+        name: npm
+        state: stopped
+      when: npm_container.exists
+
+    - name: Create the backup directory
+      ansible.builtin.file:
+        path: "{{ data_mount }}/backups"
+        state: directory
+        mode: "0700"
+
+    - name: Archive NPM state (database, nginx confs, certificates)
+      community.general.archive:
+        path: "{{ npm_data_dir }}"
+        dest: "{{ data_mount }}/backups/npm-pre-{{ ansible_date_time.iso8601_basic_short }}.tgz"
+        format: gz
+        mode: "0600"
+      diff: false
+
+    - name: Verify the archive's database opens and has proxy hosts
+      ansible.builtin.shell: >-
+        set -euo pipefail; t=$(mktemp -d); trap 'rm -rf "$t"' EXIT;
+        gzip -t {{ data_mount }}/backups/npm-pre-{{ ansible_date_time.iso8601_basic_short }}.tgz;
+        tar -C "$t" -xzf {{ data_mount }}/backups/npm-pre-{{ ansible_date_time.iso8601_basic_short }}.tgz --wildcards '*/data/database.sqlite';
+        python3 -c "import sqlite3,sys,glob;
+        p=glob.glob(sys.argv[1]+'/**/data/database.sqlite',recursive=True)[0];
+        n=sqlite3.connect('file:'+p+'?mode=ro',uri=True).execute('select count(*) from proxy_host where is_deleted=0').fetchone()[0];
+        sys.exit(0 if n>0 else 3)" "$t"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Find existing NPM backups
+      ansible.builtin.find:
+        paths: "{{ data_mount }}/backups"
+        patterns: "npm-pre-*.tgz"
+      register: npm_backups
+
+    - name: Prune NPM backups beyond the retention limit
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: >-
+        {{ (npm_backups.files | sort(attribute='mtime', reverse=true)
+            | map(attribute='path') | list)[npm_backup_retention | int:] }}
+  rescue:
+    - name: Restart NPM on the OLD image after a failed backup
+      community.docker.docker_container:
+        name: npm
+        state: started
+      when: npm_container.exists
+    - name: Refuse to upgrade without a verified backup
+      ansible.builtin.fail:
+        msg: >-
+          The pre-upgrade NPM backup failed, so the image change was NOT applied and NPM
+          was restarted on its current image. Fix the cause (disk space, permissions) and
+          re-run.
+
+- name: Deploy NPM via the shared service pipeline
+  ansible.builtin.include_role:
+    name: services/_deploy
+  vars:
+    svc: npm
+    svc_data_dirs:
+      - "{{ npm_data_dir }}/data"
+      - "{{ npm_data_dir }}/letsencrypt"
