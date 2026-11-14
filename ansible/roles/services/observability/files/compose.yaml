@@ -322,6 +322,12 @@ services:
       # the WHOLE file ("invalid interpolation format"). Measured on #139's
       # first live apply. Quoting costs nothing and removes the tripwire.
       TELEGRAF_HOSTNAME: "${TELEGRAF_HOSTNAME:?required - see roles/services/observability/templates/env.j2 (#178)}"
+      # The NAME the served-certificate probe connects to (#331, #329): a proxied
+      # hostname, so the probe walks exactly the path a client walks (DNS -> NPM ->
+      # the cert NPM actually SERVES). Templated from vault_grafana_domain; the repo
+      # is public and never carries the literal (#333). `:?` for the same reason as
+      # TELEGRAF_HOSTNAME: unset, telegraf would probe the literal "${...}" string.
+      SERVED_CERT_PROBE_HOST: "${SERVED_CERT_PROBE_HOST:?required - see roles/services/observability/templates/env.j2 (#331)}"
     deploy:
       resources:
         limits:
