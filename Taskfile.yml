@@ -106,25 +106,59 @@ tasks:
       - scripts/test-check-vault-leaks.sh
 
   hooks:install:
-    desc: Install pre-commit (staged content) and commit-msg hooks running lint:vault-leaks
+    desc: Install pre-commit, commit-msg and pre-push hooks that block private (vault) data
     dir: '{{.ROOT_DIR}}'
     cmds:
-      # git's real hooks dir (works from linked worktrees, where .git is a file). Hooks this
-      # task did not write are never overwritten; the marker line identifies ours.
+      # The hooks run a SNAPSHOT of the guard + allowlist copied into git's hooks dir, so they
+      # behave the same on every branch (a branch older than the guard would otherwise fail
+      # every push). Re-run this task after changing scripts/check-vault-leaks.py or the
+      # allowlist. git's real hooks dir works from linked worktrees too. A hook this task did
+      # not write is never overwritten: an existing pre-push is PRESERVED as pre-push.local
+      # and chained (same stdin and args); any other foreign hook makes the task refuse.
       - |
+        set -e
         H=$(git rev-parse --path-format=absolute --git-path hooks); mkdir -p "$H"
+        M='# managed-by: task hooks:install (#333)'
+        cp scripts/check-vault-leaks.py "$H/vault-leak-guard.py"
+        cp scripts/vault-leak-allow.txt "$H/vault-leak-allow.txt"
+        cat > "$H/vault-leak-run" <<'RUN'
+        #!/bin/sh
+        # managed-by: task hooks:install (#333)
+        # Runs the guard SNAPSHOT under the Python that runs Ansible (it has PyYAML).
+        H=$(cd "$(dirname "$0")" && pwd)
+        PY=$(head -1 "$(command -v ansible-vault)" | sed 's/^#!//')
+        case "$PY" in */env\ *) PY=$(command -v "${PY##* }");; esac
+        PATH="$(dirname "$PY"):$PATH" VAULT_LEAK_ALLOW="$H/vault-leak-allow.txt" exec "$PY" -I "$H/vault-leak-guard.py" "$@"
+        RUN
         for hook in pre-commit commit-msg; do
           f="$H/$hook"
-          if [ -e "$f" ] && ! grep -q 'managed-by: task hooks:install (#333)' "$f"; then
+          if [ -e "$f" ] && ! grep -q "$M" "$f"; then
             echo "refusing to overwrite existing $f (not ours); merge it by hand"; exit 1
           fi
-          case $hook in
-            pre-commit) arg='--staged' ;;
-            commit-msg) arg='--message-file "$1"' ;;
-          esac
-          printf '#!/bin/sh\n# managed-by: task hooks:install (#333)\nexec task lint:vault-leaks -- %s\n' "$arg" > "$f"
-          chmod +x "$f"; echo "installed $f"
         done
+        printf '#!/bin/sh\n%s\nexec "$(dirname "$0")/vault-leak-run" --staged\n' "$M" > "$H/pre-commit"
+        printf '#!/bin/sh\n%s\nexec "$(dirname "$0")/vault-leak-run" --message-file "$1"\n' "$M" > "$H/commit-msg"
+        f="$H/pre-push"
+        if [ -e "$f" ] && ! grep -q "$M" "$f"; then
+          [ -e "$f.local" ] && { echo "both $f and $f.local exist and neither is ours; merge by hand"; exit 1; }
+          mv "$f" "$f.local"; echo "preserved existing pre-push as $f.local (chained)"
+        fi
+        cat > "$f" <<'HOOK'
+        #!/bin/sh
+        # managed-by: task hooks:install (#333)
+        # LAST GATE before GitHub: scan every commit this push would publish (messages and
+        # added lines) for any ansible-vault value, then chain to pre-push.local if present.
+        in=$(mktemp) || exit 1
+        trap 'rm -f "$in"' EXIT
+        cat > "$in"
+        "$(dirname "$0")/vault-leak-run" --pre-push "$1" < "$in" || { echo "push REFUSED by the vault-leak guard (see above)" >&2; exit 1; }
+        L="$(dirname "$0")/pre-push.local"
+        if [ -x "$L" ]; then "$L" "$@" < "$in" || exit 1; fi
+        exit 0
+        HOOK
+        for x in vault-leak-run pre-push; do sed -i.bak 's/^        //' "$H/$x" && rm -f "$H/$x.bak"; done
+        chmod +x "$H/vault-leak-run" "$H/pre-commit" "$H/commit-msg" "$H/pre-push"
+        echo "installed pre-commit, commit-msg, pre-push (+ guard snapshot) in $H"
 
   ansible:lint:
     desc: Lint all Ansible playbooks and roles
