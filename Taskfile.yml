@@ -91,19 +91,40 @@ tasks:
     desc: Fail if any ansible-vault value appears in plaintext in a tracked file (public repo, #333)
     dir: '{{.ROOT_DIR}}'
     cmds:
-      # Runs under the Python that runs Ansible (it needs PyYAML, which that env has) and puts
-      # that env first on PATH so `ansible-vault` resolves to the same install on either
-      # operator platform.
+      # Runs under the Python that runs Ansible (it has PyYAML) with that env first on PATH,
+      # so `ansible-vault` resolves to the same install on either operator platform. A
+      # `#!/usr/bin/env python3` shebang is resolved instead of used verbatim.
       - |
         PY=$(head -1 "$(command -v ansible-vault)" | sed 's/^#!//')
-        PATH="$(dirname "$PY"):$PATH" "$PY" -I scripts/check-vault-leaks.py
+        case "$PY" in */env\ *) PY=$(command -v "${PY##* }");; esac
+        PATH="$(dirname "$PY"):$PATH" "$PY" -I scripts/check-vault-leaks.py {{.CLI_ARGS}}
 
-  hooks:install:
-    desc: Install the opt-in pre-commit hook that runs lint:vault-leaks
+  test:vault-leaks:
+    desc: Falsification harness for the vault-leak guard (fake values in a throwaway repo)
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - printf '#!/bin/sh\nexec task lint:vault-leaks\n' > .git/hooks/pre-commit
-      - chmod +x .git/hooks/pre-commit
+      - scripts/test-check-vault-leaks.sh
+
+  hooks:install:
+    desc: Install pre-commit (staged content) and commit-msg hooks running lint:vault-leaks
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # git's real hooks dir (works from linked worktrees, where .git is a file). Hooks this
+      # task did not write are never overwritten; the marker line identifies ours.
+      - |
+        H=$(git rev-parse --path-format=absolute --git-path hooks); mkdir -p "$H"
+        for hook in pre-commit commit-msg; do
+          f="$H/$hook"
+          if [ -e "$f" ] && ! grep -q 'managed-by: task hooks:install (#333)' "$f"; then
+            echo "refusing to overwrite existing $f (not ours); merge it by hand"; exit 1
+          fi
+          case $hook in
+            pre-commit) arg='--staged' ;;
+            commit-msg) arg='--message-file "$1"' ;;
+          esac
+          printf '#!/bin/sh\n# managed-by: task hooks:install (#333)\nexec task lint:vault-leaks -- %s\n' "$arg" > "$f"
+          chmod +x "$f"; echo "installed $f"
+        done
 
   ansible:lint:
     desc: Lint all Ansible playbooks and roles
