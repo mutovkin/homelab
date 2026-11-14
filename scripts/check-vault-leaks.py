@@ -81,7 +81,7 @@ def load_allowlist():
             if l.split("#")[0].strip()}
 
 
-def vault_needles():
+def vault_needles(mode):
     allow, used, needles, seen_keys = load_allowlist(), set(), {}, set()
     env = dict(os.environ)
     if not os.path.exists(ANSIBLE / "ansible.cfg") or "ANSIBLE_VAULT_PASSWORD_FILE" in env:
@@ -95,12 +95,32 @@ def vault_needles():
     if not vault_files:
         die("no tracked vault.yml files found")
     for rel in vault_files:
-        r = subprocess.run(["ansible-vault", "view", str(ROOT / rel)], cwd=ANSIBLE,
-                           capture_output=True, text=True, env=env)
+        if mode == "staged":
+            # Read the vault file from the INDEX, i.e. what the commit will contain (#334
+            # review r2: a plaintext vault.yml staged, then encrypted only on disk, passed
+            # when this decrypted the working-tree copy). Plaintext in the index is the
+            # worst leak this guard exists for, so it is an error on sight.
+            try:
+                blob = git("show", f":{rel}")
+            except subprocess.CalledProcessError:
+                die(f"cannot read staged {rel}")
+            if not blob.lstrip().startswith(b"$ANSIBLE_VAULT;"):
+                die(f"staged {rel} is NOT ansible-vault encrypted; refusing (content withheld). "
+                    f"Encrypt it and `git add` it again", code=1)
+            r = subprocess.run(["ansible-vault", "decrypt", "--output=-", "-"], cwd=ANSIBLE,
+                               input=blob.decode("utf-8", "replace"), capture_output=True,
+                               text=True, env=env)
+        else:
+            r = subprocess.run(["ansible-vault", "view", str(ROOT / rel)], cwd=ANSIBLE,
+                               capture_output=True, text=True, env=env)
         if r.returncode != 0:
             # ansible-vault's stderr names the cause (wrong password, not encrypted, ...)
-            # and never contains plaintext.
-            die(f"cannot decrypt {rel}: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'unknown error'}")
+            # and never contains plaintext. Its LAST line is usually `Origin: <path>`, so
+            # report the line after `<<< caused by >>>`, else the first [ERROR] line.
+            lines = [l.strip() for l in r.stderr.splitlines() if l.strip()]
+            cause = next((lines[i + 1] for i, l in enumerate(lines[:-1]) if "caused by" in l),
+                         next((l for l in lines if "ERROR" in l), "unknown error"))
+            die(f"cannot decrypt {rel}: {cause}")
         try:
             data = yaml.load(r.stdout, Loader=_Loader) or {}
         except yaml.YAMLError:
@@ -119,6 +139,10 @@ def vault_needles():
                 # search below is line by line too.
                 for part in (text.splitlines() or [text]):
                     part = part.strip()
+                    # PEM armor and shebangs are boilerplate, not secret; as needles they
+                    # would flag every doc that shows a key header (review r2 #3).
+                    if re.match(r"^-----(BEGIN|END) [A-Z0-9 ]+-----$", part) or part.startswith("#!"):
+                        continue
                     is_domain = key in REQUIRED_KEYS
                     if len(part) >= MIN_LEN or (is_domain and part):
                         needles.setdefault(part.casefold(), f"{rel}:{kpath}")
@@ -171,15 +195,18 @@ def main(argv):
         mode, msg_file = "message", argv[1]
     elif argv:
         die("usage: check-vault-leaks.py [--staged | --message-file PATH]")
-    needles = vault_needles()
+    needles = vault_needles(mode)
     if not needles:
         die("no vault values loaded; refusing to report a clean tree")
     order = sorted(needles, key=len, reverse=True)
-    pat = re.compile("|".join(re.escape(n) for n in order), re.IGNORECASE)
+    # Needles are case-folded, so the searched text is folded too (re.IGNORECASE alone
+    # would miss e.g. a value with 'ß', whose folded form is 'ss'). Only line numbers are
+    # reported, so matching on the folded copy loses nothing.
+    pat = re.compile("|".join(re.escape(n) for n in order))
     hits = 0
     for label, text in sources(mode, msg_file):
         for n, line in enumerate(text.splitlines(), 1):
-            for m in pat.finditer(line):
+            for m in pat.finditer(line.casefold()):
                 hits += 1
                 key = needles.get(m.group(0).casefold(), "an unidentified vault key")
                 where = label if mode == "message" else f"{label}:{n}"

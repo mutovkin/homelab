@@ -62,6 +62,14 @@ git rm -q --cached gone.txt
 printf 'subject\n\nbody mentions FakeNestedUser004\n' > msg.txt
 out=$(run --message-file msg.txt); check "commit message leak" 1 "$out" $? "commit message"
 rm msg.txt
+# A vault file staged as PLAINTEXT, then encrypted only on disk, must be refused (#334 r2).
+mkdir -p ansible/inventory/host_vars/zz
+printf 'vault_zz: FakeStagedPlain006\n' > ansible/inventory/host_vars/zz/vault.yml
+git add ansible/inventory/host_vars/zz/vault.yml
+ansible-vault encrypt --vault-password-file .vault_password ansible/inventory/host_vars/zz/vault.yml >/dev/null
+VALUES="$VALUES FakeStagedPlain006"
+out=$(run --staged); check "plaintext vault staged, encrypted on disk" 1 "$out" $? "NOT ansible-vault encrypted"
+git rm -q -f --cached ansible/inventory/host_vars/zz/vault.yml; rm -rf ansible/inventory/host_vars/zz
 # Broken vault YAML must fail closed AND withhold its content.
 printf 'vault_broken: "FakePlainSecret001\n' > b.yml
 ansible-vault encrypt --vault-password-file .vault_password b.yml --output ansible/inventory/group_vars/all/vault.yml >/dev/null; rm b.yml

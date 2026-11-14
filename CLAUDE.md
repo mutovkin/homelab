@@ -30,7 +30,9 @@ Everything deploys via `task deploy:full` (= `ansible-playbook playbooks/site.ym
    issue/PR text, which is public as well. `task lint:vault-leaks` fails if ANY vault value
    appears in a tracked file (prints file:line + key, never the value); run it before every
    push (`task hooks:install` makes it a pre-commit hook). Non-private keys are allowlisted
-   BY NAME with a reason in `scripts/vault-leak-allow.txt` (#333).
+   BY NAME with a reason in `scripts/vault-leak-allow.txt` (#333). A NEW private domain
+   needs its own vault key (the guard matches whole values; only `vault_base_domain` is
+   matched as a bare domain), and `task test:vault-leaks` must stay green.
 4. **`become: false` on `synchronize` tasks.** Minimal Debian LXCs lack `sudo`; we
    connect as `root`. With `become: true`, Ansible injects `--rsync-path='sudo …'` and
    rsync fails. See [Gotchas](#gotchas).
