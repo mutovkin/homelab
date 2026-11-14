@@ -1,0 +1,9 @@
+# Vault KEYS (never values) whose values are not private, so check-vault-leaks.py
+# does not treat them as needles. Each entry must say why. Reviewed 2026-11-14 (#333).
+vault_proxmox_api_token_id          # a common word used as the token's name; matches prose everywhere
+vault_proxmox_api_user              # Proxmox's built-in realm user (root@pam), documented upstream
+vault_vaultwarden_smtp_from_name    # the product name
+vault_vaultwarden_smtp_security     # starttls
+vault_vaultwarden_smtp_host         # the public Gmail SMTP relay, also in non-vault compose files
+vault_truenas_api_username          # a role/account name, documented as the privilege name in role READMEs
+vault_watchtower_email_server       # the public Gmail SMTP relay (same value as vaultwarden_smtp_host)
