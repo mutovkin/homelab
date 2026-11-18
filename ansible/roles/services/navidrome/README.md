@@ -160,7 +160,7 @@ a wrong password.
 Navidrome has no config setting to exclude folders. It reads a `.ndignore` file
 (gitignore syntax, case-sensitive) in a folder and applies it to everything below.
 The role keeps one at the root of each library, from `navidrome_scan_ignore` in
-`defaults/main.yml`: the top-level `/_attic/`, plus the exact names of the cue, log,
+`defaults/main.yml`: the top-level `/_attic`, plus the exact names of the cue, log,
 scan and artwork folders (`extras`, `scans`, `Covers`, `Artwork`, `INFO`, ...). This is
 Lyrion's `ignoreDirRE: "^extras$"`, widened.
 
@@ -170,7 +170,10 @@ Lyrion's `ignoreDirRE: "^extras$"`, widened.
   has to change, and the role refuses to write unless the mount is live NFS.
 - A `.ndignore` with no pattern line makes Navidrome ignore the **whole library**, and
   so does a single `*` or `/`. The role therefore accepts only literal folder names:
-  every entry must match `^/?[A-Za-z0-9_ .-]+/$`, and the list must not be empty.
+  every entry must match `^/?[A-Za-z0-9_ .-]+$`, and the list must not be empty.
+- **No trailing slash.** Navidrome tests a folder as `Artist/Album/scans`, without a
+  slash, so a `scans/` pattern hides only the files inside: the folder is still walked
+  and stays listed (measured: 1129 such folders after a full scan). `scans` skips it.
 - Excluded tracks already in the database become *missing*; they do not disappear.
   `PURGEMISSING=never` keeps them until an admin removes them under **Missing Files**.
   Do that only while both shares are healthy (see above).

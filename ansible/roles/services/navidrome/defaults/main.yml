@@ -59,35 +59,39 @@ navidrome_transcoding_max_concurrent: 4
 # folders are always `<year> - <title>`, so an exact bare name is never an album. Never
 # use a substring/wildcard pattern (`*scan*`, `*cover*`): it would hide real albums whose
 # titles contain those words (measured, counts only).
+# NO trailing slash: the scanner tests each folder as `Artist/Album/scans` (no slash), so
+# `scans/` never matches the folder itself, only the files inside it. The folder is still
+# walked and stays listed (measured 2026-11-17: 1129 `scans` folders live after a full
+# scan). `scans` matches the folder, so the scanner skips it entirely.
 # The role ASSERTS the shape affirmatively: every entry must be a literal folder name,
-# optionally `/`-anchored, ending in `/`, made of letters, digits, space, `_`, `.`, `-`
-# (^/?[A-Za-z0-9_ .-]+/$). That rejects wildcards (`*` or a bare `/` would hide the WHOLE
+# optionally `/`-anchored (root of the library only), no trailing slash, made of
+# letters, digits, space, `_`, `.`, `-` (^/?[A-Za-z0-9_ .-]+$). That rejects wildcards (`*` or a bare `/` would hide the WHOLE
 # library), blank or `#`/`!` lines (an .ndignore with no pattern also hides everything),
 # and the regex metacharacters go-gitignore passes to a Go regexp unescaped.
 navidrome_scan_ignore:
-  - /_attic/
-  - _album_info/
-  - extras/
-  - Extra/
-  - scans/
-  - Scans/
-  - scan/
-  - Scan/
-  - Covers/
-  - covers/
-  - COVERS/
-  - Cover/
-  - cover/
-  - Cover Art/
-  - Artwork/
-  - Artworks/
-  - artwork/
-  - Art/
-  - art/
-  - INFO/
-  - Info/
-  - info/
-  - Technical/
+  - /_attic
+  - _album_info
+  - extras
+  - Extra
+  - scans
+  - Scans
+  - scan
+  - Scan
+  - Covers
+  - covers
+  - COVERS
+  - Cover
+  - cover
+  - Cover Art
+  - Artwork
+  - Artworks
+  - artwork
+  - Art
+  - art
+  - INFO
+  - Info
+  - info
+  - Technical
 # The Proxmox host whose read-write NFS mount of the music dataset root writes those
 # files (the CT 201 shares are read-only), and that mount's proxmox_nfs_mounts name.
 navidrome_scan_ignore_writer: n5pro
