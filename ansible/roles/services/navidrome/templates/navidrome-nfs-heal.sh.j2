@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Managed by Ansible (services/navidrome role, #342). Copied from the lms heal (#36).
+#
+# On boot the docker LXC can come up before the TrueNAS VM serves NFS. Navidrome's
+# libraries are docker `local` NFS volumes mounted at container-create time; if NFS is
+# not serving yet the mount fails and the restart policy can never remount it. This
+# oneshot waits until BOTH exports are published, then (re-)ups the stack.
+set -euo pipefail
+
+NFS_ADDR="{{ truenas_hostonly_ip }}"
+EXPORTS=(
+{% for name in navidrome_nfs_exports %}
+  "{{ navidrome_nfs_exports[name] }}"
+{% endfor %}
+)
+DEPLOY_DIR="{{ data_mount }}/deploy/navidrome"
+# Keep COMPOSE_FILE in sync with the `files:` arg of the shared deploy task in
+# roles/services/_deploy/tasks/main.yml.
+COMPOSE_FILE="compose.yaml"
+MAX_WAIT={{ navidrome_nfs_heal_max_wait }}   # seconds before giving up
+INTERVAL=10
+
+# Readiness = nfsd registered AND every export published. The match is EXACT on the
+# first field of each showmount line: a substring match on the dataset root would also
+# hit the lossless and compressed lines and declare the wrong export ready.
+export_listed() {
+  showmount -e "$NFS_ADDR" 2>/dev/null | awk -v p="$1" 'NR > 1 && $1 == p { found = 1 } END { exit !found }'
+}
+
+nfs_ready() {
+  rpcinfo -T tcp "$NFS_ADDR" nfs >/dev/null 2>&1 || return 1
+  local path
+  for path in "${EXPORTS[@]}"; do
+    export_listed "$path" || return 1
+  done
+}
+
+waited=0
+until nfs_ready; do
+  if [ "$waited" -ge "$MAX_WAIT" ]; then
+    echo "navidrome-nfs-heal: exports ${EXPORTS[*]} on $NFS_ADDR not ready after ${MAX_WAIT}s; giving up." >&2
+    exit 1
+  fi
+  echo "navidrome-nfs-heal: waiting for exports ${EXPORTS[*]} on $NFS_ADDR (${waited}s/${MAX_WAIT}s)"
+  sleep "$INTERVAL"
+  waited=$((waited + INTERVAL))
+done
+
+echo "navidrome-nfs-heal: exports ready on $NFS_ADDR; ensuring the navidrome stack is up."
+cd "$DEPLOY_DIR"
+if ! docker compose -f "$COMPOSE_FILE" --env-file .env up -d; then
+  echo "navidrome-nfs-heal: docker compose up FAILED after NFS became ready; stack NOT healed." >&2
+  exit 1
+fi

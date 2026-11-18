@@ -1,0 +1,115 @@
+---
+# Navidrome (#342). See README.md and
+# docs/plans/2026-11-16-2035-feat-navidrome-music-streaming-plan.md.
+
+# Published host port (the container listens on 4533 too).
+navidrome_port: 4533
+
+# Container user. 3000:3000 owns the library files on TrueNAS, and the CT 201 shares
+# have no Mapall, so this is the UID TrueNAS checks reads against.
+navidrome_uid: 3000
+navidrome_gid: 3000
+
+# CT-201-LOCAL state, deliberately OUTSIDE the deploy dir: _deploy rsyncs that dir with
+# delete: true. Created by tasks/main.yml (never via svc_data_dirs, which would hand
+# them back to root on every run).
+navidrome_root_dir: "{{ data_mount }}/navidrome"
+navidrome_data_dir: "{{ navidrome_root_dir }}/data"
+navidrome_backup_dir: "{{ navidrome_root_dir }}/backup"
+# Pre-deploy backups (taken by the role, not the schedule) live in their own subdir so
+# the freshness check reads only what the 03:00 schedule wrote, and the schedule's own
+# pruning never touches them.
+navidrome_predeploy_dir: "{{ navidrome_backup_dir }}/predeploy"
+navidrome_predeploy_retention: 5
+# The same directory as seen INSIDE the container (it is under the /backup bind). The
+# role's assert reads the host side, so a value that points the backup elsewhere fails
+# the deploy — which is how the assert was falsified (#342 review).
+navidrome_predeploy_container_path: /backup/predeploy
+
+# TrueNAS exports (one share per library, Networks 10.99.99.3/32, read-only, no Mapall;
+# README.md "TrueNAS shares"). Each value is the volume's device path AND the exact
+# first field of its `showmount -e` line, which the preflight and the heal match.
+navidrome_nfs_exports:
+  lossless: /mnt/vault/media/music/lossless
+  compressed: /mnt/vault/media/music/compressed
+# Container mount point of each library, keyed like navidrome_nfs_exports.
+navidrome_library_mounts:
+  lossless: /music/lossless
+  compressed: /music/compressed
+
+# Built-in backup: 03:00 in `timezone`, ahead of watchtower's 04:30 run in
+# `watchtower_timezone` (asserted equal). All three ND_BACKUP_* must be set or Navidrome
+# silently clears the schedule.
+navidrome_backup_schedule: "0 3 * * *"
+navidrome_backup_count: 14
+# Freshness: the newest scheduled backup must be younger than this on a claimed instance.
+navidrome_backup_max_age_hours: 26
+
+# Hourly quick scan (the file watcher is off: inotify is blind to NFS-server-side changes).
+navidrome_scan_schedule: "@every 1h"
+# Cap concurrent ffmpeg transcodes (the docs' ffmpeg DoS guidance; default 0 = unlimited).
+navidrome_transcoding_max_concurrent: 4
+
+# Scan exclusions, written as `.ndignore` at the root of EACH library (Navidrome has no
+# config-level exclude: the file is the only mechanism, gitignore syntax, case-sensitive,
+# inherited by every folder below). The Lyrion counterpart is lms_server_prefs.ignoreDirRE.
+# Measured 2026-11-17 (counts only): `_attic` sits once at each library root and holds
+# 5379 audio files with no stars or plays. Every folder carrying one of the EXACT names
+# below holds 0 audio files in both libraries (cue sheets, logs, scans, artwork). Album
+# folders are always `<year> - <title>`, so an exact bare name is never an album. Never
+# use a substring/wildcard pattern (`*scan*`, `*cover*`): it would hide real albums whose
+# titles contain those words (measured, counts only).
+# The role ASSERTS the shape affirmatively: every entry must be a literal folder name,
+# optionally `/`-anchored, ending in `/`, made of letters, digits, space, `_`, `.`, `-`
+# (^/?[A-Za-z0-9_ .-]+/$). That rejects wildcards (`*` or a bare `/` would hide the WHOLE
+# library), blank or `#`/`!` lines (an .ndignore with no pattern also hides everything),
+# and the regex metacharacters go-gitignore passes to a Go regexp unescaped.
+navidrome_scan_ignore:
+  - /_attic/
+  - _album_info/
+  - extras/
+  - Extra/
+  - scans/
+  - Scans/
+  - scan/
+  - Scan/
+  - Covers/
+  - covers/
+  - COVERS/
+  - Cover/
+  - cover/
+  - Cover Art/
+  - Artwork/
+  - Artworks/
+  - artwork/
+  - Art/
+  - art/
+  - INFO/
+  - Info/
+  - info/
+  - Technical/
+# The Proxmox host whose read-write NFS mount of the music dataset root writes those
+# files (the CT 201 shares are read-only), and that mount's proxmox_nfs_mounts name.
+navidrome_scan_ignore_writer: n5pro
+navidrome_scan_ignore_mount: music
+
+# Seconds the boot heal waits for both exports before giving up (lms uses the same).
+navidrome_nfs_heal_max_wait: 600
+
+# In-container database path the claim probe reads. Overridable ONLY to falsify the
+# fail-closed path (plan U4): a nonexistent path must withhold the NPM grant.
+navidrome_db_container_path: /data/navidrome.db
+navidrome_claim_probe_db: "{{ navidrome_db_container_path }}"
+# The post-deploy probe alone can be pointed elsewhere with
+# -e navidrome_claim_probe_db_post=<path>, to prove the post-deploy render REVOKES (a
+# deploy that starts claimed and ends on an empty database). Never set it in inventory.
+
+# Firewall for the published port (shared role nft_scoped_fw). DELIBERATELY EMPTY: the
+# allowlist is per-host in inventory/host_vars/<host>/vars.yml (the #140 rationale).
+#   always: sources admitted in every state (the operator subnet — how the first admin
+#           is created over the LAN)
+#   staged: sources admitted ONLY once the user table has at least one row (NPM's
+#           address). An empty instance therefore fails closed at NPM (plan KTD4).
+navidrome_firewall:
+  always: []
+  staged: []

@@ -1,0 +1,15 @@
+---
+# Render the port allowlist from navidrome_claimed (set by claim.yml). Included before
+# the deploy (so the port is never published unscoped) and again after it, so the final
+# table always reflects the container that is actually running: it grants AND revokes
+# (#342 review). A converged host renders byte-identical rules and reloads nothing.
+# Shared fail-open table (roles/nft_scoped_fw), prerouting hook.
+- name: Restrict the Navidrome port to approved sources ({{ navidrome_claim_phase }})
+  ansible.builtin.include_role:
+    name: nft_scoped_fw
+  vars:
+    nft_fw_name: navidrome
+    nft_fw_description: Navidrome firewall (Ansible-managed nftables table inet navidrome_fw)
+    nft_fw_ports: >-
+      {{ {navidrome_port | int: navidrome_firewall.always
+          + (navidrome_firewall.staged if navidrome_claimed | bool else [])} }}

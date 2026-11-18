@@ -1,0 +1,47 @@
+---
+# Claim probe (plan KTD4, lock 1): the ONE definition of "does this instance have an
+# admin yet", included before and after the deploy (#342 review). Sets:
+#   navidrome_claim_container  docker_container_info of the container at probe time
+#   navidrome_claim_probe      the raw probe result
+#   navidrome_claimed          the affirmative-allow verdict
+# In-container only: CT 201 has no sqlite3 binary, so a stopped or absent container
+# reads as not claimed.
+- name: Inspect the Navidrome container ({{ navidrome_claim_phase }})
+  community.docker.docker_container_info:
+    name: navidrome
+  register: navidrome_claim_container
+  check_mode: false
+
+- name: Count Navidrome users ({{ navidrome_claim_phase }})
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - navidrome
+      - sqlite3
+      - -readonly
+      - "{{ navidrome_claim_probe_db }}"
+      - select count(*) from user
+  register: navidrome_claim_probe
+  changed_when: false
+  check_mode: false
+  # A transient docker exec / SQLITE_BUSY must not revoke a claimed instance's grant:
+  # retry briefly, then fail closed.
+  until: navidrome_claim_probe is succeeded
+  retries: 3
+  delay: 2
+  # ignore_errors (not failed_when: false) so `failed` stays readable (CLAUDE.md).
+  ignore_errors: true
+  when:
+    - navidrome_claim_container.exists
+    - navidrome_claim_container.container.State.Running
+
+# Affirmative-allow: claimed ONLY on a successful probe returning an integer >= 1.
+# Skipped, failed, empty or non-numeric output all mean "not claimed".
+- name: Derive the claim state ({{ navidrome_claim_phase }})
+  ansible.builtin.set_fact:
+    navidrome_claimed: >-
+      {{ (navidrome_claim_probe is not skipped)
+         and (navidrome_claim_probe is succeeded)
+         and (navidrome_claim_probe.stdout | default('') | trim is match('^[0-9]+$'))
+         and ((navidrome_claim_probe.stdout | default('0') | trim | int) >= 1) }}
