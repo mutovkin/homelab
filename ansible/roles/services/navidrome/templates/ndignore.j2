@@ -1,0 +1,7 @@
+# Navidrome scan exclusions for this library: gitignore syntax, case-sensitive,
+# inherited by every folder below this one. Managed by Ansible
+# (roles/services/navidrome, navidrome_scan_ignore); local edits are overwritten.
+# Never leave this file without a pattern: Navidrome then ignores EVERYTHING.
+{% for pattern in navidrome_scan_ignore %}
+{{ pattern }}
+{% endfor %}

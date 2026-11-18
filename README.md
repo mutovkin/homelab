@@ -108,6 +108,7 @@ its README. The shared `services/_deploy` role runs the deploy pipeline for all 
 | Service                                 | Port             | Description                                          |
 | --------------------------------------- | ---------------- | ---------------------------------------------------- |
 | [LMS](ansible/roles/services/lms/)               | 9001, 9090, 3483 | Music server (Lyrion/Squeezebox) — NFS from TrueNAS   |
+| [Navidrome](ansible/roles/services/navidrome/)   | 4533 (allowlisted) | Music streaming (web + Subsonic apps), lossless and compressed libraries over NFS |
 | [PostgreSQL](ansible/roles/services/postgresql/) | 5432 (planned)   | _(planned #91)_ Database for Immich + NextCloud      |
 | [Immich](ansible/roles/services/immich/)         | 2283 (planned)   | _(planned #91)_ Self-hosted photo/video management (GPU-accelerated) |
 | [Frigate](ansible/roles/services/frigate/)       | 5000, 8554, 8555 (planned) | _(planned #91)_ NVR with AI object detection (GPU-accelerated) |

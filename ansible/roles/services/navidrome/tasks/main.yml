@@ -1,0 +1,478 @@
+---
+# Navidrome (#342). Order matters:
+#   config asserts -> NFS export preflight -> claim probe (pre) -> freshness assert ->
+#   pre-deploy backup -> firewall from the pre claim -> heal unit -> _deploy ->
+#   readiness -> post-deploy checks (incl. .ndignore, scan_ignore.yml), all in a block whose
+#   always: runs claim probe (post) -> firewall from the post claim, even when a check fails.
+# The claim probe and the firewall render each have ONE definition (claim.yml,
+# firewall.yml), and the post-deploy pair always runs on a real apply, so the final
+# table reflects the container actually running: it grants and revokes (#342 review).
+# Plan: docs/plans/2026-11-16-2035-feat-navidrome-music-streaming-plan.md (KTD3-KTD8).
+
+# --- Config asserts (by name; never print a value) ---
+- name: Assert Navidrome configuration
+  ansible.builtin.assert:
+    that:
+      # All three ND_BACKUP_* or Navidrome silently clears the schedule (KTD6).
+      - navidrome_backup_schedule | string | length > 0
+      - navidrome_backup_count | int >= 1
+      # The 03:00 backup is "before watchtower's 04:30" only if both read one zone (KTD5.6).
+      - timezone == watchtower_timezone
+      - navidrome_firewall.always | default([]) | length > 0
+    fail_msg: >-
+      Navidrome config invalid: backup schedule must be set, backup count >= 1,
+      timezone must equal watchtower_timezone (so the 03:00 backup runs before
+      watchtower's 04:30), and navidrome_firewall.always must list at least one source
+      in host_vars.
+    quiet: true
+
+# Affirmative (docs/solutions/security-issues/guard-accept-condition-is-a-negative-fails-open.md):
+# only literal folder names pass. A wildcard (`*`, `**/`), a bare `/`, a blank or comment
+# line (an .ndignore with no pattern hides the WHOLE library) and any regex metacharacter
+# go-gitignore would pass to a Go regexp unescaped are all rejected by the one regex.
+- name: Assert the scan exclusions are literal folder names
+  ansible.builtin.assert:
+    that:
+      - navidrome_scan_ignore | type_debug == 'list'
+      - navidrome_scan_ignore | length > 0
+      - navidrome_scan_ignore | map('string') | reject('match', '^/?[A-Za-z0-9_ .-]+$') | list | length == 0
+    fail_msg: >-
+      navidrome_scan_ignore must be a non-empty list of literal folder names, each
+      optionally starting with '/', with NO trailing '/' (Navidrome tests folders
+      without one, so `name/` never skips the folder), using only letters, digits,
+      space, '_', '.' and '-'. Wildcards, blank or comment entries and regex
+      metacharacters are refused: one of them can hide the entire library.
+    quiet: true
+
+- name: Assert the password encryption key is vaulted and quote-free
+  ansible.builtin.assert:
+    that:
+      - vault_navidrome_password_encryption_key is defined
+      - vault_navidrome_password_encryption_key | string | length >= 32
+      - "\"'\" not in vault_navidrome_password_encryption_key | string"
+    fail_msg: >-
+      vault_navidrome_password_encryption_key must be defined in host_vars vault.yml,
+      at least 32 characters and without a single quote (env.j2 single-quotes it).
+      It must be set BEFORE the first user exists and never rotated (README.md).
+    quiet: true
+
+# Last.fm scrobbling + metadata (#342). Navidrome reads the key only from its env; an
+# empty key silently disables the "Scrobble to Last.fm" toggle in every user's settings.
+- name: Assert the Last.fm API key and secret are vaulted and quote-free
+  ansible.builtin.assert:
+    that:
+      - vault_navidrome_lastfm_api_key | default('') | string | length > 0
+      - vault_navidrome_lastfm_secret | default('') | string | length > 0
+      - "\"'\" not in vault_navidrome_lastfm_api_key | default('') | string"
+      - "\"'\" not in vault_navidrome_lastfm_secret | default('') | string"
+    fail_msg: >-
+      vault_navidrome_lastfm_api_key and vault_navidrome_lastfm_secret must be set in
+      host_vars vault.yml (from https://www.last.fm/api/account/create), without single
+      quotes (env.j2 single-quotes them).
+    quiet: true
+
+# --- NFS export preflight: both shares must be published to this CT ---
+- name: Read the TrueNAS NFS export list
+  ansible.builtin.command:
+    cmd: showmount -e {{ truenas_hostonly_ip }}
+  register: navidrome_showmount
+  changed_when: false
+  check_mode: false
+
+# Exact path match AND one of this host's addresses as an exact entry of the line's
+# client list: the dataset-root line (/mnt/vault/media/music) is listed too, but only for
+# the Proxmox host, so a path-only check would pass a share this CT cannot mount. Entries
+# are compared whole (a trailing /32 stripped), so 10.99.99.30/32 never matches .3.
+- name: Assert each library export is published to this host (exact path match)
+  ansible.builtin.assert:
+    that:
+      - navidrome_nfs_exports[item] in navidrome_listed_exports
+      - >-
+        ansible_facts.all_ipv4_addresses
+        | intersect(navidrome_listed_exports[navidrome_nfs_exports[item]] | default('')
+                    | split(',') | map('regex_replace', '/32$', '') | list)
+        | length > 0
+    fail_msg: >-
+      TrueNAS does not export {{ navidrome_nfs_exports[item] }} to this host
+      ({{ ansible_facts.all_ipv4_addresses | join(', ') }}). Create or enable the share,
+      with this host's vmbr2 address in its Networks (README.md, "TrueNAS shares").
+    quiet: true
+  loop: "{{ navidrome_nfs_exports.keys() | list }}"
+  vars:
+    # {export path: client list string}, from every line after showmount's header.
+    navidrome_export_lines: "{{ navidrome_showmount.stdout_lines[1:] | map('split') | select | list }}"
+    navidrome_listed_exports: >-
+      {{ dict(navidrome_export_lines | map('first') | zip(navidrome_export_lines | map('last'))) }}
+
+# --- Local state directories (KTD3): owned by the container user, non-recursive ---
+- name: Create the Navidrome root directory
+  ansible.builtin.file:
+    path: "{{ navidrome_root_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the Navidrome data and backup directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ navidrome_uid }}"
+    group: "{{ navidrome_gid }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ navidrome_data_dir }}", mode: "0750" }
+    # Backups hold account usernames.
+    - { path: "{{ navidrome_backup_dir }}", mode: "0700" }
+    - { path: "{{ navidrome_predeploy_dir }}", mode: "0700" }
+
+# --- Claim probe before the deploy (KTD4 lock 1; tasks/claim.yml) ---
+- name: Probe the claim state before the deploy
+  ansible.builtin.include_tasks: claim.yml
+  vars:
+    navidrome_claim_phase: pre
+
+# Keep the PRE results under their own names: claim.yml re-registers on the post probe.
+- name: Remember the pre-deploy container and claim state
+  ansible.builtin.set_fact:
+    navidrome_container: "{{ navidrome_claim_container }}"
+    navidrome_claimed_pre: "{{ navidrome_claimed }}"
+
+# --- Backup freshness (KTD6.3): reads ONLY the schedule's files, before this run adds any ---
+# Armed from durable state, not from this run: the marker is written the first time the
+# instance is seen claimed, so a freshly claimed instance gets one schedule cycle of grace.
+- name: Stat the claimed-at marker
+  ansible.builtin.stat:
+    path: "{{ navidrome_root_dir }}/.claimed-at"
+  register: navidrome_claimed_marker
+
+- name: Find scheduled Navidrome backups
+  ansible.builtin.find:
+    paths: "{{ navidrome_backup_dir }}"
+    patterns: "navidrome_backup_*.db"
+    recurse: false
+  register: navidrome_scheduled_backups
+  when:
+    - navidrome_claimed_pre | bool
+    - navidrome_claimed_marker.stat.exists
+    - (now().timestamp() | int - navidrome_claimed_marker.stat.mtime | int) > (navidrome_backup_max_age_hours | int * 3600)
+
+- name: Assert the newest scheduled backup is fresh
+  ansible.builtin.assert:
+    that:
+      - navidrome_scheduled_backups.files | length > 0
+      - >-
+        (now().timestamp() | int
+         - (navidrome_scheduled_backups.files | map(attribute='mtime') | max | int))
+        < (navidrome_backup_max_age_hours | int * 3600)
+    fail_msg: >-
+      No scheduled Navidrome backup in {{ navidrome_backup_dir }} is younger than
+      {{ navidrome_backup_max_age_hours }}h. The 03:00 schedule has stopped (all three
+      ND_BACKUP_* must be set; check ownership of the backup dir and the container log).
+    quiet: true
+  when: navidrome_scheduled_backups is not skipped
+
+# --- Pre-deploy backup (KTD6.2): only when the deploy would change the image ---
+- name: Stat the Navidrome database
+  ansible.builtin.stat:
+    path: "{{ navidrome_data_dir }}/navidrome.db"
+  register: navidrome_db
+
+- name: Read the Navidrome image reference from the compose file
+  ansible.builtin.set_fact:
+    navidrome_image: "{{ (lookup('file', role_path ~ '/files/compose.yaml') | from_yaml).services.navidrome.image }}"
+
+# Not under --check: pulling moves the local :latest tag, which a later boot-heal
+# `compose up -d` would then start WITHOUT this pre-deploy backup (#342 review). A dry
+# run therefore cannot preview the backup; the block below is skipped there anyway.
+- name: Pull the Navidrome image to compare against the running container
+  community.docker.docker_image_pull:
+    name: "{{ navidrome_image }}"
+    pull: always
+  register: navidrome_pulled
+  when:
+    - navidrome_db.stat.exists
+    - not ansible_check_mode
+
+- name: Determine whether this deploy changes Navidrome's image
+  ansible.builtin.set_fact:
+    navidrome_image_changing: >-
+      {{ navidrome_db.stat.exists
+         and not ansible_check_mode
+         and (not navidrome_container.exists
+              or navidrome_pulled.image.Id | default('') != navidrome_container.container.Image) }}
+
+- name: Take the pre-deploy backup
+  when:
+    - navidrome_image_changing | bool
+    - not ansible_check_mode
+  block:
+    # CT 201's clock, the same clock that stamps the backup's mtime: a controller clock
+    # running ahead would refuse a good backup, one running behind could admit an old one.
+    - name: Record when this run's pre-deploy backup started
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: navidrome_backup_clock
+      changed_when: false
+
+    - name: Keep the backup start time
+      ansible.builtin.set_fact:
+        navidrome_backup_started: "{{ navidrome_backup_clock.stdout | int }}"
+
+    # Running: the binary that wrote the database backs it up (SQLite online backup),
+    # into predeploy/ so the schedule's pruning and the freshness check never see it.
+    - name: Back up through the running Navidrome
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - --env
+          - ND_BACKUP_PATH={{ navidrome_predeploy_container_path }}
+          - navidrome
+          - /app/navidrome
+          - backup
+          - create
+      changed_when: true
+      when: navidrome_container.exists and navidrome_container.container.State.Running
+
+    # Stopped or absent: nothing holds the file open, so a plain copy of the database
+    # and its WAL/SHM is consistent. Never start the NEW image against the database first.
+    - name: Cold-copy the database while Navidrome is not running
+      ansible.builtin.shell:
+        # mode+ownership only: the copy's mtime must be NOW, so the assert below can tell
+        # this run's backup from an older one.
+        cmd: |
+          set -euo pipefail
+          dest="{{ navidrome_predeploy_dir }}/cold-$(date +%Y.%m.%d_%H.%M.%S)"
+          mkdir -m 0700 "$dest"
+          for f in navidrome.db navidrome.db-wal navidrome.db-shm; do
+            if [ -e "{{ navidrome_data_dir }}/$f" ]; then
+              cp --preserve=mode,ownership "{{ navidrome_data_dir }}/$f" "$dest/"
+            fi
+          done
+          chown -R {{ navidrome_uid }}:{{ navidrome_gid }} "$dest"
+        executable: /bin/bash
+      changed_when: true
+      when: not (navidrome_container.exists and navidrome_container.container.State.Running)
+
+    # Only a NON-EMPTY database file written by THIS run counts: an older backup, a
+    # zero-byte file, or a backup that landed anywhere but predeploy/ fails the deploy.
+    - name: Find database files in the pre-deploy backups
+      ansible.builtin.find:
+        paths: "{{ navidrome_predeploy_dir }}"
+        patterns: ["navidrome_backup_*.db", "navidrome.db"]
+        file_type: file
+        recurse: true
+        size: "1"
+      register: navidrome_predeploy_dbs
+
+    - name: Assert this run wrote a non-empty pre-deploy backup
+      ansible.builtin.assert:
+        that:
+          - >-
+            navidrome_predeploy_dbs.files
+            | selectattr('mtime', 'ge', navidrome_backup_started | float)
+            | list | length > 0
+        fail_msg: >-
+          This run's pre-deploy backup did not land in {{ navidrome_predeploy_dir }} as a
+          non-empty file. Refusing to deploy a new image onto an unbacked database.
+        quiet: true
+
+    - name: Find pre-deploy backup entries for pruning
+      ansible.builtin.find:
+        paths: "{{ navidrome_predeploy_dir }}"
+        file_type: any
+        recurse: false
+      register: navidrome_predeploy_items
+
+    - name: Prune old pre-deploy backups
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: >-
+        {{ (navidrome_predeploy_items.files | sort(attribute='mtime', reverse=true))[navidrome_predeploy_retention | int :] }}
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+# --- Firewall from the pre-deploy claim (KTD4 lock 1; tasks/firewall.yml) ---
+# Before the deploy, so the port is never published unscoped.
+- name: Render the firewall from the pre-deploy claim
+  ansible.builtin.include_tasks: firewall.yml
+  vars:
+    navidrome_claim_phase: pre
+
+# --- Boot heal (KTD8) ---
+- name: Install the navidrome NFS self-heal script
+  ansible.builtin.template:
+    src: navidrome-nfs-heal.sh.j2
+    dest: /usr/local/bin/navidrome-nfs-heal.sh
+    mode: "0755"
+
+- name: Install the navidrome NFS self-heal systemd unit
+  ansible.builtin.template:
+    src: navidrome-nfs-heal.service.j2
+    dest: /etc/systemd/system/navidrome-nfs-heal.service
+    mode: "0644"
+  register: navidrome_heal_unit
+
+# --check cannot enable a unit it did not write: on a first dry run the file does not
+# exist yet. Narrow gate, so a converged host still dry-runs the enable for real.
+- name: Enable the navidrome NFS self-heal unit (runs at every boot)
+  ansible.builtin.systemd_service:
+    name: navidrome-nfs-heal.service
+    enabled: true
+    daemon_reload: "{{ navidrome_heal_unit.changed }}"
+  when: not (ansible_check_mode and navidrome_heal_unit is changed)
+
+# --- Deploy, readiness and post-deploy checks ---
+# The post-deploy claim probe and firewall render sit in the block's `always:`, so they run
+# whether or not anything in the block fails (#342 review). Until they run, the firewall
+# still holds the PRE-deploy grant; a failed check must never leave that grant on a
+# container that came up on an empty database. claim.yml fails closed on a stopped or
+# absent container, so running it after a failure can only withhold, never grant wrongly.
+- name: Deploy Navidrome, then re-derive the NPM grant from the running container
+  block:
+    - name: Deploy Navidrome via the shared service pipeline
+      ansible.builtin.include_role:
+        name: services/_deploy
+      vars:
+        svc: navidrome
+
+    - name: Wait for Navidrome to answer /ping
+      ansible.builtin.uri:
+        url: "http://localhost:{{ navidrome_port }}/ping"
+        status_code: 200
+      register: navidrome_ping
+      until: navidrome_ping is succeeded
+      retries: 24
+      delay: 5
+      changed_when: false
+      when: not ansible_check_mode
+
+    # --- Post-deploy checks (counts only, never names: KTD13) ---
+    - name: Count entries in each library root, as the container user
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - navidrome
+          - sh
+          - -c
+          - ls -A "$1" | wc -l
+          - sh
+          - "{{ navidrome_library_mounts[item] }}"
+      register: navidrome_library_counts
+      changed_when: false
+      loop: "{{ navidrome_library_mounts.keys() | list }}"
+      when: not ansible_check_mode
+
+    - name: Assert every library root is mounted and non-empty
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - item.stdout | trim | int > 0
+        fail_msg: >-
+          Library {{ item.item }} ({{ navidrome_library_mounts[item.item] }}) is empty or
+          unreadable inside the container. /ping cannot see this. Check the TrueNAS share
+          and that UID {{ navidrome_uid }} can read it.
+        quiet: true
+      loop: "{{ navidrome_library_counts.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not ansible_check_mode
+
+    - name: Keep each library's scan exclusions in place
+      ansible.builtin.include_tasks: scan_ignore.yml
+
+    - name: Stat for an unmanaged Navidrome config file
+      ansible.builtin.stat:
+        path: "{{ navidrome_data_dir }}/navidrome.toml"
+      register: navidrome_toml
+
+    # A config file in the unmanaged data dir could switch ExtAuth on silently (KTD5.3).
+    - name: Assert no navidrome.toml exists
+      ansible.builtin.assert:
+        that:
+          - not navidrome_toml.stat.exists
+        fail_msg: >-
+          {{ navidrome_data_dir }}/navidrome.toml exists. Navidrome reads it at start and it
+          could enable header authentication. All configuration lives in compose.yaml; move
+          the file aside and redeploy.
+        quiet: true
+
+    - name: Read the backup settings the container actually runs with
+      ansible.builtin.command:
+        argv: [docker, exec, navidrome, printenv, ND_BACKUP_PATH, ND_BACKUP_SCHEDULE, ND_BACKUP_COUNT]
+      register: navidrome_backup_env
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Assert all three backup settings reached the container
+      ansible.builtin.assert:
+        that:
+          - navidrome_backup_env.rc == 0
+          - navidrome_backup_env.stdout_lines | select | list | length == 3
+        fail_msg: Navidrome is missing one of ND_BACKUP_PATH/SCHEDULE/COUNT; backups would be silently off.
+        quiet: true
+      when: not ansible_check_mode
+
+    - name: Read the landed Navidrome version
+      ansible.builtin.command:
+        argv: [docker, exec, navidrome, /app/navidrome, --version]
+      register: navidrome_version
+      changed_when: false
+      # Informational only: a CLI change in a future release must not fail the deploy.
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Report the landed Navidrome version (for the README record)
+      ansible.builtin.debug:
+        msg: "Navidrome running {{ (navidrome_version.stdout | default('') | trim) or ('version unreadable, rc=' ~ navidrome_version.rc | default('?')) }}"
+      when: not ansible_check_mode
+
+  # KTD4 lock 1: ALWAYS on a real apply. Repairs a recovery deploy of a stopped claimed
+  # instance (grant) and withdraws the grant when the recreated container came up on an
+  # empty database (revoke).
+  always:
+    - name: Probe the claim state after the deploy
+      ansible.builtin.include_tasks: claim.yml
+      vars:
+        navidrome_claim_phase: post
+        # Falsification hook ONLY (defaults/main.yml): lets a test point the post probe
+        # alone at a nonexistent database, i.e. "claimed before, empty after".
+        navidrome_claim_probe_db: "{{ navidrome_claim_probe_db_post | default(navidrome_db_container_path) }}"
+      when: not ansible_check_mode
+
+    - name: Render the firewall from the post-deploy claim
+      ansible.builtin.include_tasks: firewall.yml
+      vars:
+        navidrome_claim_phase: post
+      when: not ansible_check_mode
+
+- name: Record the first time the instance was seen claimed (arms the freshness check)
+  ansible.builtin.copy:
+    content: "claimed\n"
+    dest: "{{ navidrome_root_dir }}/.claimed-at"
+    force: false
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - not ansible_check_mode
+    - navidrome_claimed | bool
+
+- name: Explain why NPM is withheld
+  ansible.builtin.debug:
+    msg: >-
+      {% if navidrome_claim_probe is succeeded and (navidrome_claim_probe.stdout | default('') | trim) == '0' %}
+      Navidrome has NO users: NPM is withheld (fails closed). From the operator subnet open
+      http://{{ ansible_host | default(inventory_hostname) }}:{{ navidrome_port }}, confirm the
+      "Create Admin" page appears, create the admin, confirm the user count is 1, then re-run this deploy.
+      {% else %}
+      The user-count probe FAILED or did not run (not a zero count): NPM is withheld. Read
+      the probe result above; do not create an admin on the strength of this message.
+      {% endif %}
+  when:
+    - not ansible_check_mode
+    - not navidrome_claimed | bool

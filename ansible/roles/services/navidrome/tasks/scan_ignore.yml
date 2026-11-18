@@ -1,0 +1,85 @@
+---
+# Scan exclusions (#342): one `.ndignore` at the root of each library. The container's
+# mounts are read-only, so the file is written through the Proxmox host's read-write
+# mount of the music dataset root (Mapall 3000, so it lands owned by the library user)
+# and read back from INSIDE the container: what Navidrome sees is the evidence.
+# The host mount is needed only when a file must change; a converged run reads
+# through the container alone, so a stopped workbench never fails the deploy.
+- name: Render the expected .ndignore
+  ansible.builtin.set_fact:
+    navidrome_scan_ignore_content: "{{ lookup('ansible.builtin.template', 'ndignore.j2') }}"
+
+- name: Read each library's .ndignore as Navidrome sees it
+  ansible.builtin.command:
+    argv: [docker, exec, navidrome, cat, "{{ navidrome_library_mounts[item] }}/.ndignore"]
+  register: navidrome_scan_ignore_seen
+  changed_when: false
+  check_mode: false
+  # A missing file is an expected state (first run), not an error.
+  failed_when: false
+  loop: "{{ navidrome_library_mounts.keys() | list }}"
+
+- name: Select the libraries whose .ndignore must be written
+  ansible.builtin.set_fact:
+    navidrome_scan_ignore_stale: >-
+      {{ navidrome_scan_ignore_seen.results
+         | rejectattr('stdout', 'equalto', navidrome_scan_ignore_content | trim)
+         | map(attribute='item') | list }}
+
+- name: Write the stale .ndignore files through the host mount
+  when: navidrome_scan_ignore_stale | length > 0
+  vars:
+    navidrome_writer_mount: >-
+      {{ hostvars[navidrome_scan_ignore_writer].proxmox_nfs_mounts
+         | selectattr('name', 'equalto', navidrome_scan_ignore_mount) | first }}
+  block:
+    - name: Read the music dataset mount on the Proxmox host
+      ansible.builtin.command:
+        argv: [findmnt, -n, -o, "SOURCE,FSTYPE", --mountpoint, "{{ navidrome_writer_mount.path }}"]
+      register: navidrome_writer_findmnt
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      delegate_to: "{{ navidrome_scan_ignore_writer }}"
+
+    # Never write into a bare mountpoint directory: the file would land on the host's
+    # root disk, hidden under the share once it mounts (CLAUDE.md, workbench traps).
+    - name: Assert the dataset is a live NFS mount before writing into it
+      ansible.builtin.assert:
+        that:
+          - navidrome_writer_findmnt.rc == 0
+          - (navidrome_writer_findmnt.stdout.split() | first)
+            == (navidrome_writer_mount.server ~ ':' ~ navidrome_writer_mount.export)
+          - (navidrome_writer_findmnt.stdout.split() | last) in ['nfs', 'nfs4']
+          - navidrome_nfs_exports[item] is match('^' ~ (navidrome_writer_mount.export | regex_escape) ~ '/')
+        fail_msg: >-
+          {{ navidrome_writer_mount.path }} on {{ navidrome_scan_ignore_writer }} is not the
+          live NFS mount of {{ navidrome_writer_mount.export }} (findmnt rc
+          {{ navidrome_writer_findmnt.rc }}), or the {{ item }} export is not inside it.
+          The .ndignore for {{ item }} needs writing; start the music workbench CT (its
+          hookscript mounts the share) and rerun.
+        quiet: true
+      loop: "{{ navidrome_scan_ignore_stale }}"
+
+    - name: Write .ndignore at the library root
+      ansible.builtin.copy:
+        content: "{{ navidrome_scan_ignore_content }}"
+        dest: >-
+          {{ navidrome_writer_mount.path
+             ~ (navidrome_nfs_exports[item] | replace(navidrome_writer_mount.export, '', 1))
+             ~ '/.ndignore' }}
+        mode: "0644"
+      delegate_to: "{{ navidrome_scan_ignore_writer }}"
+      loop: "{{ navidrome_scan_ignore_stale }}"
+
+    # NFS attribute caching can hide a new file from CT 201 for a while, hence the retries.
+    - name: Read the written .ndignore back from inside the container
+      ansible.builtin.command:
+        argv: [docker, exec, navidrome, cat, "{{ navidrome_library_mounts[item] }}/.ndignore"]
+      register: navidrome_scan_ignore_readback
+      changed_when: false
+      until: navidrome_scan_ignore_readback.stdout == navidrome_scan_ignore_content | trim
+      retries: 12
+      delay: 5
+      loop: "{{ navidrome_scan_ignore_stale }}"
+      when: not ansible_check_mode

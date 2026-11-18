@@ -95,7 +95,8 @@
 - name: Deploy compose stack for {{ svc }}
   community.docker.docker_compose_v2:
     project_src: "{{ svc_deploy_dir }}"
-    # roles/services/lms/templates/lms-nfs-heal.sh.j2 hardcodes this same filename
+    # roles/services/lms/templates/lms-nfs-heal.sh.j2 and
+    # roles/services/navidrome/templates/navidrome-nfs-heal.sh.j2 hardcode this same filename
     # so its self-heal path brings up the same config — change both together.
     files:
       - compose.yaml

@@ -123,7 +123,7 @@ them there after any hardware re-seat that changes a path or IOMMU group.
 
 ### CT 201: Docker Host
 
-- Lyrion Music Server (LMS), Portainer, Watchtower
+- Lyrion Music Server (LMS), Navidrome (#342), Portainer, Watchtower
   (planned #91: Immich, Frigate, NextCloud, PostgreSQL)
 - 8 cores, 24 GB RAM, Ubuntu 24.04
 - GPU access via `/dev/dri` + `/dev/kfd` bind-mount (VAAPI + ROCm)
@@ -561,6 +561,8 @@ Containers that need TrueNAS storage (Lyrion's music library, media) use Docker 
 │                             │                               │
 │                             ▼                               │
 │                   Lyrion container (/music:ro)              │
+│                   Navidrome (/music/lossless,               │
+│                              /music/compressed, both ro)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -571,6 +573,11 @@ TrueNAS, not the LXC — Proxmox applies a guest's `up=` delay *before starting 
 next guest in order*, so a delay on the LXC would do nothing useful. As a
 backstop for an unusually slow TrueNAS boot, the LXC also runs a
 `lms-nfs-heal.service` oneshot that waits for NFS then re-ups the lms stack (#36).
+Navidrome (#342) has its own copy, `navidrome-nfs-heal.service`, which waits until
+BOTH of its exports are listed (exact path match on `showmount -e`) and re-ups the
+navidrome stack. Its libraries are separate TrueNAS shares, `.../music/lossless` and
+`.../music/compressed`, each exported read-only to `10.99.99.3/32` only, so CT 201 never
+mounts the dataset root (that share goes to the Proxmox host for the workbench).
 
 ## Workbench CTs
 

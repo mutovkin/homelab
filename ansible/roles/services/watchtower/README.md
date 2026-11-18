@@ -57,18 +57,36 @@ choice is whether it *also* carries `monitor-only=true`.
 | Stateful / schema-migrating | `enable` + `monitor-only` | postgres, joplin-server, grafana, victoriametrics, victorialogs, nextcloud, immich-server, immich-machine-learning (lockstep with server), frigate |
 | Proven breaking-change history | `enable` + `monitor-only` | vector (0.57 shipped two breaking changes and killed the log pipeline for ~30 days), telegraf (same shape: floating tag + bind-mounted config) |
 | Secrets store / socket holder | `enable` + `monitor-only` | vaultwarden, portainer, telegraf, watchtower itself |
-| Restart-tolerant, low blast radius | `enable` only (auto-updates) | searxng, lms, pgadmin4, immich-redis, nextcloud-redis |
+| Restart-tolerant, low blast radius | `enable` only (auto-updates) | searxng, lms, pgadmin4, navidrome, immich-redis, nextcloud-redis |
 
 Note `telegraf` qualifies twice over. It bind-mounts `/var/run/docker.sock`, and the
 `:ro` flag on a unix socket is cosmetic — the Docker API is bidirectional over that
 socket regardless — so it is a socket holder by the same rule that covers portainer and
 watchtower.
 
-`pgadmin4` is the one entry in the auto row that is **not** stateless: it keeps a
+`pgadmin4` and `navidrome` are the entries in the auto row that are **not** stateless.
+
+`pgadmin4` keeps a
 schema-migrating SQLite config DB holding saved database credentials. It stays on auto
 deliberately. It is pinned to major `:9` so only minors arrive; its blast radius is an
 admin UI rather than primary data; and a credential-holding web UI is exactly the kind of
 service that benefits more from prompt security patches than from an operator gate.
+
+`navidrome` (#342) is the larger exception, and it is the operator's explicit choice: it
+holds listening data (stars, play counts, playlists) in SQLite and runs **one-way** schema
+migrations (0.58 and 0.64.0 both did), on `:latest` because Navidrome publishes no
+minor-floating tag to pin to. What makes auto-update tolerable here:
+- its 03:00 built-in backup (`ND_BACKUP_*`, asserted by the role) runs before this
+  service's 04:30 scan in the same zone, and is the rollback point for an unattended
+  update — the repo's pre-upgrade backup gate (vaultwarden, npm) runs only on Ansible
+  deploys, never under watchtower;
+- `WATCHTOWER_CLEANUP=true` deletes the previous image, so a rollback pins an exact
+  `X.Y.Z` tag and restores the backup with a one-off run of that version
+  (`roles/services/navidrome/README.md`, "Rollback");
+- the startup quick scan is not the full scan some releases ask for after upgrading,
+  so read the release notes the update mail points to;
+- Navidrome's 2026 advisory cadence (17 in September, four High) is the case for
+  prompt updates on a proxied login page.
 
 Monitor-only services are **not** frozen — they are updated deliberately. The shared
 `services/_deploy` role runs `pull: always`, so `task deploy:service -- --tags <svc>`

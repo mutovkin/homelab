@@ -22,6 +22,7 @@
                     │                                  │
     ┌───────┬───────┼───────┬──────┬──────┬──────┐     │
     │       │       │       │      │      │      │     ├──LMS
+    │       │       │       │      │      │      │     ├──Navidrome
    PG    Obs    Vault    SearX  Joplin  Port  Watch    ├──Port
                                          + NPM (#331)
                                                        └──Watch
@@ -89,16 +90,18 @@ All Docker networks use 172.x.x.x subnets to avoid conflicts with the LAN (192.1
 | Frigate        | `frigate_network`           | 172.28.0.0/24 | 172.28.0.1 |
 | NextCloud      | `nextcloud_network`         | 172.29.0.0/24 | 172.29.0.1 |
 | Immich         | `immich_network`            | 172.31.0.0/24 | 172.31.0.1 |
+| Navidrome      | `navidrome_network`         | 172.30.0.0/24 | 172.30.0.1 |
 | NextCloud → PG | `postgres_network` (shared) | 172.21.0.0/24 | 172.21.0.1 |
 
 Immich deliberately does **not** attach to `postgres_network`: it runs its own
 VectorChord-enabled `immich-postgres` sidecar on `immich_network` (#91), because the
 shared server is vanilla `postgres:18` and Immich needs PG 14-17 with VectorChord.
 
-Only Portainer, Watchtower, and LMS are deployed today (#91 tracks the rest).
+Only Portainer, Watchtower, LMS and Navidrome (#342) are deployed today (#91 tracks the rest).
 LMS has no docker network (`network_mode: host`). `postgres_network`'s subnet is
 hardcoded in the postgresql role — the same literal value on either host
-(separate NAT'd bridges). 172.30.0.0/24 is unassigned — the next free n5pro pin.
+(separate NAT'd bridges). 172.30.0.0/24 went to Navidrome (#342), so the 172.26–172.31
+n5pro range is full; the fleet map in `host_vars/n5pro_docker/vars.yml` says how to pick the next one.
 Auto-allocation pool on this host: `172.18.0.0/15` (#84; docker0 draws from it).
 eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
 
@@ -113,7 +116,7 @@ eq12's pool is still the group default `172.20.0.0/14` — moving it is #126.
     reachable from the LAN. Records are labelled with the **Ansible inventory
     name** (`eq12`, not `pve`) — see
     [`roles/vector_agent`](../ansible/roles/vector_agent/README.md).
-  - NFS: N5 Pro Docker LXC → TrueNAS VM for the LMS music library today, and for other
+  - NFS: N5 Pro Docker LXC → TrueNAS VM for the LMS and Navidrome music libraries today, and for other
     media if a stack that needs it lands. **Not** Frigate recordings:
     `FRIGATE_RECORDINGS_DIR` resolves under `data_mount`
     (`roles/services/frigate/templates/env.j2`), which on n5pro_docker is CT 201's local
@@ -153,7 +156,7 @@ for direct access to 5× 26TB HDDs.
 | Host   | Docker Host           | Services                                                                       |
 | ------ | --------------------- | ------------------------------------------------------------------------------ |
 | EQ12   | CT 101 (deb-docker)   | PostgreSQL, Observability, Vaultwarden, SearXNG, Joplin, Portainer, Watchtower |
-| N5 Pro | CT 201 (n5pro-docker) | LMS, Portainer, Watchtower (planned #91: PostgreSQL, Immich, Frigate, NextCloud) |
+| N5 Pro | CT 201 (n5pro-docker) | LMS, Navidrome, Portainer, Watchtower (planned #91: PostgreSQL, Immich, Frigate, NextCloud) |
 
 Service placement is configured via `ansible/inventory/host_vars/*/vars.yml` — the
 `services` list variable controls which compose stacks deploy to which Docker host.
@@ -183,6 +186,7 @@ on CT-201):
 | Port          | Service                        |
 | ------------- | ------------------------------ |
 | 3483 tcp+udp  | LMS (Slimproto control + discovery) |
+| 4533          | Navidrome (nftables allowlist; NPM admitted only once an admin exists) |
 | 9000          | Portainer (nftables allowlist) |
 | 9001          | LMS (web UI)                   |
 | 9090          | LMS (CLI / JSON-RPC)           |

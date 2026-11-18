@@ -1,0 +1,119 @@
+# Navidrome — Subsonic-compatible music streaming server (#342)
+#
+# Two read-only libraries, each a docker `local` NFS volume of its own TrueNAS share
+# over the host-only vmbr2 bridge (TrueNAS 10.99.99.2, this CT 10.99.99.3):
+#   /music/lossless   -> library 1, set by ND_MUSICFOLDER (Navidrome rewrites
+#                        library 1's path from it on EVERY start)
+#   /music/compressed -> added ONCE by hand in Settings > Libraries (see README.md)
+# The container never sees the dataset root, so originals/ and audiobooks/ stay out.
+#
+# Database and backups are CT-201-LOCAL binds, never NFS: SQLite over NFS freezes
+# (navidrome#6471) and backups written to NFS come out as empty files (#5305).
+#
+# Ports (published on the host, allowlisted by the role's nftables table inet navidrome_fw):
+#   4533/TCP — web UI + Subsonic API (NPM proxies music.<domain> to it)
+
+services:
+  navidrome:
+    # :latest on purpose — the operator chose auto-update (#342). Navidrome publishes
+    # no minor-floating tag, and `0.6` resolves to a 2020 build, so there is no
+    # "minor pin" to choose. deluan/navidrome and navidrome/navidrome serve identical
+    # digests; watchtower watches this exact reference, so change it deliberately.
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    # The image has no USER and would run as root. 3000:3000 owns the library files,
+    # and the CT 201 shares have no Mapall, so this UID is what TrueNAS checks.
+    user: "${NAVIDROME_UID:?required}:${NAVIDROME_GID:?required}"
+    security_opt:
+      - "apparmor:unconfined"
+      - "no-new-privileges:true"
+    labels:
+      # enable WITHOUT monitor-only: a deliberate exception to the #83 posture for a
+      # schema-migrating SQLite service, chosen by the operator. The 03:00 built-in
+      # backup is the rollback point (watchtower README, "Update Posture").
+      - "com.centurylinklabs.watchtower.enable=true"
+    ports:
+      - "${NAVIDROME_PORT:?required}:4533"
+    environment:
+      TZ: ${TIMEZONE:?required}
+      ND_MUSICFOLDER: /music/lossless
+      ND_DATAFOLDER: /data
+      # Exit at startup if ever run as UID 0.
+      ND_ENFORCENONROOTUSER: "true"
+      # Already the default; pinned so an auto-update can never flip it. An NFS blip
+      # or empty mount marks tracks missing; "always"/"full" would then DELETE their
+      # stars, play counts and playlist entries.
+      ND_SCANNER_PURGEMISSING: never
+      # inotify cannot see changes made on TrueNAS or by the music workbench, so the
+      # watcher is off and an hourly quick scan (which does catch tag edits) runs.
+      ND_SCANNER_WATCHERWAIT: "0"
+      ND_SCANNER_SCHEDULE: ${NAVIDROME_SCAN_SCHEDULE:?required}
+      # Folder exclusions are NOT config: Navidrome reads them from a .ndignore at each
+      # library root, which the role writes (defaults navidrome_scan_ignore).
+      # Default true. The library's .m3u files are rip/tool artefacts whose paths do not
+      # resolve in the container: 0.64.2 imported 426 playlists, every one empty.
+      ND_AUTOIMPORTPLAYLISTS: "false"
+      # Backups are silently DISABLED unless all three are set (the role asserts them).
+      ND_BACKUP_PATH: /backup
+      ND_BACKUP_SCHEDULE: ${NAVIDROME_BACKUP_SCHEDULE:?required}
+      ND_BACKUP_COUNT: ${NAVIDROME_BACKUP_COUNT:?required}
+      # Sharing's default flipped to true in 0.63.0; public /share links stay off.
+      ND_ENABLESHARING: "false"
+      ND_ENABLEINSIGHTSCOLLECTOR: "false"
+      # ND_EXTAUTH_TRUSTEDSOURCES is deliberately UNSET: a value would make Navidrome
+      # trust a client-supplied Remote-User header and auto-create users.
+      # Upstream defaults, pinned against a flip under auto-update. Behind NPM every
+      # remote client shares one bucket (one source address).
+      ND_AUTHREQUESTLIMIT: "5"
+      ND_AUTHWINDOWLENGTH: 20s
+      ND_TRANSCODING_MAXCONCURRENT: ${NAVIDROME_TRANSCODING_MAX_CONCURRENT:?required}
+      # Set before the first user exists; rotating it later locks every user out.
+      ND_PASSWORDENCRYPTIONKEY: ${NAVIDROME_PASSWORD_ENCRYPTION_KEY:?required}
+      # Last.fm: the application key lets users link their own Last.fm account under
+      # Personal > Scrobble to Last.fm; it also feeds artist bios and images.
+      ND_LASTFM_APIKEY: ${NAVIDROME_LASTFM_APIKEY:?required}
+      ND_LASTFM_SECRET: ${NAVIDROME_LASTFM_SECRET:?required}
+    volumes:
+      - ${NAVIDROME_DATA_DIR:?required}:/data
+      - ${NAVIDROME_BACKUP_DIR:?required}:/backup
+      - navidrome_lossless:/music/lossless:ro
+      - navidrome_compressed:/music/compressed:ro
+      # The image ships NO zone data (measured on 0.64.2: /usr/share/zoneinfo absent), so
+      # TZ alone silently falls back to UTC and the 03:00 backup ran at 19:00 Pacific —
+      # nine hours before watchtower instead of 90 minutes. The host's tzdata fixes it.
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
+    # The image declares no HEALTHCHECK. busybox wget ships in it (alpine base);
+    # /ping answers 200 before auth. It proves the process, NOT the mounts — the role
+    # checks the library roots separately.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4533/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - navidrome_network
+
+# driver_opts are fixed when a volume is CREATED: changing them later needs the
+# volume removed first (README.md, "Changing a share").
+volumes:
+  navidrome_lossless:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NAVIDROME_NFS_ADDR:?required},nfsvers=4,ro,soft,timeo=100,retrans=3"
+      device: ":${NAVIDROME_NFS_LOSSLESS_EXPORT:?required}"
+  navidrome_compressed:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: "addr=${NAVIDROME_NFS_ADDR:?required},nfsvers=4,ro,soft,timeo=100,retrans=3"
+      device: ":${NAVIDROME_NFS_COMPRESSED_EXPORT:?required}"
+
+networks:
+  navidrome_network:
+    name: navidrome_network
+    ipam:
+      config:
+        - subnet: ${NAVIDROME_NETWORK_SUBNET:?required - pinned in host_vars docker_networks.navidrome}
