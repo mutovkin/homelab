@@ -1,0 +1,106 @@
+---
+# Musixmatch lyrics plugin (#347), post-deploy half: what NAVIDROME loaded is the
+# evidence, read from its own plugin table (in-container sqlite3, as claim.yml does).
+# The install half (pinned get_url) runs before the deploy in main.yml, so a first start
+# already finds the file. Enabling the plugin and approving its permissions is a one-time
+# UI step (README "Plugins"); until then the plugin sits in the table disabled.
+
+# Startup sync, or the autoreload watcher (2 s debounce) after a replaced file, writes
+# the row; retry until it carries the pinned file's hash.
+- name: Read the Musixmatch plugin as Navidrome loaded it
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - navidrome
+      - sqlite3
+      - -readonly
+      - -json
+      - "{{ navidrome_db_container_path }}"
+      - >-
+        select sha256, enabled,
+        json_extract(manifest, '$.permissions.http.requiredHosts') as hosts,
+        {{ navidrome_musixmatch_setting_columns | join(', ') }}
+        from plugin where id = '{{ navidrome_musixmatch_id }}'
+  vars:
+    # One column per analytics setting, named after it; JSON type 'false'/'true', or
+    # 'unset' when the setting was never saved (the plugin then uses its default, ON).
+    # config is '' (not NULL) until the settings are first saved, and json_type('') is an
+    # error, hence nullif (measured on the first apply).
+    navidrome_musixmatch_setting_columns: >-
+      {{ navidrome_musixmatch_analytics_settings
+         | map('regex_replace', '^(.*)$', "coalesce(json_type(nullif(config, ''), '$.\1'), 'unset') as \1")
+         | list }}
+  register: navidrome_musixmatch_probe
+  changed_when: false
+  # -json prints NOTHING for zero rows, hence the '[]' default.
+  until: >-
+    navidrome_musixmatch_probe.rc == 0
+    and (navidrome_musixmatch_probe.stdout | default('[]', true) | from_json | length) == 1
+    and (navidrome_musixmatch_probe.stdout | from_json | first).sha256 == navidrome_musixmatch_sha256
+  retries: 12
+  delay: 5
+
+- name: Keep the Musixmatch plugin's row
+  ansible.builtin.set_fact:
+    navidrome_musixmatch_row: "{{ navidrome_musixmatch_probe.stdout | from_json | first }}"
+
+# The allowlist is the plugin's whole network reach and no admin setting narrows it, so a
+# version bump that adds a host must fail here until defaults lists it deliberately.
+- name: Assert the loaded plugin is the pinned file with the reviewed host allowlist
+  ansible.builtin.assert:
+    that:
+      - navidrome_musixmatch_row.sha256 == navidrome_musixmatch_sha256
+      - (navidrome_musixmatch_row.hosts | from_json | sort) == (navidrome_musixmatch_required_hosts | sort)
+    fail_msg: >-
+      Navidrome's {{ navidrome_musixmatch_id }} row does not match the pin: its http
+      allowlist is {{ navidrome_musixmatch_row.hosts }}, defaults list
+      {{ navidrome_musixmatch_required_hosts | sort }}. Review any new host (analytics
+      endpoints get the loopback treatment, see defaults) and update
+      navidrome_musixmatch_required_hosts.
+    quiet: true
+
+# Affirmative: an ENABLED plugin passes only when every analytics setting is stored as a
+# JSON false. Unset means the plugin default, which is ON, so it fails like true does.
+- name: Assert the plugin's analytics are off once it is enabled
+  ansible.builtin.assert:
+    that:
+      - >-
+        (navidrome_musixmatch_row.enabled | int) == 0
+        or (navidrome_musixmatch_analytics_settings
+            | map('extract', navidrome_musixmatch_row)
+            | reject('equalto', 'false') | list | length) == 0
+    fail_msg: >-
+      {{ navidrome_musixmatch_id }} is enabled with analytics not explicitly off
+      ({% for s in navidrome_musixmatch_analytics_settings %}{{ s }}={{ navidrome_musixmatch_row[s] }}
+      {% endfor %}). The loopback entry keeps them from leaving the container, but switch
+      both off in Settings > Plugins > Musixmatch Plugin > Analytics and save.
+    quiet: true
+
+- name: Report a plugin still waiting for the one-time UI enable
+  ansible.builtin.debug:
+    msg: >-
+      {{ navidrome_musixmatch_id }} {{ navidrome_musixmatch_version }} is installed but
+      disabled. In Settings > Plugins: switch both Analytics settings off, save, approve the
+      permissions (never "Allow write access"), then enable it (README "Plugins").
+  when: (navidrome_musixmatch_row.enabled | int) == 0
+
+- name: Read the analytics host's entry in the container's hosts file
+  ansible.builtin.command:
+    argv: [docker, exec, navidrome, cat, /etc/hosts]
+  register: navidrome_container_hosts
+  changed_when: false
+
+# Exact line, affirmatively: the loopback mapping is what makes the analytics dial fail.
+- name: Assert the analytics host resolves to loopback inside the container
+  ansible.builtin.assert:
+    that:
+      - >-
+        navidrome_container_hosts.stdout_lines | map('split') | select
+        | selectattr('0', 'equalto', '127.0.0.1')
+        | selectattr('1', 'equalto', navidrome_musixmatch_analytics_host)
+        | list | length == 1
+    fail_msg: >-
+      The navidrome container's /etc/hosts does not map {{ navidrome_musixmatch_analytics_host }}
+      to 127.0.0.1 (compose extra_hosts), so the plugin's analytics could leave the host.
+    quiet: true

@@ -97,6 +97,38 @@ navidrome_scan_ignore:
 navidrome_scan_ignore_writer: n5pro
 navidrome_scan_ignore_mount: music
 
+# Musixmatch lyrics plugin (#347), installed by tasks/plugins.yml. Navidrome derives a
+# plugin's ID from its FILENAME (<id>.ndp), and ND_LYRICSPRIORITY names that ID, so the
+# file is always written as `<navidrome_musixmatch_id>.ndp`. Watchtower never touches
+# plugins: bump version + sha256 together, from the release's published .sha256 asset.
+# A new file disables the plugin in Navidrome until it is re-enabled (README "Plugins").
+navidrome_plugins_dir: "{{ navidrome_data_dir }}/plugins"
+navidrome_musixmatch_id: navidrome-musixmatch-plugin
+navidrome_musixmatch_version: 0.5.0
+navidrome_musixmatch_sha256: bd1b636595a44bbeaae7d7862a5ea4b4bdec594210b80057d2bb2a2a710e9be6
+navidrome_musixmatch_url: >-
+  https://github.com/Myzel394/navidrome-musixmatch-plugin/releases/download/v{{
+  navidrome_musixmatch_version }}/navidrome-musixmatch-plugin.ndp
+# The manifest's http allowlist, exactly (Navidrome 0.64.2 has no admin override: the
+# plugin may reach every host listed here). The role asserts the LOADED manifest lists
+# exactly these, so a version bump that adds a host fails until it is reviewed here.
+navidrome_musixmatch_required_hosts:
+  - apic-appmobile.musixmatch.com
+  - apic-desktop.musixmatch.com
+  - bugs.myzel394.app
+  - www.musixmatch.com
+# The maintainer's analytics endpoint. Its two settings default to ON and failed lookups
+# send artist/title, so the container resolves it to loopback (compose extra_hosts):
+# Navidrome's plugin netguard refuses a NAMED host that resolves to a loopback address,
+# whatever the plugin's settings say. The role also asserts both settings are off.
+navidrome_musixmatch_analytics_host: bugs.myzel394.app
+navidrome_musixmatch_analytics_settings:
+  - analytics_share_errors
+  - analytics_share_metrics
+# Navidrome 0.64.2's default order with the plugin LAST: sidecar files and embedded
+# lyrics always win; Musixmatch is asked only when the library has none.
+navidrome_lyrics_priority: ".ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded,{{ navidrome_musixmatch_id }}"
+
 # Seconds the boot heal waits for both exports before giving up (lms uses the same).
 navidrome_nfs_heal_max_wait: 600
 

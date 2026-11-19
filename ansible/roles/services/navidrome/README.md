@@ -22,6 +22,8 @@ Issue: #342. Plan and rationale: `docs/plans/2026-11-16-2035-feat-navidrome-musi
 | Account usernames (leak sentinels only, read by no config) | `vault_navidrome_admin_username`, `vault_navidrome_listener_username` | Encrypted |
 | NPM proxy host for `music.<domain>` | NPM's DB on eq12_docker | **No.** Created by hand |
 | TrueNAS NFS shares | TrueNAS config | **No.** Created by hand, spec below |
+| Musixmatch lyrics plugin (pinned `.ndp`) | `{{ data_mount }}/navidrome/data/plugins/`, written by the role (#347) | Version + sha256 in `defaults/main.yml` |
+| Plugin enabled, permissions, settings | Navidrome's DB (Settings > Plugins) | **No.** Set by hand, the role checks the analytics settings |
 
 The repo is public. Never write the domain, a username, or anything about the collection
 (artist or album names, counts that identify it) in this repo, an issue or a PR. Check
@@ -190,6 +192,53 @@ Lyrion's `ignoreDirRE: "^extras$"`, widened.
 whose paths don't resolve inside the container. With import on, 0.64.2 created 426
 playlists, all of them empty. Turning import off does not remove playlists that already
 exist; delete those in the UI.
+
+## Plugins
+
+Navidrome runs plugins as WebAssembly inside its own process. A plugin reaches the
+network, its storage or the library only through Navidrome, which enforces the
+permissions approved in the UI. It reaches only the hosts its manifest lists, and 0.64.2
+has no admin setting to narrow that list.
+
+### Musixmatch lyrics (#347)
+
+[Myzel394/navidrome-musixmatch-plugin](https://github.com/Myzel394/navidrome-musixmatch-plugin)
+fetches synced and plain lyrics from Musixmatch's unofficial app API, so it can stop
+working without notice.
+
+- **Install.** The role downloads the pinned `.ndp`, checks its sha256 and writes it to
+  `data/plugins/navidrome-musixmatch-plugin.ndp`. Navidrome takes the plugin ID from that
+  filename, and `ND_LYRICSPRIORITY` names the ID.
+- **Order.** `ND_LYRICSPRIORITY` is the 0.64.2 default with the plugin appended last.
+  Sidecar `.lrc`/`.txt` files and embedded lyrics always win, and Musixmatch is asked
+  only when the library has none. The role asserts the ID comes last.
+- **Analytics.** "Share errors" and "Share metrics" default to ON. Failed lookups would
+  send the artist and title to the maintainer's analytics host, which is in the
+  manifest's allowlist. Two controls:
+  - The container resolves that host to `127.0.0.1` (compose `extra_hosts`). Navidrome
+    refuses a plugin dial to a named host that resolves to a loopback address, so
+    nothing leaves the container whatever the settings say.
+  - On an enabled plugin, the role fails the deploy unless both settings are stored as
+    off. Unset counts as on, because that is the plugin's default.
+- **Writing lyric files** stays off. Never tick "Allow write access" for the plugin. The
+  library mounts are read-only anyway.
+- **Network reach.** The role asserts the loaded manifest's host allowlist equals
+  `navidrome_musixmatch_required_hosts`. A new version that adds a host fails the
+  deploy until the host has been reviewed and added.
+
+**Enable it once, in the UI** (Settings > Plugins > Musixmatch Plugin):
+
+1. Under Analytics, switch **Share errors** and **Share metrics** off, then save.
+2. Approve the permissions. Leave "Allow write access" off.
+3. Toggle the plugin on.
+4. Redeploy (`task deploy:service -- --tags navidrome --limit n5pro_docker`). The run
+   asserts the settings.
+
+**Upgrade.** Set `navidrome_musixmatch_version` and `navidrome_musixmatch_sha256` together,
+from the release's `.sha256` asset, then deploy. Watchtower never updates plugins. With
+`ND_PLUGINS_AUTORELOAD=true`, Navidrome picks up the new file without a restart, but
+**disables the plugin** on any file change. Re-enable it in the UI; the settings are
+kept.
 
 ## Backups and rollback
 

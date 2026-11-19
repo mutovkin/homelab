@@ -1,8 +1,9 @@
 ---
 # Navidrome (#342). Order matters:
-#   config asserts -> NFS export preflight -> claim probe (pre) -> freshness assert ->
-#   pre-deploy backup -> firewall from the pre claim -> heal unit -> _deploy ->
-#   readiness -> post-deploy checks (incl. .ndignore, scan_ignore.yml), all in a block whose
+#   config asserts -> NFS export preflight -> plugin files -> claim probe (pre) ->
+#   freshness assert -> pre-deploy backup -> firewall from the pre claim -> heal unit ->
+#   _deploy -> readiness -> post-deploy checks (incl. .ndignore, scan_ignore.yml, and the
+#   loaded plugins, plugins.yml), all in a block whose
 #   always: runs claim probe (post) -> firewall from the post claim, even when a check fails.
 # The claim probe and the firewall render each have ONE definition (claim.yml,
 # firewall.yml), and the post-deploy pair always runs on a real apply, so the final
@@ -71,6 +72,24 @@
       quotes (env.j2 single-quotes them).
     quiet: true
 
+# Musixmatch plugin pins (#347). The ID becomes a filename and part of a SQL literal in
+# plugins.yml, so its shape is asserted; the analytics host must be one the manifest lists,
+# or the loopback entry guards nothing.
+- name: Assert the Musixmatch plugin pins
+  ansible.builtin.assert:
+    that:
+      - navidrome_musixmatch_id is match('^[a-z0-9][a-z0-9-]*$')
+      - navidrome_musixmatch_sha256 is match('^[0-9a-f]{64}$')
+      - navidrome_musixmatch_analytics_host in navidrome_musixmatch_required_hosts
+      - navidrome_musixmatch_analytics_settings | length > 0
+      - navidrome_lyrics_priority.split(',') | last == navidrome_musixmatch_id
+    fail_msg: >-
+      Musixmatch plugin pins invalid: the ID must be lowercase letters, digits and '-',
+      the sha256 64 hex characters, the analytics host one of
+      navidrome_musixmatch_required_hosts, and navidrome_lyrics_priority must END with the
+      plugin ID (local lyrics first).
+    quiet: true
+
 # --- NFS export preflight: both shares must be published to this CT ---
 - name: Read the TrueNAS NFS export list
   ansible.builtin.command:
@@ -125,6 +144,27 @@
     # Backups hold account usernames.
     - { path: "{{ navidrome_backup_dir }}", mode: "0700" }
     - { path: "{{ navidrome_predeploy_dir }}", mode: "0700" }
+
+# --- Plugins (#347): written BEFORE the deploy so a first start already syncs them ---
+# Navidrome creates this folder 0700 itself; the role owns it so a fresh data dir works.
+- name: Create the Navidrome plugins directory
+  ansible.builtin.file:
+    path: "{{ navidrome_plugins_dir }}"
+    state: directory
+    owner: "{{ navidrome_uid }}"
+    group: "{{ navidrome_gid }}"
+    mode: "0700"
+
+# No stat gate: get_url hashes the file on disk, skips a matching one and re-downloads a
+# mismatch (CLAUDE.md, large downloads). The filename IS the plugin ID.
+- name: Install the Musixmatch lyrics plugin (pinned)
+  ansible.builtin.get_url:
+    url: "{{ navidrome_musixmatch_url }}"
+    dest: "{{ navidrome_plugins_dir }}/{{ navidrome_musixmatch_id }}.ndp"
+    checksum: "sha256:{{ navidrome_musixmatch_sha256 }}"
+    owner: "{{ navidrome_uid }}"
+    group: "{{ navidrome_gid }}"
+    mode: "0600"
 
 # --- Claim probe before the deploy (KTD4 lock 1; tasks/claim.yml) ---
 - name: Probe the claim state before the deploy
@@ -383,6 +423,10 @@
 
     - name: Keep each library's scan exclusions in place
       ansible.builtin.include_tasks: scan_ignore.yml
+
+    - name: Verify the plugins Navidrome loaded
+      ansible.builtin.include_tasks: plugins.yml
+      when: not ansible_check_mode
 
     - name: Stat for an unmanaged Navidrome config file
       ansible.builtin.stat:
