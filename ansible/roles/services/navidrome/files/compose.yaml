@@ -55,7 +55,7 @@ services:
       # resolve in the container: 0.64.2 imported 426 playlists, every one empty.
       ND_AUTOIMPORTPLAYLISTS: "false"
       # Plugins (#347): ND_PLUGINS_ENABLED is already true by default and the folder is
-      # /data/plugins. The role writes the .ndp files there (tasks/plugins.yml).
+      # /data/plugins. tasks/main.yml writes the .ndp there; tasks/plugins.yml verifies it.
       # Default false. On, Navidrome picks up a replaced .ndp itself (no restart).
       ND_PLUGINS_AUTORELOAD: "true"
       # Default order with the Musixmatch plugin appended last, so local lyrics win.
@@ -100,8 +100,8 @@ services:
       start_period: 30s
     # The Musixmatch plugin's analytics endpoint is in its manifest allowlist and its two
     # analytics settings default to ON. Loopback here makes Navidrome's plugin netguard
-    # refuse the dial (a named host never authorizes a loopback address), so nothing is
-    # sent whatever the settings say. The image's nsswitch.conf reads `hosts: files dns`.
+    # refuse the dial (a named host never authorizes a loopback address; argued from the
+    # 0.64.2 source, README "Plugins"). The image's nsswitch.conf reads `hosts: files dns`.
     extra_hosts:
       - "${NAVIDROME_PLUGIN_ANALYTICS_HOST:?required}:127.0.0.1"
     networks:

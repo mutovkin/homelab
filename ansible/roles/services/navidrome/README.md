@@ -213,32 +213,50 @@ working without notice.
   Sidecar `.lrc`/`.txt` files and embedded lyrics always win, and Musixmatch is asked
   only when the library has none. The role asserts the ID comes last.
 - **Analytics.** "Share errors" and "Share metrics" default to ON. Failed lookups would
-  send the artist and title to the maintainer's analytics host, which is in the
-  manifest's allowlist. Two controls:
-  - The container resolves that host to `127.0.0.1` (compose `extra_hosts`). Navidrome
-    refuses a plugin dial to a named host that resolves to a loopback address, so
-    nothing leaves the container whatever the settings say.
+  send the artist, title, album, MusicBrainz recording ID and sanitized logs to the
+  maintainer's analytics host, which is in the manifest's allowlist. Two controls:
+  - The container resolves that host to `127.0.0.1` (compose `extra_hosts`), and the
+    role asserts the hosts file maps it there and nowhere else. Navidrome 0.64.2 refuses
+    a plugin dial to a named host that resolves to a loopback address. That is argued
+    from Navidrome's source and has not yet been seen refusing live (#347 follow-up). It
+    holds only while no HTTP proxy is set in the container (the plugin transport honours
+    `HTTP(S)_PROXY`) and while Navidrome keeps that check. Navidrome auto-updates through
+    watchtower without a deploy, so no plugin assert re-runs on an image bump.
   - On an enabled plugin, the role fails the deploy unless both settings are stored as
-    off. Unset counts as on, because that is the plugin's default.
-- **Writing lyric files** stays off. Never tick "Allow write access" for the plugin. The
+    off. Unset counts as on, because that is the plugin's default. This is a check at
+    deploy time, not a control between deploys: redeploy after every enable.
+- **What Musixmatch itself sees.** For every track with no local lyrics that a client
+  asks lyrics for, the artist, title, album and duration go to Musixmatch from this
+  server's public address, with the account token. That is the plugin's purpose.
+- **Writing lyric files** stays off. The role fails the deploy if "Allow write access" is
+  ticked or the plugin's "Write lyrics to local sidecar file" setting is stored as on. The
   library mounts are read-only anyway.
-- **Network reach.** The role asserts the loaded manifest's host allowlist equals
-  `navidrome_musixmatch_required_hosts`. A new version that adds a host fails the
-  deploy until the host has been reviewed and added.
+- **Permissions and network reach.** The role asserts the loaded manifest asks for
+  exactly `navidrome_musixmatch_permissions` (cache, http, library) and that its HTTP
+  allowlist equals `navidrome_musixmatch_required_hosts`. The exact list also rules out a
+  `*` or IP entry, the only way past the loopback refusal. A new version that adds a
+  permission (a WebSocket host list, a scheduler) or a host fails the deploy until it has
+  been reviewed and the defaults updated.
 
-**Enable it once, in the UI** (Settings > Plugins > Musixmatch Plugin):
+**Enable it once, in the UI** (Settings > Plugins > Musixmatch Plugin). Musixmatch needs
+an account first.
 
 1. Under Analytics, switch **Share errors** and **Share metrics** off, then save.
-2. Approve the permissions. Leave "Allow write access" off.
+2. Approve the permissions for ONE library, not all of them. Leave "Allow write access"
+   off.
 3. Toggle the plugin on.
 4. Redeploy (`task deploy:service -- --tags navidrome --limit n5pro_docker`). The run
    asserts the settings.
 
-**Upgrade.** Set `navidrome_musixmatch_version` and `navidrome_musixmatch_sha256` together,
-from the release's `.sha256` asset, then deploy. Watchtower never updates plugins. With
-`ND_PLUGINS_AUTORELOAD=true`, Navidrome picks up the new file without a restart, but
-**disables the plugin** on any file change. Re-enable it in the UI; the settings are
-kept.
+**Upgrade.** Download the new release's `.ndp` and check where it came from with
+`gh attestation verify navidrome-musixmatch-plugin.ndp -R Myzel394/navidrome-musixmatch-plugin`
+(the release's `.sha256` file sits next to the binary, so it proves integrity, not
+origin). Then set `navidrome_musixmatch_version` and `navidrome_musixmatch_sha256`
+together and deploy. Watchtower never updates plugins. With `ND_PLUGINS_AUTORELOAD=true`,
+Navidrome picks up the new file without a restart, but **disables the plugin** on any
+file change, and that deploy's analytics check passes because the plugin is disabled.
+Re-enable it in the UI (the settings are kept), then redeploy so the checks see it
+enabled.
 
 ## Backups and rollback
 

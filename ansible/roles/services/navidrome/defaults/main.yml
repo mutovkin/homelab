@@ -97,10 +97,12 @@ navidrome_scan_ignore:
 navidrome_scan_ignore_writer: n5pro
 navidrome_scan_ignore_mount: music
 
-# Musixmatch lyrics plugin (#347), installed by tasks/plugins.yml. Navidrome derives a
-# plugin's ID from its FILENAME (<id>.ndp), and ND_LYRICSPRIORITY names that ID, so the
-# file is always written as `<navidrome_musixmatch_id>.ndp`. Watchtower never touches
-# plugins: bump version + sha256 together, from the release's published .sha256 asset.
+# Musixmatch lyrics plugin (#347): installed by tasks/main.yml (pinned get_url), verified
+# after the deploy by tasks/plugins.yml. Navidrome derives a plugin's ID from its
+# FILENAME (<id>.ndp), and ND_LYRICSPRIORITY names that ID, so the file is always written
+# as `<navidrome_musixmatch_id>.ndp`. Watchtower never touches plugins: bump version +
+# sha256 together, after `gh attestation verify` of the downloaded asset (README
+# "Plugins"; the release's .sha256 sits beside the binary and proves no origin).
 # A new file disables the plugin in Navidrome until it is re-enabled (README "Plugins").
 navidrome_plugins_dir: "{{ navidrome_data_dir }}/plugins"
 navidrome_musixmatch_id: navidrome-musixmatch-plugin
@@ -117,14 +119,22 @@ navidrome_musixmatch_required_hosts:
   - apic-desktop.musixmatch.com
   - bugs.myzel394.app
   - www.musixmatch.com
+# The manifest's permission KEYS, exactly. The host check above covers http only; a
+# version that adds websocket (its own host list), scheduler, storage or taskqueue must
+# fail too, and Navidrome keeps the old grants when the file changes.
+navidrome_musixmatch_permissions: [cache, http, library]
 # The maintainer's analytics endpoint. Its two settings default to ON and failed lookups
-# send artist/title, so the container resolves it to loopback (compose extra_hosts):
-# Navidrome's plugin netguard refuses a NAMED host that resolves to a loopback address,
-# whatever the plugin's settings say. The role also asserts both settings are off.
+# send artist, title, album, MusicBrainz ID and sanitized logs, so the container
+# resolves it to loopback (compose extra_hosts): Navidrome 0.64.2's plugin netguard
+# refuses a NAMED host that resolves to a loopback address (argued from source, not yet
+# seen refusing live). The role also asserts both settings are off once it is enabled.
 navidrome_musixmatch_analytics_host: bugs.myzel394.app
 navidrome_musixmatch_analytics_settings:
   - analytics_share_errors
   - analytics_share_metrics
+# Writes fetched lyrics next to the track. Default OFF in the plugin; it must never be
+# stored as true (the libraries are read-only mounts as well).
+navidrome_musixmatch_sidecar_setting: write_fetched_lyrics_as_sidecar_file
 # Navidrome 0.64.2's default order with the plugin LAST: sidecar files and embedded
 # lyrics always win; Musixmatch is asked only when the library has none.
 navidrome_lyrics_priority: ".ttml,.yaml,.yml,.elrc,.lrc,.srt,.txt,embedded,{{ navidrome_musixmatch_id }}"

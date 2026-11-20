@@ -154,9 +154,13 @@
     owner: "{{ navidrome_uid }}"
     group: "{{ navidrome_gid }}"
     mode: "0700"
+  register: navidrome_plugins_dir_result
 
 # No stat gate: get_url hashes the file on disk, skips a matching one and re-downloads a
 # mismatch (CLAUDE.md, large downloads). The filename IS the plugin ID.
+# get_url fails "Destination ... does not exist" BEFORE its check-mode exit when the
+# directory is missing, so a dry run of a rebuilt (empty) host skips it only when the
+# directory task above would have created it; a converged host still dry-runs it.
 - name: Install the Musixmatch lyrics plugin (pinned)
   ansible.builtin.get_url:
     url: "{{ navidrome_musixmatch_url }}"
@@ -165,6 +169,7 @@
     owner: "{{ navidrome_uid }}"
     group: "{{ navidrome_gid }}"
     mode: "0600"
+  when: not (ansible_check_mode and navidrome_plugins_dir_result is changed)
 
 # --- Claim probe before the deploy (KTD4 lock 1; tasks/claim.yml) ---
 - name: Probe the claim state before the deploy
