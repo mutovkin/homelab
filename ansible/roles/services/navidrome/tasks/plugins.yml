@@ -110,7 +110,8 @@
 
 # The resolver returns the addresses of EVERY line naming the host, and the dialer falls
 # through to the next one when the netguard refuses loopback. So: the host must appear on
-# exactly one (uncommented) line, and that line's address must be 127.0.0.1.
+# exactly one (uncommented) line, and that line's address must be 127.0.0.1. Go's
+# resolver matches names case-insensitively and ignores a trailing dot; so does this.
 - name: Assert the analytics host resolves only to loopback inside the container
   ansible.builtin.assert:
     that:
@@ -124,5 +125,5 @@
     navidrome_analytics_host_addrs: >-
       {{ navidrome_container_hosts.stdout_lines
          | map('regex_replace', '#.*$', '')
-         | select('search', '\s' ~ (navidrome_musixmatch_analytics_host | regex_escape) ~ '(\s|$)')
+         | select('search', '(?i)\s' ~ (navidrome_musixmatch_analytics_host | regex_escape) ~ '\.?(\s|$)')
          | map('split') | map('first') | list }}

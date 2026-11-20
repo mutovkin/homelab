@@ -159,8 +159,9 @@
 # No stat gate: get_url hashes the file on disk, skips a matching one and re-downloads a
 # mismatch (CLAUDE.md, large downloads). The filename IS the plugin ID.
 # get_url fails "Destination ... does not exist" BEFORE its check-mode exit when the
-# directory is missing, so a dry run of a rebuilt (empty) host skips it only when the
-# directory task above would have created it; a converged host still dry-runs it.
+# directory is missing, so a dry run skips it whenever the directory task above reports
+# a change (a missing directory, or one whose owner/mode would be fixed); a converged
+# host still dry-runs it.
 - name: Install the Musixmatch lyrics plugin (pinned)
   ansible.builtin.get_url:
     url: "{{ navidrome_musixmatch_url }}"
