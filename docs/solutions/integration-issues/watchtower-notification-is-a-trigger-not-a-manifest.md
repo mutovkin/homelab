@@ -185,14 +185,29 @@ from the changelog to the runtime. Two checks generalise, and both are cheap:
 
 - **The metric-name set, before vs after.** One query covers every plugin at once and is the
   direct answer to #216 (a name that disappears from an unlabelled aggregate does *not* go
-  NoData). Measured across #282's telegraf recreate: 259 names before, 259 after, none lost.
+  NoData). **Do not take it from `/api/v1/label/__name__/values`.** VictoriaMetrics rounds
+  that endpoint's `start`/`end` to whole days, so each "window" is every name seen that day,
+  and a name the recreate dropped still appears on the after side. Measured in #352: it
+  returned `vector_containers_watched_total` for a pre-apply 10-minute window holding zero
+  samples of it. This recipe (until #352) used that endpoint, so #282's "259 before, 259
+  after, none lost" could not have shown a loss. Query real samples instead, at one instant
+  just before the apply and one ~10 minutes after (both evaluated over the previous 10m):
 
   ```bash
+  # run once per side; diff the two name lists. keep_metric_names is MetricsQL — without it
+  # count_over_time drops __name__ and every row groups under an empty name.
   curl -sG -u "$VM_AUTH_USERNAME:$VM_AUTH_PASSWORD" \
-    --data-urlencode 'match[]={host="eq12_docker"}' \
-    --data-urlencode 'start=...' --data-urlencode 'end=...' \
-    http://localhost:8428/api/v1/label/__name__/values
+    --data-urlencode 'query=group by (__name__) (count_over_time({host="eq12_docker"}[10m]) keep_metric_names)' \
+    --data-urlencode "time=<unix ts>" \
+    http://localhost:8428/api/v1/query | jq -r '.data.result[].metric.__name__' | sort
   ```
+
+  Scope the matcher to the hosts or families the apply touched. Fleet-wide, Home Assistant
+  and TrueNAS names come and go by the dozen, and a series that exists only after an event
+  (`grafana_alerting_notifications_total`, vector's per-host `http_client_errors_total`)
+  will show as lost or new by chance. Attribute every lost or new name by its `host` label
+  before calling it an effect of the bump (#352 nearly blamed the bump for an unrelated
+  n5pro_docker agent's errors).
 
 - **For a database, the collation version** — the failure that object counts are structurally
   blind to. A rebuild moves base OS packages, and a glibc bump can change collation ordering
