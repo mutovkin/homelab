@@ -183,6 +183,12 @@ Hard-won lessons — check here before debugging from scratch.
   notified `postgres:18` was a riscv64-only repush over a byte-identical amd64 image. Compare
   the linux/amd64 config digest from the registry before calling anything a rebuild (and
   before rejecting a rollback tag whose index differs).
+  Compose won't adopt an index-only repush on image grounds (`com.docker.compose.image` records
+  the amd64 MANIFEST, so `recreate: auto` reports `changed=0`; measured with compose 5.7.1 on
+  eq12_docker) while watchtower re-reports it every night (#350, #357). Clear it deliberately
+  with `--tags <svc> -e svc_recreate=always`: never without `--tags`, which force-recreates every
+  stack on the host. Even scoped, it recreates the WHOLE stack. Or leave it for the next real
+  release.
   See [docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md](docs/solutions/integration-issues/watchtower-label-enable-scan-scope.md)
   and [docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md](docs/solutions/integration-issues/watchtower-notification-is-a-trigger-not-a-manifest.md).
 - **nftables `hook input` is inert for docker-published ports.** Docker DNATs published
