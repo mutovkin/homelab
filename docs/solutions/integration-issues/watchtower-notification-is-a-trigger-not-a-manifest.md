@@ -280,12 +280,31 @@ version bump:
 | 2. Platform image | linux/amd64 manifest + config digest | the registry API recipe below |
 | 3. Application | the version inside the image | digest→tag lookup (#282 section), then the running binary |
 
-**Why the false level-1 positive is not free.** The containerd store records the container's
-`.Image` as the index digest, so a deploy that adopted `5a5a84b19854` would have looked to
-compose like a new image and recreated postgres. That is an inference from the measured digests
-(the registry moved before it could be tested): a client-visible restart of the primary database,
-plus the `pg_dumpall` the compose file mandates before any postgres bump
-(`roles/services/postgresql/files/compose.yaml`, #83), for zero bytes of change on amd64.
+**What a level-1-only change does to a deploy: nothing, and watchtower keeps reporting it
+(measured #357, 2026-11-27).** This section first inferred that adopting an index-only repush
+would look to compose like a new image and recreate postgres. When it was finally tested, it
+didn't. Watchtower reported `postgres:18` `64c8b0d31e4a`, a `linux/riscv64`-only repush over the
+running `c69930380214` (same amd64 manifest `32f5fdbf4d27` and config `71351f08f4be`). A normal
+`task deploy:service -- --tags postgresql` pulled it (the local `postgres:18` tag moved to
+`64c8b0d31e4a`) and reported **`changed=0`**. The container kept its ID and its `.Image` of
+`c69930380214`. The reason is in the container labels: compose records
+`com.docker.compose.image` as the **linux/amd64 platform manifest** digest (`32f5fdbf4d27` on
+postgres, and likewise the amd64 manifest on victorialogs and telegraf, compose 5.7.1), while
+watchtower compares the **index** digest that `.Image` holds. The two disagree on exactly this
+case:
+
+| | Compares | Index-only repush |
+| --- | --- | --- |
+| Watchtower | container `.Image` (index) vs pulled index | "Found new image", **every night** (it re-reported `eece53c7c441` on both 11-24 and 11-25) |
+| compose, `recreate: auto` | `com.docker.compose.image` (amd64 manifest) | no change, no recreate |
+
+So a level-1-only change costs no surprise restart. Instead, the nightly report never clears
+while compose has nothing to adopt. To clear it on purpose, recreate the stack:
+`task deploy:service -- --tags <svc> -e svc_recreate=always` (`_deploy`'s
+`recreate:` knob). That recreates **every** service in the stack, not just the one reported (in
+#357, pgAdmin too). For postgres, run the dump and the five checks first, even though nothing
+running changes. Otherwise leave it: the next real release is adopted normally and ends the
+report.
 
 **The rollback check has the same blind spot, in the opposite direction.** After #296,
 `timberio/vector:0.58.0-distroless-static` resolved upstream to index `f41132f36751`, while the
